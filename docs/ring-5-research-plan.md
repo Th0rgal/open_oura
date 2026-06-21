@@ -80,6 +80,40 @@ Read-only characteristic reads returned empty values:
 - `98ed0003-a541-11e4-b6a0-0002a5d5c51b`: empty
 - `98ed0004-a541-11e4-b6a0-0002a5d5c51b`: empty
 
+## First active probes
+
+Captured on 2026-06-21 with phone Bluetooth off and the ring on its charger.
+The client subscribed to all notify-capable characteristics, then wrote requests
+to `98ed0002-a541-11e4-b6a0-0002a5d5c51b`.
+
+### Battery request
+
+- Request: `0c00`
+- Response characteristic: `98ed0003-a541-11e4-b6a0-0002a5d5c51b`
+- Response: `2f022f01`
+- Parsed: extended/auth response, `auth_state=0x01`
+
+This did not return the expected Ring 4 battery response tag `0x0d`. Based on
+the Ring 4 notes, `auth_state=0x01` means authentication error, so battery data
+appears to be auth-gated on this Ring 5 state.
+
+### Firmware request
+
+- Request: `0803000000`
+- Response characteristic: `98ed0003-a541-11e4-b6a0-0002a5d5c51b`
+- Response: `091202010002010301000109032956ac5da2bcc9`
+- Parsed:
+  - Tag: `0x09`
+  - Length: `18`
+  - API version: `2.1.0`
+  - Firmware version: `2.1.3`
+  - Bootloader version: `1.0.1`
+  - Bluetooth stack version: `9.3.41`
+  - MAC bytes: `56 ac 5d a2 bc c9`, matching real BLE MAC
+    `c9:bc:a2:5d:ac:56` when reversed
+
+Firmware metadata is readable without completing app authentication.
+
 ## Low-risk active probes
 
 These should only be attempted after service discovery confirms the likely
