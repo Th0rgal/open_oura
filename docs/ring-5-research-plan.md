@@ -47,6 +47,39 @@ Direct service enumeration attempts against both macOS UUIDs timed out with
 Bleak/CoreBluetooth. Next steps are to repeat while the ring is on the charger
 and the phone Bluetooth remains off, then try a longer connection timeout.
 
+After placing the ring on the charger, the ring re-advertised with a different
+macOS UUID:
+
+- macOS UUID: `5B1AAA7A-7FC7-815D-873F-95FFD7E184B7`
+- Name: initially empty, then `Oura Ring 5`
+- RSSI: `-66` to `-68`
+- Service UUID: `98ed0001-a541-11e4-b6a0-0002a5d5c51b`
+- Manufacturer data: `02b2:04766b01`
+
+Connecting by a `BLEDevice` returned from the same Bleak scan succeeded, while
+connecting by a previously observed macOS UUID string was unreliable.
+
+Enumerated GATT surface:
+
+- MTU: `247`
+- Service `98ed0001-a541-11e4-b6a0-0002a5d5c51b`, handle `16`
+  - Characteristic `98ed0003-a541-11e4-b6a0-0002a5d5c51b`, handle `17`,
+    properties `read,notify`, CCCD handle `19`
+  - Characteristic `98ed0002-a541-11e4-b6a0-0002a5d5c51b`, handle `20`,
+    properties `write-without-response,write`
+  - Characteristic `98ed0004-a541-11e4-b6a0-0002a5d5c51b`, handle `22`,
+    properties `read,write-without-response,write,notify,indicate`, CCCD handle
+    `24`
+  - Characteristic `98ed0005-a541-11e4-b6a0-0002a5d5c51b`, handle `25`,
+    properties `write-without-response,notify`, CCCD handle `27`
+  - Characteristic `98ed0006-a541-11e4-b6a0-0002a5d5c51b`, handle `28`,
+    properties `write-without-response,notify`, CCCD handle `30`
+
+Read-only characteristic reads returned empty values:
+
+- `98ed0003-a541-11e4-b6a0-0002a5d5c51b`: empty
+- `98ed0004-a541-11e4-b6a0-0002a5d5c51b`: empty
+
 ## Low-risk active probes
 
 These should only be attempted after service discovery confirms the likely
