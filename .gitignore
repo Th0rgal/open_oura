@@ -9,3 +9,11 @@ captures/
 *.pcapng
 *.btsnoop
 *.log
+
+# Reverse-engineering work products are large and may include proprietary app code.
+reverse/android/*.xapk
+reverse/android/*.apk
+reverse/android/*page.html
+reverse/android/xapk/
+reverse/android/apktool-main/
+reverse/android/jadx-main/
