@@ -168,6 +168,107 @@ pub fn req_set_feature_mode(feature: u8, mode: u8) -> Vec<u8> {
     vec![0x2f, 0x03, 0x22, feature, mode]
 }
 
+/// Real-time measurement type bit flags for [`req_set_realtime`].
+pub mod realtime {
+    /// Live accelerometer x/y/z stream (the "wave to test motion" path).
+    pub const ACM: u32 = 0x20;
+    /// On-demand live PPG/HR sample.
+    pub const ON_DEMAND: u32 = 0x200;
+    /// 2 Hz mode flag.
+    pub const TWO_HERTZ: u32 = 0x400;
+    /// ACM measurement-indication response tag.
+    pub const ACM_RESPONSE_TAG: u8 = 0x33;
+}
+
+/// Start a time-boxed real-time measurement stream (`0x06`): a `u32` type bitmask
+/// (see [`realtime`]), a `u16` max duration in **minutes** (the ring auto-stops
+/// when it expires), and a `u8` delay.
+pub fn req_set_realtime(bitmask: u32, max_duration_min: u16, delay: u8) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(7);
+    payload.extend_from_slice(&bitmask.to_le_bytes());
+    payload.extend_from_slice(&max_duration_min.to_le_bytes());
+    payload.push(delay);
+    Packet::new(0x06, payload).encode()
+}
+
+/// Stop all real-time measurements (`06 04 00000000`, bitmask 0 = off).
+pub fn req_realtime_off() -> Vec<u8> {
+    Packet::new(0x06, vec![0, 0, 0, 0]).encode()
+}
+
+/// RData bulk raw-sampler operations (`0x03`). This writes a persistent sampling
+/// session to the ring's flash, so the lifecycle is mandatory:
+/// `configure` → drain with `get_page` → `stop` → `clear`.
+pub mod rdata {
+    /// Raw signal modes the ring can sample (`RDataRequestDataType`), by wire code.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[repr(u8)]
+    pub enum DataType {
+        None = 0,
+        Ppg250Hz = 1,
+        Ppg125Hz = 2,
+        Acm8g50Hz = 3,
+        Acm2g50Hz = 4,
+        Gyro2000_50Hz = 5,
+        Temp1Min = 6,
+        Temp10s = 7,
+        Metadata = 8,
+        Ppg50Hz = 9,
+        Temp10Hz = 10,
+        Acm4g50Hz = 11,
+        Gyro500_50Hz = 12,
+        Gyro125_50Hz = 13,
+        Acm8g10Hz = 19,
+        Acm2g10Hz = 20,
+        Gyro2000_10Hz = 21,
+        Acm4g10Hz = 27,
+        Gyro500_10Hz = 28,
+        Gyro125_10Hz = 29,
+    }
+
+    pub const SUB_GET_PAGE: u8 = 1;
+    pub const SUB_CONFIGURE: u8 = 2;
+    pub const SUB_STOP: u8 = 3;
+    pub const SUB_CLEAR: u8 = 4;
+    pub const SUB_STATE: u8 = 5;
+}
+
+/// Query RData collection state (`030105`) — read-only, safe.
+pub fn req_rdata_state() -> Vec<u8> {
+    vec![0x03, 0x01, rdata::SUB_STATE]
+}
+
+/// Stop an RData collection session (`030103`).
+pub fn req_rdata_stop() -> Vec<u8> {
+    vec![0x03, 0x01, rdata::SUB_STOP]
+}
+
+/// Clear RData session/data from flash (`030104`).
+pub fn req_rdata_clear() -> Vec<u8> {
+    vec![0x03, 0x01, rdata::SUB_CLEAR]
+}
+
+/// Request an RData page by index (`0303 01 <page u16 LE>`).
+pub fn req_rdata_get_page(page: u16) -> Vec<u8> {
+    let mut payload = vec![rdata::SUB_GET_PAGE];
+    payload.extend_from_slice(&page.to_le_bytes());
+    Packet::new(0x03, payload).encode()
+}
+
+/// Configure/start an RData session for one or more signal types. Layout matches
+/// the app's `RDataStart`: `03 <len> 02 <startTime u32 LE> <currentTime u32 LE>
+/// <type bytes...>` (length byte = type count + 9).
+pub fn req_rdata_configure(types: &[rdata::DataType], start_unix: u32, current_unix: u32) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(types.len() + 9);
+    payload.push(rdata::SUB_CONFIGURE);
+    payload.extend_from_slice(&start_unix.to_le_bytes());
+    payload.extend_from_slice(&current_unix.to_le_bytes());
+    for t in types {
+        payload.push(*t as u8);
+    }
+    Packet::new(0x03, payload).encode()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,6 +290,27 @@ mod tests {
     fn get_event_matches_known_hex() {
         // start=0, max=8, flags=-1 -> 10 09 00000000 08 ffffffff
         assert_eq!(hex::encode(req_get_event(0, 8, -1)), "10090000000008ffffffff");
+    }
+
+    #[test]
+    fn realtime_requests_match_known_hex() {
+        // ACM (0x20), 1 minute, delay 0 -> 06 07 20000000 0100 00
+        assert_eq!(hex::encode(req_set_realtime(realtime::ACM, 1, 0)), "060720000000010000");
+        // off -> 06 04 00000000
+        assert_eq!(hex::encode(req_realtime_off()), "060400000000");
+    }
+
+    #[test]
+    fn rdata_requests_match_known_hex() {
+        assert_eq!(hex::encode(req_rdata_state()), "030105");
+        assert_eq!(hex::encode(req_rdata_stop()), "030103");
+        assert_eq!(hex::encode(req_rdata_clear()), "030104");
+        assert_eq!(hex::encode(req_rdata_get_page(0)), "0303010000");
+        // configure with a single NONE type, zero timestamps -> captured zeroed-start
+        assert_eq!(
+            hex::encode(req_rdata_configure(&[rdata::DataType::None], 0, 0)),
+            "030a02000000000000000000"
+        );
     }
 
     #[test]

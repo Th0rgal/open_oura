@@ -49,8 +49,15 @@ oura --key-file key.hex latest
 # Live heart rate stream for 30s (ring must be worn & measuring)
 oura --key-file key.hex live-hr --seconds 30 [--raw]
 
-# Offline: event counts already stored in the database
+# Live accelerometer stream — wave your hand to see motion (ACM real-time)
+oura --key-file key.hex accel --seconds 15
+
+# RData bulk sampler control: state (read) / stop / clear (teardown)
+oura --key-file key.hex rdata state
+
+# Offline: event counts; re-decode stored raw bodies with current decoders
 oura --db oura.db events
+oura --db oura.db redecode
 ```
 
 > After pairing a ring yourself, its measurement features (daytime HR, SpO2…) are
@@ -103,3 +110,60 @@ session-stateful variants (`green_ibi_and_amp`, `spo2_ibi_and_amplitude`), the
 opaque `sleep_summary_1..4` fields, full `motion_event/period`, `real_steps`, and
 the ~40 `debug_data` statistics subtypes. Adding any of these never needs a
 re-sync — run `oura redecode`.
+
+## Live raw-data channels (not history events)
+
+Beyond history events, the ring exposes live/raw signals over two other channels.
+Both are app-initiated and **power-hungry, so teardown is part of the operation**:
+
+- **Real-time measurements** (`0x06`): `accel` enables the **ACM** accelerometer
+  stream (`bitmask 0x20`, time-boxed in minutes so the ring auto-stops; we also
+  send an explicit OFF on exit). Verified live at ~50 Hz. The `ON_DEMAND` PPG
+  variant (`0x200`) is defined but not wired into a command yet.
+- **RData** bulk sampler (`0x03`): a *persistent flash session* that does **not**
+  self-stop — lifecycle is `configure → get_page (drain) → stop → clear`. We
+  implement and unit-test the request builders (configure/get-page formats taken
+  from the app's `RDataStart`/`RDataGetPage`), and the `rdata` command exposes the
+  safe/teardown actions (`state`, `stop`, `clear`). It can sample raw PPG (50–250
+  Hz), accelerometer, **gyroscope** (125–2000 dps; never used in normal operation),
+  and temperature. **Starting a collection is intentionally not exposed** — see
+  limitations.
+
+## Coverage & limitations
+
+Honest status of what's trustworthy vs. provisional:
+
+**Verified** — matched byte-exact to the native parser and/or validated on real
+captures/live: device info, battery, auth/pair, event sync, `temp_event`/
+`temp_period`, `green_ibi_quality` (`0x80` → heart rate, ~52 bpm resting),
+`time_sync`, `state_change`/`wear`, debug ASCII, live **ACM** stream, RData `state`.
+
+**Best-effort** — ported from the decompiled logic but **not yet confirmed against
+real bytes** (no such data captured yet, or no ground truth):
+- `hrv_event` — layout is clear, but no HRV event captured yet (needs the ring to
+  measure / sleep).
+- `ibi_and_amplitude_event` (`0x60`) — intricate bit-packing; **no real `0x60`
+  capture yet** to confirm.
+- `activity_information` MET scale (`×0.1` / `12.8+(b-128)×0.2`) — taken from the
+  decompile; no per-event ground truth (the trends CSV is daily aggregates).
+- `spo2_event`, `sleep_phase_*`, `ambient`/`ehr` u16 — logic clear, awaiting real
+  worn/asleep data.
+
+**Assumptions** baked in: event-body timestamps are the envelope's ring time
+(deciseconds), not the native's resolved wall-clock; batched events' per-sample
+times (HRV 5 min, etc.) are documented but not emitted per-sample yet. ACM counts
+are raw (~1000/g at rest); no g-unit conversion is applied.
+
+**Deferred** (catalogued, not implemented):
+- `green_ibi_and_amp` (`0x71`), `spo2_ibi_and_amplitude` (`0x6e`) — bit-packed +
+  session-stateful (need carried state for corrected timestamps).
+- `sleep_summary_1..4` — fields are opaque/packed in the decompile; best decoded
+  against an overnight capture cross-checked with the trends CSV.
+- `motion_event`/`motion_period` full fields, `real_steps`, `on_demand_meas`,
+  `aohr`, and the ~40 `debug_data` statistics subtypes.
+- **RData collection start + page decode**: starting writes a persistent flash
+  session, and the page payload format lives in `libecore`/native code we haven't
+  decoded — so we expose only read/teardown, not capture, to avoid leaving the ring
+  sampling into flash.
+- **Sleep/HR/SpO2 validation**: these light up only after a worn-overnight sync;
+  the decoders are in place but unproven until then.

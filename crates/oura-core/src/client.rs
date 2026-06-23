@@ -19,6 +19,21 @@ pub struct HeartRateSample {
     pub ibi_ms: u16,
 }
 
+/// One live accelerometer sample (signed raw counts) from the ACM stream.
+#[derive(Clone, Copy, Debug)]
+pub struct AcmSample {
+    pub x: i16,
+    pub y: i16,
+    pub z: i16,
+}
+
+impl AcmSample {
+    /// Vector magnitude, useful for motion/wave detection.
+    pub fn magnitude(&self) -> f64 {
+        ((self.x as f64).powi(2) + (self.y as f64).powi(2) + (self.z as f64).powi(2)).sqrt()
+    }
+}
+
 /// Latest cached feature values read on demand (not a live stream).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LatestValues {
@@ -318,6 +333,26 @@ impl<T: Transport> OuraClient<T> {
         }
     }
 
+    /// Query the RData collection state (read-only). Returns `(subtag, status)`.
+    pub async fn rdata_state(&self) -> Result<(u8, u8)> {
+        let packets = self.request(&protocol::req_rdata_state()).await?;
+        Self::find(&packets, 0x03)
+            .and_then(|p| Some((*p.payload.first()?, *p.payload.get(1)?)))
+            .ok_or_else(|| Error::Protocol("no RData state response (auth required?)".into()))
+    }
+
+    /// Stop an active RData collection session (part of mandatory teardown).
+    pub async fn rdata_stop(&self) -> Result<()> {
+        self.request(&protocol::req_rdata_stop()).await?;
+        Ok(())
+    }
+
+    /// Clear the RData session/data from the ring's flash (part of teardown).
+    pub async fn rdata_clear(&self) -> Result<()> {
+        self.request(&protocol::req_rdata_clear()).await?;
+        Ok(())
+    }
+
     /// Enable live heart rate (daytime HR, `CONNECTED_LIVE`) and invoke `on_sample`
     /// for each valid beat for up to `duration`. Restores `AUTOMATIC` mode on exit.
     /// The ring must be worn for samples to appear.
@@ -371,6 +406,73 @@ impl<T: Transport> OuraClient<T> {
             .await;
         Ok(())
     }
+
+    /// Stream live accelerometer samples (the "wave to test motion" path): enable
+    /// the ACM real-time measurement for `duration` and invoke `on_sample` for each
+    /// x/y/z reading. The request is time-boxed (minutes) so the ring auto-stops,
+    /// and we also send an explicit OFF on exit. The ring must be worn/moving.
+    pub async fn stream_accelerometer<F>(&self, duration: Duration, mut on_sample: F) -> Result<()>
+    where
+        F: FnMut(AcmSample),
+    {
+        let mut rx = self.transport.subscribe();
+        while rx.try_recv().is_ok() {}
+
+        let minutes = (duration.as_secs().div_ceil(60)).max(1) as u16;
+        self.transport
+            .write(&protocol::req_set_realtime(
+                protocol::realtime::ACM,
+                minutes,
+                0,
+            ))
+            .await?;
+
+        let deadline = tokio::time::Instant::now() + duration;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(remaining, rx.recv()).await {
+                Ok(Ok(frame)) => {
+                    for sample in parse_acm_frame(&frame) {
+                        on_sample(sample);
+                    }
+                }
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+                _ => break,
+            }
+        }
+
+        // Mandatory teardown: real-time measurements do not self-stop reliably.
+        let _ = self.transport.write(&protocol::req_realtime_off()).await;
+        Ok(())
+    }
+}
+
+/// Parse an ACM measurement indication (response tag `0x33`) into up to 2 samples.
+///
+/// Frame: `[0]=0x33 [1]=len [2]=sampleRate [3]=seq [4..10]=x,y,z [10..16]=x,y,z?`,
+/// each axis a signed `i16` little-endian.
+fn parse_acm_frame(frame: &[u8]) -> Vec<AcmSample> {
+    let mut out = Vec::new();
+    if frame.len() < 10 || frame[0] != protocol::realtime::ACM_RESPONSE_TAG {
+        return out;
+    }
+    let s = |o: usize| i16::from_le_bytes([frame[o], frame[o + 1]]);
+    out.push(AcmSample {
+        x: s(4),
+        y: s(6),
+        z: s(8),
+    });
+    if frame.len() >= 16 {
+        out.push(AcmSample {
+            x: s(10),
+            y: s(12),
+            z: s(14),
+        });
+    }
+    out
 }
 
 /// Compute bpm from an inter-beat interval, ignoring implausible values.
@@ -436,6 +538,18 @@ mod tests {
             .try_into()
             .unwrap();
         assert_eq!(client.authenticate(&key).await.unwrap(), AuthResult::Success);
+    }
+
+    #[test]
+    fn acm_frame_decodes_two_samples() {
+        // 33 0c 32 01 | 0100 0200 0300 | 0400 0500 0600
+        let frame = [
+            0x33, 0x0c, 0x32, 0x01, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0,
+        ];
+        let s = parse_acm_frame(&frame);
+        assert_eq!(s.len(), 2);
+        assert_eq!((s[0].x, s[0].y, s[0].z), (1, 2, 3));
+        assert_eq!((s[1].x, s[1].y, s[1].z), (4, 5, 6));
     }
 
     #[test]

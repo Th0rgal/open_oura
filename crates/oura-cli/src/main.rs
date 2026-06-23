@@ -70,6 +70,19 @@ enum Command {
     Events,
     /// Re-run decoders over already-stored raw event bodies (offline).
     Redecode,
+    /// RData bulk raw-sampler control: `state` (read), `stop`/`clear` (teardown).
+    /// Starting a collection is intentionally not exposed here — it writes a
+    /// persistent flash session that must be torn down (see docs/native-decoder.md).
+    Rdata {
+        /// One of: state | stop | clear
+        #[arg(default_value = "state")]
+        action: String,
+    },
+    /// Stream live accelerometer (ACM) — wave your hand to see motion.
+    Accel {
+        #[arg(long, default_value_t = 15)]
+        seconds: u64,
+    },
     /// Show feature status (HR, SpO2…) and optionally enable measurement.
     Features {
         /// Enable daytime-HR measurement (mode automatic).
@@ -178,6 +191,8 @@ async fn main() -> Result<()> {
         Command::Sync { sync_time } => cmd_sync(&cli, &key, *sync_time).await,
         Command::Latest => cmd_latest(&cli, &key).await,
         Command::LiveHr { seconds, raw } => cmd_live_hr(&cli, &key, *seconds, *raw).await,
+        Command::Accel { seconds } => cmd_accel(&cli, &key, *seconds).await,
+        Command::Rdata { action } => cmd_rdata(&cli, &key, action).await,
         Command::Events => cmd_events(&cli).await,
         Command::Redecode => {
             let store = Store::open(&cli.db)?;
@@ -434,6 +449,63 @@ async fn cmd_live_hr(cli: &Cli, key: &Option<[u8; 16]>, seconds: u64, raw: bool)
 
     if count == 0 {
         println!("No beats captured. Make sure the ring is worn.");
+    }
+    let _ = client.transport().disconnect().await;
+    Ok(())
+}
+
+async fn cmd_accel(cli: &Cli, key: &Option<[u8; 16]>, seconds: u64) -> Result<()> {
+    let client = connect(cli).await?;
+    maybe_auth(&client, key).await?;
+
+    println!("Streaming accelerometer for {seconds}s — wave your hand!");
+    let mut count = 0u32;
+    let mut mags: Vec<f64> = Vec::new();
+    client
+        .stream_accelerometer(Duration::from_secs(seconds), |s| {
+            count += 1;
+            let m = s.magnitude();
+            mags.push(m);
+            if count.is_multiple_of(10) {
+                println!("  x={:>6} y={:>6} z={:>6}  |a|={:.0}", s.x, s.y, s.z, m);
+            }
+        })
+        .await?;
+
+    if count == 0 {
+        println!("No samples. Make sure the ring is worn.");
+    } else {
+        let min = mags.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max = mags.iter().cloned().fold(0.0, f64::max);
+        let moved = (max - min) > 2000.0;
+        println!(
+            "{count} samples; |a| range {min:.0}..{max:.0} — {}",
+            if moved { "motion detected ✋" } else { "mostly still" }
+        );
+    }
+    let _ = client.transport().disconnect().await;
+    Ok(())
+}
+
+async fn cmd_rdata(cli: &Cli, key: &Option<[u8; 16]>, action: &str) -> Result<()> {
+    let client = connect(cli).await?;
+    maybe_auth(&client, key).await?;
+    match action {
+        "state" => {
+            let (subtag, status) = client.rdata_state().await?;
+            println!("RData state: subtag={subtag} status={status} (0 = idle/none active)");
+        }
+        "stop" => {
+            client.rdata_stop().await?;
+            println!("RData stop sent.");
+        }
+        "clear" => {
+            client.rdata_clear().await?;
+            println!("RData clear sent.");
+        }
+        other => {
+            anyhow::bail!("unknown rdata action '{other}' (use state | stop | clear)");
+        }
     }
     let _ = client.transport().disconnect().await;
     Ok(())
