@@ -61,10 +61,22 @@ those are server-side and out of scope by design (see `docs/data-recovery-map.md
 
 ## Event decoding status
 
-The history-event **envelope** (tag, timestamp, type name) is fully decoded, and a
-few bodies (debug ASCII) are parsed. The per-event **body** field layouts are
-produced by the ring's native `libringeventparser.so` and are not present in the
-decompiled app, so bodies are stored **raw and lossless**. New body decoders can be
-added in `oura-core`'s `events::decode_body` without re-syncing, since the raw
-bytes are retained. Recovering those layouts (native RE or capture-correlation) is
-the natural next step.
+The history-event **envelope** (tag, timestamp, type name) is fully decoded. The
+per-event **body** field layouts are produced by the ring's native
+`libringeventparser.so` and are not present in the decompiled app, so each body is
+stored **raw and lossless** and decoded opportunistically by
+`oura-core`'s `events::decode_body`. Bodies recovered so far by correlating real
+captured bytes against the protobuf field shapes (each backed by a test):
+
+| Event | Layout | Decoded as |
+| --- | --- | --- |
+| `temp_event` | 7× `i16` LE, centi-°C | seven probe temperatures (°C) |
+| `temp_period`, `sleep_temp_event` | `i16` LE, centi-°C | temperature (°C) |
+| `time_sync` | `u32` LE | unix timestamp |
+| `state_change`, `wear_event` | state byte + ASCII | state + text |
+| `debug_event`, `debug_data` | ASCII | text |
+
+Still raw, pending a **worn-ring** capture (the test ring was on its charger, so
+HR/PPG/motion/activity bodies were noise or zero): `ibi_event`, `hrv_event`,
+`spo2_event`, sleep summaries/phases, `activity_information`, `motion_event`,
+`ppg_amplitude`. Adding a decoder never needs a re-sync — the raw bytes are kept.

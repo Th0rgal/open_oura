@@ -4,10 +4,11 @@
 //! 4-byte little-endian timestamp (deciseconds) followed by an event-specific
 //! body. The *body* layout is produced by the ring's native parser
 //! (`libringeventparser.so`) and is NOT part of the decompiled Java, so this
-//! crate stores every event body **raw and lossless** and decodes only the
-//! envelope plus the handful of bodies whose format is known (debug ASCII,
-//! ring-start metadata). New decoders can be added in [`decode_body`] without
-//! re-syncing, because the raw bytes are always retained.
+//! crate stores every event body **raw and lossless** and decodes the envelope
+//! plus the bodies whose format has been recovered by correlating captured bytes
+//! against the protobuf field shapes (temperatures, time-sync, state/wear text,
+//! debug ASCII). New decoders can be added in [`decode_body`] without re-syncing,
+//! because the raw bytes are always retained.
 
 use serde::{Deserialize, Serialize};
 
@@ -48,24 +49,73 @@ impl RingEvent {
     }
 }
 
-/// Best-effort decode of an event body. Most bodies are intentionally left raw
+/// Best-effort decode of an event body. Unknown bodies are intentionally left raw
 /// (see module docs). Returns `None` when we don't (yet) understand the layout.
+///
+/// The layouts below were recovered by correlating real captured bodies against
+/// the protobuf field shapes; each is covered by a test using captured bytes.
 fn decode_body(tag: u8, body: &[u8]) -> Option<serde_json::Value> {
     match tag {
+        // time_sync: u32 LE unix timestamp (plus trailing timezone bytes).
+        0x42 => decode_time_sync(body),
         // debug_event / debug_data: ASCII strings (e.g. "git;ca22327", "SNH;4369").
-        0x43 | 0x61 => {
-            let text = String::from_utf8_lossy(body)
-                .trim_end_matches('\0')
-                .trim()
-                .to_string();
-            if text.is_empty() {
-                None
-            } else {
-                Some(serde_json::json!({ "ascii": text }))
-            }
-        }
+        0x43 | 0x61 => decode_ascii(body),
+        // state_change / wear_event: one state byte then an ASCII description.
+        0x45 | 0x53 => decode_state_text(body),
+        // temp_event (7 probes), temp_period, sleep_temp_event: int16 LE centi-°C.
+        0x46 | 0x69 | 0x75 => decode_temperatures(body),
         _ => None,
     }
+}
+
+fn decode_ascii(body: &[u8]) -> Option<serde_json::Value> {
+    let text = String::from_utf8_lossy(body)
+        .trim_end_matches('\0')
+        .trim()
+        .to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(serde_json::json!({ "ascii": text }))
+    }
+}
+
+fn decode_time_sync(body: &[u8]) -> Option<serde_json::Value> {
+    if body.len() < 4 {
+        return None;
+    }
+    let unix = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
+    Some(serde_json::json!({ "unix_time": unix }))
+}
+
+fn decode_state_text(body: &[u8]) -> Option<serde_json::Value> {
+    if body.is_empty() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&body[1..])
+        .trim_end_matches('\0')
+        .trim()
+        .to_string();
+    Some(serde_json::json!({ "state": body[0], "text": text }))
+}
+
+/// Decode a body of one or more little-endian `i16` temperatures in centi-degrees
+/// Celsius. Returns `None` if the length is odd or any value falls outside a
+/// plausible sensor range, leaving the body stored raw rather than mis-decoded.
+fn decode_temperatures(body: &[u8]) -> Option<serde_json::Value> {
+    if body.is_empty() || body.len() % 2 != 0 {
+        return None;
+    }
+    let mut temps = Vec::with_capacity(body.len() / 2);
+    for c in body.chunks_exact(2) {
+        let centi = i16::from_le_bytes([c[0], c[1]]);
+        let celsius = centi as f64 / 100.0;
+        if !(-40.0..=85.0).contains(&celsius) {
+            return None;
+        }
+        temps.push((celsius * 100.0).round() / 100.0);
+    }
+    Some(serde_json::json!({ "temps_c": temps }))
 }
 
 /// Map an event tag to its name. Mirrors the Android app's event taxonomy.
@@ -181,5 +231,44 @@ mod tests {
         let ev = RingEvent::from_packet(&p);
         assert_eq!(ev.name, "debug_event");
         assert_eq!(ev.decoded.unwrap()["ascii"], "git;abc");
+    }
+
+    #[test]
+    fn decodes_temp_event_seven_probes() {
+        // Captured temp_event body: 7x int16 LE centi-degrees.
+        let body = hex::decode("1c0dec0b8d0aa90e1f0dae0c9c0c").unwrap();
+        let v = decode_temperatures(&body).unwrap();
+        let temps = v["temps_c"].as_array().unwrap();
+        assert_eq!(temps.len(), 7);
+        assert_eq!(temps[0].as_f64().unwrap(), 33.56);
+        assert_eq!(temps[3].as_f64().unwrap(), 37.53);
+    }
+
+    #[test]
+    fn decodes_temp_period_single() {
+        // Captured temp_period body: one int16 LE centi-degree value.
+        let v = decode_temperatures(&hex::decode("6c0d").unwrap()).unwrap();
+        assert_eq!(v["temps_c"][0].as_f64().unwrap(), 34.36);
+    }
+
+    #[test]
+    fn rejects_implausible_temperatures() {
+        // Garbage out of sensor range stays raw (None) rather than mis-decoding.
+        assert!(decode_temperatures(&[0xff, 0x7f]).is_none());
+    }
+
+    #[test]
+    fn decodes_time_sync_timestamp() {
+        // Captured time_sync body: u32 LE unix time then timezone bytes.
+        let v = decode_time_sync(&hex::decode("4fd2376a0000000000").unwrap()).unwrap();
+        assert_eq!(v["unix_time"].as_u64().unwrap(), 1_782_043_215);
+    }
+
+    #[test]
+    fn decodes_state_change_text() {
+        // Captured state_change body: state byte 0x01 then ASCII "chg. stopped".
+        let v = decode_state_text(&hex::decode("016368672e2073746f70706564").unwrap()).unwrap();
+        assert_eq!(v["state"].as_u64().unwrap(), 1);
+        assert_eq!(v["text"].as_str().unwrap(), "chg. stopped");
     }
 }
