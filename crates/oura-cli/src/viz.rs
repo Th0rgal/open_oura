@@ -153,7 +153,8 @@ async fn handle(
         }
         _ => {
             let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
+                 Cache-Control: no-store\r\nContent-Length: {}\r\n\r\n{}",
                 INDEX_HTML.len(),
                 INDEX_HTML
             );
@@ -211,6 +212,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
  <div class="row"><span>still thresh.</span><input id="zupt" type="range" min="1" max="30" value="4"></div>
  <div class="row"><span>counts/g</span><input id="cpg" type="range" min="500" max="2000" value="1024"></div>
  <div class="row"><span>path scale</span><input id="pscale" type="range" min="5" max="200" value="40"></div>
+ <div class="row"><span>invert vertical ↕</span><input id="flipy" type="checkbox"></div>
  <button id="reset">Reset path</button>
  <div class="warn">trajectory drifts (no live gyro) — drag to rotate view</div>
 </div>
@@ -249,8 +251,8 @@ let G=null,vel=[0,0,0],pos=[0,0,0],still=0,trail=[],frames=0,rate=0,mag=0,pitch=
 function feed(d){
  const raw=[d.x,d.y,d.z];
  G=G?add(sc(G,1-set.alpha),sc(raw,set.alpha)):raw.slice();
- // accelerometer reads +1g along "up" at rest, so up = +G
- const up=norm(G); mag=len(raw)/set.cpg;
+ // accelerometer reads +1g along "up" at rest (up = +G); the toggle flips it
+ const up=norm(sc(G, $('flipy').checked?-1:1)); mag=len(raw)/set.cpg;
  pitch=Math.atan2(up[2],up[1])*180/Math.PI; roll=Math.atan2(up[0],up[1])*180/Math.PI;
  // integrate motion in a gravity-referenced frame (up = world Y) so vertical hand
  // motion maps to screen-vertical regardless of how the ring is held (yaw unknown)
