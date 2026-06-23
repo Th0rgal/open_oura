@@ -24,6 +24,18 @@ before assuming compatibility.
 - Capture raw hex and timestamps for every experiment.
 - Keep unknown writes behind explicit flags.
 
+## Rust client
+
+An independent, cloud-free CLI that reads data straight from the ring lives under
+`crates/` (`oura-core` library + `oura` binary). It connects, authenticates, and
+drains the ring's history events into SQLite, and can stream live heart rate. See
+[`crates/README.md`](crates/README.md). Tested live against a Ring 3 Horizon.
+
+```bash
+cargo build --release
+./target/release/oura scan
+```
+
 ## Planned layout
 
 - `docs/` - protocol notes, experiments, captures, and packet tables.

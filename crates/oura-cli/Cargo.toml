@@ -1,0 +1,20 @@
+[package]
+name = "oura-cli"
+description = "Command-line client for reading data directly from an Oura ring"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "oura"
+path = "src/main.rs"
+
+[dependencies]
+oura-core = { path = "../oura-core" }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+hex = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

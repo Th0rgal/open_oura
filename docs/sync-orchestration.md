@@ -83,4 +83,3 @@ incremental. `sleepAnalysisProgress` is surfaced as progress only, not a block.
    the cursor; stop when `bytes_left == 0`.
 
 Do not issue any RData (0x03) for a normal pull.
-</content>

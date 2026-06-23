@@ -3,6 +3,14 @@
 __pycache__/
 *.py[cod]
 
+# Rust build artifacts
+/target/
+
+# Local SQLite databases may contain device serials and personal ring data.
+*.db
+*.db-journal
+*.sqlite
+
 # Local BLE captures may include serials, MAC-derived identifiers, or auth data.
 captures/
 *.pcap

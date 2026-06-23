@@ -97,4 +97,3 @@ Recoverable from the ring without Oura's cloud: raw PPG/accel/gyro/temp, live HR
 (IBI->BPM), SpO2, IBI/HRV, on-device sleep stages, MET levels + steps, battery,
 device info. NOT recoverable: the 0-100 scores and workout classification --
 those are Oura-cloud-only and would have to be reimplemented locally.
-</content>
