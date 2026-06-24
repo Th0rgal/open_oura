@@ -86,6 +86,10 @@ fn decode_body(tag: u8, body: &[u8]) -> Option<serde_json::Value> {
         0x4b | 0x4e | 0x5a => decode_sleep_phases(body),
         // motion_event: orientation + per-axis average motion + intensity.
         0x47 => decode_motion(body),
+        // sleep_acm_period: 6 accelerometer MAD statistics (fixed-point floats).
+        0x72 => decode_sleep_acm_period(body),
+        // spo2_r_pi_event (Ring 5 tag 0x8b): SpO2 R-ratio + perfusion index.
+        0x8b => decode_spo2_r_pi(body),
         // ibi_and_amplitude_event: 14-byte packed 6× (IBI delta ms, amplitude).
         0x60 => decode_ibi_amplitude(body),
         // alert_event: single alert-type byte.
@@ -266,7 +270,53 @@ fn decode_ibi_amplitude(body: &[u8]) -> Option<serde_json::Value> {
     ];
     let shift = if (b[13] & 0x0f) == 7 { 0 } else { (b[13] & 0x0f) + 1 };
     let amplitude: Vec<u32> = (0..6).map(|k| ((b[6 + k] >> 1) as u32) << shift).collect();
-    Some(serde_json::json!({ "ibi_ms": ibi_ms, "amplitude": amplitude }))
+    // heart rate from plausible beats (validated on overnight data ~ median 41 bpm)
+    let hr_bpm: Vec<u16> = ibi_ms
+        .iter()
+        .filter(|&&i| (300..=2000).contains(&i))
+        .map(|&i| 60_000 / i)
+        .collect();
+    Some(serde_json::json!({ "ibi_ms": ibi_ms, "amplitude": amplitude, "hr_bpm": hr_bpm }))
+}
+
+/// `spo2_r_pi_event` (Ring 5 tag `0x8b`): a header byte then 3-byte samples of
+/// `(R-ratio: u16 big-endian / 16384, perfusion index: u8/255 × 0.05)`. The R
+/// ratio feeds Oura's (proprietary) SpO2 curve; we surface R and PI directly.
+fn decode_spo2_r_pi(body: &[u8]) -> Option<serde_json::Value> {
+    if body.len() < 4 || !(body.len() - 1).is_multiple_of(3) {
+        return None;
+    }
+    let mut r = Vec::new();
+    let mut pi = Vec::new();
+    let mut o = 1;
+    while o + 3 <= body.len() {
+        let rv = u16::from_be_bytes([body[o], body[o + 1]]) as f64 / 16384.0;
+        r.push((rv * 1000.0).round() / 1000.0);
+        pi.push(((body[o + 2] as f64 / 255.0 * 0.05) * 10000.0).round() / 10000.0);
+        o += 3;
+    }
+    Some(serde_json::json!({ "r": r, "perfusion_index": pi }))
+}
+
+/// `sleep_acm_period` (tag `0x72`): six accelerometer MAD statistics packed as
+/// fixed-point — three `int + frac/255` values, then three `12-bit/4095 + nibble`
+/// values, per the native `parse_api_sleep_acm_period`.
+fn decode_sleep_acm_period(body: &[u8]) -> Option<serde_json::Value> {
+    if body.len() < 12 {
+        return None;
+    }
+    let r4 = |v: f64| (v * 10000.0).round() / 10000.0;
+    let fp = |frac: u8, intg: u8| intg as f64 + frac as f64 / 255.0;
+    let q12 = |lo: u8, hi: u8| ((lo as u16 | ((hi as u16 & 0x0f) << 8)) as f64 / 4095.0) + (hi >> 4) as f64;
+    let vals = [
+        r4(fp(body[0], body[1])),
+        r4(fp(body[2], body[3])),
+        r4(fp(body[4], body[5])),
+        r4(q12(body[6], body[7])),
+        r4(q12(body[8], body[9])),
+        r4(q12(body[10], body[11])),
+    ];
+    Some(serde_json::json!({ "acm_mad": vals }))
 }
 
 /// `motion_event` (tag `0x47`): a compact per-window motion summary. From the
@@ -369,6 +419,7 @@ pub fn event_name(tag: u8) -> &'static str {
         0x7f => "real_step_event_feature_2",
         0x80 => "green_ibi_quality_event",
         0x81 => "cva_raw_ppg_data",
+        0x8b => "spo2_r_pi_event",
         0x82 => "scan_start",
         0x83 => "scan_end",
         _ => "unknown",
@@ -499,6 +550,30 @@ mod tests {
         assert_eq!(p[1], "light");
         assert_eq!(p[2], "rem");
         assert_eq!(p[3], "awake");
+    }
+
+    #[test]
+    fn decodes_spo2_r_pi_real_bytes() {
+        // Captured Ring 5 0x8b body: stable R-ratio ~0.78, plausible PI.
+        let body = hex::decode("00321f8c323795328b9532bb95").unwrap();
+        let v = decode_spo2_r_pi(&body).unwrap();
+        let r = v["r"].as_array().unwrap();
+        assert_eq!(r.len(), 4);
+        assert_eq!(r[0].as_f64().unwrap(), 0.783);
+        for x in r {
+            let rv = x.as_f64().unwrap();
+            assert!((0.5..1.0).contains(&rv), "R {rv} out of physiological range");
+        }
+    }
+
+    #[test]
+    fn decodes_sleep_acm_period_real_bytes() {
+        let body = hex::decode("b1004601f0001e003e000200").unwrap();
+        let v = decode_sleep_acm_period(&body).unwrap();
+        let m = v["acm_mad"].as_array().unwrap();
+        assert_eq!(m.len(), 6);
+        assert_eq!(m[0].as_f64().unwrap(), 0.6941); // 177/255
+        assert_eq!(m[1].as_f64().unwrap(), 1.2745); // 1 + 70/255
     }
 
     #[test]

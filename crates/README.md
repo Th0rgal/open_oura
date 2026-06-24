@@ -94,20 +94,23 @@ land. Each decoder has a unit test.
 | Event | Layout (from the native parser) | Decoded as |
 | --- | --- | --- |
 | `temp_event` / `temp_period` / `sleep_temp` | `i16` LE / 100 | temperature °C (verified worn ~33 °C; 7 probes Ring 3, 3 Ring 5) |
-| `hrv_event` | pairs `(u8 hr, u8 rmssd)`, 5 min apart | avg HR bpm + RMSSD ms |
-| **`green_ibi_quality_event` (`0x80`)** | `ibi=(b1&7)|(b0<<3)`, `q=(b1>>3)&3` | **inter-beat intervals → heart rate** (validated: ~52 bpm resting) |
-| `ibi_and_amplitude_event` | 14-byte bit-packed | 6× IBI ms + PPG amplitude (pending real-data check) |
+| `hrv_event` | pairs `(u8 hr, u8 rmssd)`, 5 min apart | avg HR + RMSSD (validated overnight: HR 40, RMSSD ~101 ms) |
+| **`green_ibi_quality_event` (`0x80`)** | `ibi=(b1&7)|(b0<<3)`, `q=(b1>>3)&3` | inter-beat intervals → HR (daytime; ~50 bpm resting) |
+| **`ibi_and_amplitude_event` (`0x60`)** | 14-byte bit-packed | 6× IBI ms + PPG amplitude → HR (validated overnight: 18k beats, median 41 bpm) |
+| **`spo2_r_pi_event` (`0x8b`)** | header + 3-byte `(R: u16 BE/16384, PI: u8/255×0.05)` | SpO2 R-ratio + perfusion index (validated overnight: R ~0.72, PI ~4%) |
+| `sleep_acm_period` (`0x72`) | 6 fixed-point floats | accelerometer MAD stats during sleep |
 | `activity_information` | state + MET bytes (`<128: ×0.1`, else `12.8+(b-128)×0.2`) | state + MET levels |
 | `motion_event` | orientation `b0>>5`, axes signed `i8×8`, intensity nibbles | orientation + avg x/y/z + intensity (validated worn) |
-| `spo2_event` | header + `u8` per sample | SpO2 % series |
-| `sleep_phase_*` | 2-bit codes, 4/byte | hypnogram deep/light/rem/awake |
+| `spo2_event` | header + `u8` per sample | SpO2 % series (decoder ready; not emitted by Ring 5 yet) |
+| `sleep_phase_*` | 2-bit codes, 4/byte | hypnogram deep/light/rem/awake (not emitted yet) |
 | `ambient` / `ehr_acm_intensity` | `u16` LE samples | raw values |
 | `time_sync` / `state_change` / `wear_event` / `alert` / debug | u32 / byte+text | as labelled |
 
-**Identified `0x80`:** it's a Ring-5 green-LED IBI stream (the native tag→type
-table is built at runtime, so it was matched by structure and confirmed against
-real bytes — coherent resting HR). So heart rate is recoverable even with the
-daytime-HR feature off.
+**Ring-5 HR/SpO2 sources (empirical):** daytime HR arrives as `green_ibi_quality`
+(`0x80`); overnight HR + amplitude as `ibi_and_amplitude` (`0x60`); SpO2 as the raw
+`spo2_r_pi` (`0x8b`) R-ratio/PI stream. The native tag→type table is built at
+runtime, so `0x80`/`0x8b` were matched by structure and confirmed against real
+captured bytes (coherent HR, stable physiological R-ratio).
 
 **Still to port** (catalogued from the `.so`, lower priority): the bit-packed
 session-stateful variants (`green_ibi_and_amp`, `spo2_ibi_and_amplitude`), the
@@ -161,35 +164,34 @@ RData *recording* (non-real-time) replayed offline — kept for later.
 Honest status of what's trustworthy vs. provisional:
 
 **Verified** — matched byte-exact to the native parser and/or validated on real
-captures/live: device info, battery, auth/pair, event sync, `temp_event`/
-`temp_period`, `green_ibi_quality` (`0x80` → heart rate, ~50 bpm resting,
-1100+ beats), `motion_event` (orientation + axes + intensity, validated on 251
-worn samples), `time_sync`, `state_change`/`wear`, debug ASCII, live **ACM**
-stream, RData `state`.
+captures (incl. a full overnight sync):
+- device info, battery, auth/pair, event sync, `time_sync`, `state_change`/`wear`,
+  debug ASCII, live **ACM** stream, RData `state`.
+- `temp_event`/`temp_period`/`sleep_temp` (°C; worn ~33 °C, asleep ~35 °C).
+- `green_ibi_quality` (`0x80`) — daytime HR (~50 bpm resting, 1100+ beats).
+- `ibi_and_amplitude` (`0x60`) — overnight HR: **18k beats, median 41 bpm**.
+- `hrv_event` — overnight HR ~40 bpm, **RMSSD ~101 ms** (81 samples).
+- `spo2_r_pi` (`0x8b`) — **25k samples, R ~0.72, PI ~4%** (stable, physiological).
+- `motion_event` (orientation + axes + intensity, 250+ worn samples),
+  `sleep_acm_period` (accelerometer MAD).
 
-> Ring-5 daytime-HR finding: with the daytime-HR feature on, Ring 5 emits HR as
-> `green_ibi_quality` (`0x80`), **not** `ibi_and_amplitude` (`0x60`). So daytime
-> sync already yields heart rate, motion, activity, and temperature — no sleep
-> needed for those.
+> Ring-5 HR/SpO2 sources: daytime HR = `green_ibi_quality` (`0x80`); overnight HR +
+> amplitude = `ibi_and_amplitude` (`0x60`); SpO2 = raw `spo2_r_pi` (`0x8b`).
 
 **Best-effort** — ported from the decompiled logic but **not yet confirmed against
-real bytes** (no such data captured yet, or no ground truth):
-- `hrv_event` — layout is clear, but no HRV event captured yet (needs the ring to
-  measure / sleep).
-- `ibi_and_amplitude_event` (`0x60`) — intricate bit-packing; **no real `0x60`
-  capture yet** to confirm.
-- `activity_information` MET scale (`×0.1` / `12.8+(b-128)×0.2`) — taken from the
+real bytes** (the Ring 5 hasn't emitted these):
+- `activity_information` MET scale (`×0.1` / `12.8+(b-128)×0.2`) — from the
   decompile; no per-event ground truth (the trends CSV is daily aggregates).
-- `spo2_event`, `sleep_phase_*`, `ambient`/`ehr` u16 — logic clear, awaiting real
-  worn/asleep data.
+- `spo2_event` (`0x6f` summarized %), `sleep_phase_*` (hypnogram), `ambient`/`ehr`
+  u16 — logic clear, awaiting data.
 
-**Requires rest/sleep to even appear (cannot be validated live, daytime):** these
-events are only produced once the ring has rested/slept, so their decoders are in
-place but unproven until an overnight worn sync — `hrv_event` (5-min RMSSD),
-`spo2_event` (nighttime), `sleep_phase_*` (hypnogram), `sleep_summary_1..4`.
-`ibi_and_amplitude` (`0x60`) was **not observed on Ring 5 during the day** (HR
-comes via `0x80`), so it likely appears only at night or on other firmware —
-its bit-packed decoder stays best-effort until real `0x60` bytes are seen.
+**Not emitted even after a full overnight sync:** `sleep_phase_*`,
+`sleep_summary_1..4`, and the summarized `spo2_event` (`0x6f`) did **not** appear —
+the ring produced the **raw** streams (IBI, HRV, SpO2 R/PI, sleep temp, sleep ACM)
+but not the computed sleep architecture. That on-device sleep analysis likely runs
+in a separate postprocessing pass (possibly app-triggered via `CheckSleepAnalysis`,
+or over more nights). So sleep stages/summaries would, for now, have to be computed
+from the raw inputs we do have — the same way the cloud does.
 
 **Assumptions** baked in: event-body timestamps are the envelope's ring time
 (deciseconds), not the native's resolved wall-clock; batched events' per-sample
