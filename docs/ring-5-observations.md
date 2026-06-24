@@ -6,7 +6,7 @@ MAC, so the identifiers below are macOS peripheral UUIDs unless noted.
 
 The takeaway: Ring 5 uses the **same** GATT layout, framing, and app-auth flow as
 the Ring 3 (see `horizon-ring3-protocol-cheatsheet.md`) and the ringverse Ring 4
-notes — so the client is shared across generations. The differences are additional
+notes - so the client is shared across generations. The differences are additional
 characteristics and a larger MTU.
 
 Device details (from the Oura app):
@@ -28,11 +28,11 @@ the ring connects more readily while on its charger).
 
 - MTU `247` (vs `203` on Ring 3).
 - Service `98ed0001-a541-11e4-b6a0-0002a5d5c51b`:
-  - `…0003` read,notify — responses / notifications
-  - `…0002` write — protocol requests
-  - `…0004` read,write,notify,indicate — additional (not on Ring 3)
-  - `…0005` write,notify — additional
-  - `…0006` write,notify — additional
+  - `…0003` read,notify - responses / notifications
+  - `…0002` write - protocol requests
+  - `…0004` read,write,notify,indicate - additional (not on Ring 3)
+  - `…0005` write,notify - additional
+  - `…0006` write,notify - additional
 
 The client subscribes to every notify/indicate characteristic in the service, so
 the extra Ring 5 characteristics are handled automatically.
@@ -47,8 +47,15 @@ the extra Ring 5 characteristics are handled automatically.
   challenge shape as the Ring 4 notes and the decompiled app
   (see `android-app-reversing.md`).
 
+## Status
+
+Ring 5 has since been factory-reset and paired with a client-generated key
+(`oura pair`), and the full flow is verified: app-auth, battery, feature enable,
+event sync, and live ACM (~50 Hz). With a key installed, control commands
+(battery, features, realtime) require per-connection auth, while firmware and
+serial still read unauthenticated. Connect from a fresh scan and keep the ring on
+its charger for reliable advertising.
+
 ## Open items specific to Ring 5
 
-- Exercise the auth flow end-to-end on Ring 5 (needs the ring's 16-byte key,
-  which lives in the official app's database for an onboarded ring).
 - Characterise the roles of the extra `…0004/0005/0006` characteristics.

@@ -104,7 +104,7 @@ Later reverse-engineering of the on-phone `ecore` native engine (`libappecore.so
 revised the picture above: the Sleep / Readiness / Activity **scores**, sleep
 durations/efficiency, temperature baseline, HRV, breathing rate, simple SpO2, and
 cycle prediction are all computed **on the phone** by ecore, written to the local
-database, and *then uploaded* — the cloud stores and round-trips them, it does not
+database, and *then uploaded* - the cloud stores and round-trips them, it does not
 originate them. The `*_algorithm_version` stamps (`v1/v2/nssa/sleepnet`) identify
 *local* algorithms. See [`algorithms/README.md`](algorithms/README.md).
 
