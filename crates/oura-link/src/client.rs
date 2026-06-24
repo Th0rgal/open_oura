@@ -372,15 +372,48 @@ impl<T: Transport> OuraClient<T> {
     }
 
     /// Stop an active RData collection session (part of mandatory teardown).
-    pub async fn rdata_stop(&self) -> Result<()> {
-        self.request(&protocol::req_rdata_stop()).await?;
-        Ok(())
+    /// Returns the response status byte (255 if absent).
+    pub async fn rdata_stop(&self) -> Result<u8> {
+        let packets = self.request(&protocol::req_rdata_stop()).await?;
+        Ok(Self::find(&packets, 0x03).and_then(|p| p.payload.get(1).copied()).unwrap_or(255))
     }
 
     /// Clear the RData session/data from the ring's flash (part of teardown).
-    pub async fn rdata_clear(&self) -> Result<()> {
-        self.request(&protocol::req_rdata_clear()).await?;
-        Ok(())
+    /// Returns the response status byte (255 if absent).
+    pub async fn rdata_clear(&self) -> Result<u8> {
+        let packets = self.request(&protocol::req_rdata_clear()).await?;
+        Ok(Self::find(&packets, 0x03).and_then(|p| p.payload.get(1).copied()).unwrap_or(255))
+    }
+
+    /// Configure/arm an RData session for one or more signal types. **This starts
+    /// persistent flash sampling that does NOT self-stop** — the caller is
+    /// responsible for the `stop`+`clear` teardown. Returns `(subtag, status)`.
+    pub async fn rdata_configure(
+        &self,
+        types: &[protocol::rdata::DataType],
+        start_unix: u32,
+        current_unix: u32,
+    ) -> Result<(u8, u8)> {
+        let packets = self
+            .request(&protocol::req_rdata_configure(types, start_unix, current_unix))
+            .await?;
+        Self::find(&packets, 0x03)
+            .and_then(|p| Some((*p.payload.first()?, *p.payload.get(1)?)))
+            .ok_or_else(|| Error::Protocol("no RData configure response".into()))
+    }
+
+    /// Fetch one RData page by index. Returns `(status, page_bytes)` where
+    /// `status` is the subtag-status byte (`6` = NO_DATA / past the end) and
+    /// `page_bytes` is the payload after the `[subtag, status]` header.
+    pub async fn rdata_get_page(&self, page: u16) -> Result<(u8, Vec<u8>)> {
+        let packets = self.request(&protocol::req_rdata_get_page(page)).await?;
+        Self::find(&packets, 0x03)
+            .map(|p| {
+                let status = p.payload.get(1).copied().unwrap_or(0);
+                let bytes = p.payload.get(2..).unwrap_or(&[]).to_vec();
+                (status, bytes)
+            })
+            .ok_or_else(|| Error::Protocol("no RData page response".into()))
     }
 
     /// Enable live heart rate (daytime HR, `CONNECTED_LIVE`) and invoke `on_sample`

@@ -15,6 +15,7 @@ pub struct MinuteSample {
     pub minute: i64,
     pub met: Option<f64>,
     pub motion: u32, // high-intensity motion units in the minute
+    pub active_seconds: u32, // seconds of detected motion in the minute (<= 60)
     pub temp_c: Option<f64>,
     pub hr: Option<u32>,
 }
@@ -69,6 +70,14 @@ pub struct Session {
     pub mean_hr: Option<u32>,
     pub temp_min: Option<f64>,
     pub temp_max: Option<f64>,
+    /// Total seconds of detected motion across the session (sum of per-minute
+    /// `active_seconds`). For a swim, "moving time".
+    pub active_seconds: u32,
+    /// Highest per-minute motion intensity seen in the session.
+    pub peak_motion: u32,
+    /// Per-minute motion intensity, in order — an effort curve for the session.
+    /// At 30 s windowing this is an envelope, NOT stroke-resolved (see module note).
+    pub motion_profile: Vec<u32>,
 }
 
 /// Classify a single minute into a session kind, or `None` if it's "quiet". The
@@ -104,6 +113,9 @@ fn stats(run: &[MinuteSample], kind: SessionKind) -> Session {
         mean_hr,
         temp_min: temps.iter().copied().reduce(f64::min),
         temp_max: temps.iter().copied().reduce(f64::max),
+        active_seconds: run.iter().map(|s| s.active_seconds).sum(),
+        peak_motion: run.iter().map(|s| s.motion).max().unwrap_or(0),
+        motion_profile: run.iter().map(|s| s.motion).collect(),
     }
 }
 
@@ -159,7 +171,14 @@ mod tests {
     use super::*;
 
     fn m(minute: i64, met: f64, motion: u32, temp: f64) -> MinuteSample {
-        MinuteSample { minute, met: Some(met), motion, temp_c: Some(temp), hr: Some(80) }
+        MinuteSample {
+            minute,
+            met: Some(met),
+            motion,
+            active_seconds: 50,
+            temp_c: Some(temp),
+            hr: Some(80),
+        }
     }
 
     #[test]

@@ -74,11 +74,12 @@ enum Command {
     Events,
     /// Re-run decoders over already-stored raw event bodies (offline).
     Redecode,
-    /// RData bulk raw-sampler control: `state` (read), `stop`/`clear` (teardown).
-    /// Starting a collection is intentionally not exposed here — it writes a
-    /// persistent flash session that must be torn down (see docs/native-decoder.md).
+    /// RData bulk raw-sampler control: `state` (read), `stop`/`clear` (teardown),
+    /// `probe` (arm ACM-50 ~10 min, measure data rate + battery, auto-teardown).
+    /// `probe` writes a persistent flash session but always tears itself down
+    /// (see docs/rdata-capacity-probe.md).
     Rdata {
-        /// One of: state | stop | clear
+        /// One of: state | stop | clear | probe
         #[arg(default_value = "state")]
         action: String,
     },
@@ -337,6 +338,7 @@ fn cmd_sessions(cli: &Cli, tz_offset: i64) -> Result<()> {
     struct Bucket {
         met: Option<f64>,
         motion: u32,
+        active_seconds: u32,
         temp: Vec<f64>,
         hr: Vec<u32>,
     }
@@ -356,6 +358,9 @@ fn cmd_sessions(cli: &Cli, tz_offset: i64) -> Result<()> {
             0x47 => {
                 if let Some(hi) = v.get("high_intensity").and_then(|x| x.as_u64()) {
                     b.motion += hi as u32;
+                }
+                if let Some(sec) = v.get("motion_seconds").and_then(|x| x.as_u64()) {
+                    b.active_seconds += sec as u32;
                 }
             }
             0x50 => {
@@ -379,6 +384,7 @@ fn cmd_sessions(cli: &Cli, tz_offset: i64) -> Result<()> {
             minute,
             met: b.met,
             motion: b.motion,
+            active_seconds: b.active_seconds.min(60),
             temp_c: (!b.temp.is_empty()).then(|| b.temp.iter().sum::<f64>() / b.temp.len() as f64),
             hr: (!b.hr.is_empty()).then(|| b.hr.iter().sum::<u32>() / b.hr.len() as u32),
         })
@@ -407,6 +413,35 @@ fn cmd_sessions(cli: &Cli, tz_offset: i64) -> Result<()> {
             "  {kind:<13}  {span:<13}  {:>4}  {:>8.1}  {hr:>4}  {temp}",
             s.minutes, s.peak_met,
         );
+    }
+
+    // Per-swim detail. NOTE: motion is stored as one ~30 s window-average, so this
+    // is an effort *envelope* only — it cannot resolve laps, strokes, or turns.
+    // (That needs high-rate raw accel via RData; see docs/sync-orchestration.md.)
+    use oura_analysis::original::activity_session::SessionKind;
+    let fmt_mmss = |secs: u32| -> String { format!("{}:{:02}", secs / 60, secs % 60) };
+    let bars = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let spark = |xs: &[u32]| -> String {
+        let hi = xs.iter().copied().max().unwrap_or(0).max(1);
+        xs.iter()
+            .map(|&x| bars[((x * (bars.len() as u32 - 1)) / hi) as usize])
+            .collect()
+    };
+    for s in sessions.iter().filter(|s| s.kind == SessionKind::Swim) {
+        let elapsed = (s.minutes * 60) as u32;
+        let moving_pct = if elapsed > 0 { s.active_seconds * 100 / elapsed } else { 0 };
+        println!("\nSwim {}-{} (open_oura heuristic, 30 s resolution):", hm(s.start_minute), hm(s.end_minute));
+        println!("  duration     {} min ({} elapsed)", s.minutes, fmt_mmss(elapsed));
+        println!("  moving time  {} ({}% of elapsed)", fmt_mmss(s.active_seconds), moving_pct);
+        println!("  intensity    peak {} units/30s", s.peak_motion);
+        if let Some(hr) = s.mean_hr {
+            println!("  heart rate   mean {hr} bpm");
+        }
+        if let (Some(lo), Some(hi)) = (s.temp_min, s.temp_max) {
+            println!("  water temp   [{lo:.1}, {hi:.1}] C");
+        }
+        println!("  effort       {}", spark(&s.motion_profile));
+        println!("  (no lap/stroke/turn data — sensor is 30 s windowed, not raw)");
     }
     Ok(())
 }
@@ -712,18 +747,278 @@ async fn cmd_rdata(cli: &Cli, key: &Option<[u8; 16]>, action: &str) -> Result<()
             println!("RData state: subtag={subtag} status={status} (0 = idle/none active)");
         }
         "stop" => {
-            client.rdata_stop().await?;
-            println!("RData stop sent.");
+            let s = client.rdata_stop().await?;
+            println!("RData stop -> status {s} ({})", rdata_status_name(s));
         }
         "clear" => {
-            client.rdata_clear().await?;
-            println!("RData clear sent.");
+            let s = client.rdata_clear().await?;
+            println!("RData clear -> status {s} ({})", rdata_status_name(s));
+        }
+        "probe" => {
+            rdata_probe(&client, 30).await?;
+        }
+        "sweep" => {
+            rdata_sweep(&client).await?;
+        }
+        "recipe" => {
+            rdata_recipe(&client).await?;
+        }
+        "unlock" => {
+            rdata_unlock(&client).await?;
         }
         other => {
-            anyhow::bail!("unknown rdata action '{other}' (use state | stop | clear)");
+            anyhow::bail!("unknown rdata action '{other}' (use state | stop | clear | probe)");
         }
     }
     let _ = client.transport().disconnect().await;
+    Ok(())
+}
+
+/// RData capacity rate-probe (Phase-2 spike): arm ACM-50, record briefly, then
+/// stop and drain pages to measure the real byte rate and page size. **ALWAYS**
+/// tears down (stop + clear) even on error. Ring should be on the charger and
+/// still — sampling rate is fixed at 50 Hz regardless of motion.
+async fn rdata_probe(client: &OuraClient<BleTransport>, secs: u64) -> Result<()> {
+    use oura_protocol::protocol::rdata::DataType;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    // The ring validates configure timestamps against its own clock, so sync it
+    // to host UTC first — without this, arming returns idle (status 3).
+    client.sync_time().await?;
+    let (sub0, st0) = client.rdata_state().await?;
+    let batt0 = client.battery().await?;
+    println!("After sync_time: RData state subtag={sub0} status={st0}; battery {}%", batt0.percent);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as u32)
+        .unwrap_or(0);
+
+    let (csub, cst) = client.rdata_configure(&[DataType::Acm2g50Hz], now, now).await?;
+    println!("Armed ACM 2g @ 50 Hz: configure subtag={csub} status={cst}");
+
+    // From here on, tear down NO MATTER WHAT.
+    let body = async {
+        println!("Recording for {secs}s ({:.1} min)...", secs as f64 / 60.0);
+        tokio::time::sleep(Duration::from_secs(secs)).await;
+        let (subm, stm) = client.rdata_state().await?;
+        let batt1 = client.battery().await?;
+        println!(
+            "After record: RData state subtag={subm} status={stm}; battery {}% (Δ {} pts over {:.1} min)",
+            batt1.percent,
+            batt0.percent as i16 - batt1.percent as i16,
+            secs as f64 / 60.0
+        );
+        // Drain BEFORE stop — the documented lifecycle is configure -> get_page ->
+        // stop -> clear, and stop may discard the buffer.
+        println!("Draining pages (before stop)...");
+        let mut pages = 0u32;
+        let mut total_bytes = 0usize;
+        let mut page_len = 0usize;
+        for page in 0u16..4000 {
+            let (status, bytes) = client.rdata_get_page(page).await?;
+            if page == 0 {
+                println!("  page 0: status={status}, {} bytes, raw={}", bytes.len(), hex::encode(&bytes));
+            }
+            if status == 6 || bytes.is_empty() {
+                break; // NO_DATA -> past the end of recorded data
+            }
+            page_len = page_len.max(bytes.len());
+            total_bytes += bytes.len();
+            pages += 1;
+        }
+        Ok::<_, anyhow::Error>((pages, total_bytes, page_len, batt1.percent))
+    }
+    .await;
+
+    // Mandatory teardown.
+    if let Err(e) = client.rdata_stop().await {
+        eprintln!("warning: teardown stop failed: {e}");
+    }
+    if let Err(e) = client.rdata_clear().await {
+        eprintln!("warning: teardown clear failed: {e}");
+    }
+    let st1 = client.rdata_state().await.map(|(_, s)| s).unwrap_or(255);
+    println!("RData state after teardown: status={st1}");
+
+    let (pages, total_bytes, page_len, batt1) = body?;
+    if pages == 0 {
+        println!(
+            "\nNo pages drained. Either nothing recorded, or `stop` discards the \
+             buffer (in which case we must drain BEFORE stop). Will adjust and retry."
+        );
+        return Ok(());
+    }
+    let rate = total_bytes as f64 / secs as f64;
+    let batt_delta = batt0.percent as i16 - batt1 as i16;
+    println!("\n--- RData rate probe (ACM 2g @ 50 Hz, {secs}s / {:.1} min) ---", secs as f64 / 60.0);
+    println!("pages drained  : {pages}");
+    println!("max page size  : {page_len} bytes (payload after subtag+status header)");
+    println!("total bytes    : {total_bytes}");
+    println!("byte rate      : {rate:.0} B/s  (~{:.1} KB/min)", rate * 60.0 / 1024.0);
+    println!("battery        : {}% -> {batt1}% (Δ {batt_delta} pts)", batt0.percent);
+    if batt_delta > 0 {
+        let pct_per_hr = batt_delta as f64 * 3600.0 / secs as f64;
+        println!("battery rate   : ~{pct_per_hr:.1} %/hr while sampling");
+    } else {
+        println!("battery        : drop below 1% resolution over this window");
+    }
+    if rate > 0.0 {
+        let max_addr_bytes = (page_len.max(1) * 65536) as f64;
+        println!(
+            "addressable ceiling (65536 pages × {page_len} B, IF all flash-backed): \
+             ~{:.0} min of capture",
+            max_addr_bytes / rate / 60.0
+        );
+    }
+    Ok(())
+}
+
+/// RData status-code name (from the decompiled app's `RDataStatusCode`).
+fn rdata_status_name(s: u8) -> &'static str {
+    match s {
+        0 => "SUCCESS",
+        3 => "INVALID_SUBTAG",
+        5 => "NOT_INITIALIZED",
+        7 => "RECORDING_ON",
+        11 => "SYNC_NOT_IDLE",
+        12 => "MEMORY_FULL",
+        _ => "?",
+    }
+}
+
+/// Test 1: run the app's strict start recipe — Clear (require SUCCESS) -> state ->
+/// CONFIGURE with startTime=0 — and report each status. Tears down afterward.
+async fn rdata_recipe(client: &OuraClient<BleTransport>) -> Result<()> {
+    use oura_protocol::protocol::rdata::DataType;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    client.sync_time().await?;
+    let clear = client.rdata_clear().await?;
+    println!("RDataClear  -> status {clear} ({})", rdata_status_name(clear));
+    let (ssub, sbyte) = client.rdata_state().await?;
+    println!("RDataState  -> subtag {ssub}, state byte {sbyte} (0 IDLE,1 SCHED,2 REC,3 STOP,4 BUSY)");
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as u32)
+        .unwrap_or(0);
+    let (csub, cst) = client.rdata_configure(&[DataType::Acm2g50Hz], 0, now).await?;
+    println!(
+        "RDataConfigure(start=0) -> subtag {csub}, status {cst} ({})",
+        rdata_status_name(cst)
+    );
+    if cst == 0 {
+        println!(">>> START ACCEPTED — capability is enabled after all!");
+    } else {
+        println!(">>> still {} — capability gate confirmed.", rdata_status_name(cst));
+    }
+    // Teardown regardless.
+    let _ = client.rdata_stop().await;
+    let _ = client.rdata_clear().await;
+    Ok(())
+}
+
+/// Combined in-session unlock attempt: confirm RAW_DATA_SAMPLER is advertised,
+/// try enabling it (subscription + feature-mode) on the correct id 0x12, then
+/// Clear -> Configure in the SAME session. If Configure is accepted, do a short
+/// capture and drain. Always tears down (stop/clear/unsubscribe).
+async fn rdata_unlock(client: &OuraClient<BleTransport>) -> Result<()> {
+    use oura_protocol::protocol::rdata::DataType;
+    use oura_protocol::protocol::{capability, feature_mode, subscription_mode};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    client.sync_time().await?;
+    let caps = client.capabilities().await?;
+    let ver = |id: u8| caps.iter().find(|c| c.feature == id).map(|c| c.value);
+    println!(
+        "capabilities: RAW_DATA_SAMPLER(0x12)={:?}  RESEARCH_DATA(0x01)={:?}",
+        ver(capability::RAW_DATA_SAMPLER),
+        ver(capability::RESEARCH_DATA),
+    );
+
+    // Try both enable paths (best-effort; report outcomes).
+    match client.set_feature_subscription(capability::RAW_DATA_SAMPLER, subscription_mode::FEATURE_DATA).await {
+        Ok(r) => println!("subscribe RAW_DATA_SAMPLER(data) -> result {r}"),
+        Err(e) => println!("subscribe RAW_DATA_SAMPLER failed: {e}"),
+    }
+    match client.set_feature_mode(capability::RAW_DATA_SAMPLER, feature_mode::REQUESTED).await {
+        Ok(()) => println!("set_feature_mode RAW_DATA_SAMPLER(REQUESTED) -> SUCCESS"),
+        Err(e) => println!("set_feature_mode RAW_DATA_SAMPLER -> {e}"),
+    }
+
+    let clear = client.rdata_clear().await?;
+    println!("RDataClear -> status {clear} ({})", rdata_status_name(clear));
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as u32)
+        .unwrap_or(0);
+    let (_, cst) = client.rdata_configure(&[DataType::Acm2g50Hz], 0, now).await?;
+    println!("RDataConfigure(start=0) -> status {cst} ({})", rdata_status_name(cst));
+
+    let mut captured = (0u32, 0usize);
+    if cst == 0 {
+        println!(">>> ACCEPTED! Recording 30 s...");
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        for page in 0u16..4000 {
+            let (status, bytes) = client.rdata_get_page(page).await?;
+            if status == 6 || bytes.is_empty() {
+                break;
+            }
+            captured.0 += 1;
+            captured.1 += bytes.len();
+        }
+        println!(">>> drained {} pages, {} bytes", captured.0, captured.1);
+    } else {
+        println!(">>> still {} — enabling did not unlock CONFIGURE.", rdata_status_name(cst));
+    }
+
+    // Teardown.
+    let _ = client.rdata_stop().await;
+    let _ = client.rdata_clear().await;
+    let _ = client
+        .set_feature_subscription(capability::RAW_DATA_SAMPLER, subscription_mode::OFF)
+        .await;
+    Ok(())
+}
+
+/// Try several RData `configure` argument variants and report which (if any)
+/// moves the ring out of the idle state (status 3). Each attempt is immediately
+/// torn down. Pure diagnostic for the Phase-2 spike — no long recording.
+async fn rdata_sweep(client: &OuraClient<BleTransport>) -> Result<()> {
+    use oura_protocol::protocol::rdata::DataType;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    client.sync_time().await?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as u32)
+        .unwrap_or(0);
+
+    // (label, types, start, current)
+    let variants: &[(&str, &[DataType], u32, u32)] = &[
+        ("ACM, start=now",          &[DataType::Acm2g50Hz], now, now),
+        ("ACM, start=0",            &[DataType::Acm2g50Hz], 0, now),
+        ("Metadata+ACM, start=now", &[DataType::Metadata, DataType::Acm2g50Hz], now, now),
+        ("Metadata+ACM, start=0",   &[DataType::Metadata, DataType::Acm2g50Hz], 0, now),
+        ("ACM 8g, start=now",       &[DataType::Acm8g50Hz], now, now),
+    ];
+
+    let (_, idle) = client.rdata_state().await?;
+    println!("baseline idle status = {idle}\n");
+    for (label, types, start, cur) in variants {
+        let (csub, cst) = client.rdata_configure(types, *start, *cur).await?;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let (ssub, sst) = client.rdata_state().await?;
+        let engaged = sst != idle;
+        println!(
+            "{label:<26} configure(sub={csub},st={cst}) -> state(sub={ssub},st={sst}) {}",
+            if engaged { "<<< STATE CHANGED" } else { "(still idle)" }
+        );
+        // tear down before the next attempt
+        let _ = client.rdata_stop().await;
+        let _ = client.rdata_clear().await;
+    }
+    println!("\nIf every variant stayed idle, RDataStart needs a precondition we");
+    println!("haven't replicated — next step is decompiling the app's start path.");
     Ok(())
 }
 

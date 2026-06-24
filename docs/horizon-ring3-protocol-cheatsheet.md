@@ -218,7 +218,7 @@ Authenticated event fetch returned event tags `0x41` and `0x43` before the
 | Packet family | Horizon status |
 | --- | --- |
 | `0x01`, `0x02` unknown | Tested after auth; no response. |
-| `0x03` RData | State, page 0, start-none-zero, and stop tested after auth. Clear shape is in the runner but was not run. |
+| `0x03` RData | State, page 0, start-none-zero, and stop tested after auth. Clear shape is in the runner but was not run. **Start is blocked:** Ring 5 returns status `3` (idle) to every `configure` variant tried — with/without `sync_time`, start=now/0, ACM 2g/8g, ±Metadata channel — and never records (see `docs/rdata-capacity-probe.md`). Needs a precondition we haven't replicated. |
 | `0x06` realtime measurements | Off and six enable/guess payloads tested. `01000000` ACKed success but did not stream samples; other guesses returned status `2`. |
 | `0x08` firmware | Tested, success. |
 | `0x0a` self test | Written after auth; no notification observed in 1.5s. |
