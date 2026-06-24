@@ -126,6 +126,16 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         tz_offset: i64,
     },
+    /// Subscribe a feature capability (real_steps | atlas | ambient | raw_data |
+    /// research_data) via SetFeatureSubscription, to make the ring emit its events.
+    Subscribe {
+        /// Capability to subscribe.
+        #[arg(value_parser = ["real_steps", "atlas", "ambient", "raw_data", "research_data"])]
+        feature: String,
+        /// Subscription mode: off | state | latest | data (default: data).
+        #[arg(long, default_value = "data")]
+        mode: String,
+    },
 }
 
 fn feature_mode_name(mode: u8) -> &'static str {
@@ -250,7 +260,57 @@ async fn main() -> Result<()> {
             enable_spo2,
         } => cmd_features(&cli, &key, *enable_hr, *enable_spo2).await,
         Command::Sessions { tz_offset } => cmd_sessions(&cli, *tz_offset),
+        Command::Subscribe { feature, mode } => cmd_subscribe(&cli, &key, feature, mode).await,
     }
+}
+
+/// Subscribe a feature capability via SetFeatureSubscription (needs auth).
+async fn cmd_subscribe(
+    cli: &Cli,
+    key: &Option<[u8; 16]>,
+    feature: &str,
+    mode: &str,
+) -> Result<()> {
+    use oura_protocol::protocol::{capability, subscription_mode};
+    let cap = match feature {
+        "real_steps" => capability::REAL_STEPS,
+        "atlas" => capability::ATLAS,
+        "ambient" => capability::AMBIENT_LIGHT,
+        "raw_data" => capability::RAW_DATA_SAMPLER,
+        "research_data" => capability::RESEARCH_DATA,
+        other => return Err(anyhow!("unknown feature {other}")),
+    };
+    let m = match mode {
+        "off" => subscription_mode::OFF,
+        "state" => subscription_mode::STATE,
+        "latest" => subscription_mode::LATEST,
+        "data" => subscription_mode::FEATURE_DATA,
+        other => return Err(anyhow!("unknown mode {other}")),
+    };
+    let client = connect(cli).await?;
+    if !maybe_auth(&client, key).await? {
+        return Err(anyhow!("subscription requires --key-file (authentication)"));
+    }
+    let result = client
+        .set_feature_subscription(cap, m)
+        .await
+        .context("set_feature_subscription")?;
+    let name = match result {
+        0 => "SUCCESS",
+        1 => "NOT_SUPPORTED (firmware lacks this feature)",
+        2 => "NOT_AVAILABLE (supported, but a precondition isn't met)",
+        3 => "NOT_IN_FINGER (wear the ring)",
+        4 => "MESSAGE_TOO_SHORT",
+        5 => "LOW_BATTERY",
+        _ => "unknown",
+    };
+    if result == 0 {
+        println!("Subscribed {feature} (mode {mode}): SUCCESS.");
+        println!("Wear the ring; the feature's events will appear on the next sync.");
+    } else {
+        println!("Ring rejected {feature} (mode {mode}): {result:#04x} = {name}.");
+    }
+    Ok(())
 }
 
 /// Detect activity/exposure sessions from stored events (open_oura heuristic).

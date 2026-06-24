@@ -348,6 +348,21 @@ impl<T: Transport> OuraClient<T> {
         }
     }
 
+    /// Subscribe/unsubscribe a feature capability (e.g. real steps, Atlas/bioZ) via
+    /// `SetFeatureSubscription`. Returns the ring's raw result byte (0 = success;
+    /// non-zero = rejected, e.g. feature disabled in firmware) so the caller can see
+    /// exactly how the ring responds.
+    pub async fn set_feature_subscription(&self, capability: u8, mode: u8) -> Result<u8> {
+        let packets = self
+            .request(&protocol::req_set_feature_subscription(capability, mode))
+            .await?;
+        packets
+            .iter()
+            .find(|p| p.ext_tag() == Some(0x27))
+            .and_then(|p| p.payload.get(2).copied())
+            .ok_or_else(|| Error::Protocol("no set_feature_subscription response".into()))
+    }
+
     /// Query the RData collection state (read-only). Returns `(subtag, status)`.
     pub async fn rdata_state(&self) -> Result<(u8, u8)> {
         let packets = self.request(&protocol::req_rdata_state()).await?;

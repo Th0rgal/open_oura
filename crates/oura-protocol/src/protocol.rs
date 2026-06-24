@@ -168,6 +168,31 @@ pub fn req_set_feature_mode(feature: u8, mode: u8) -> Vec<u8> {
     vec![0x2f, 0x03, 0x22, feature, mode]
 }
 
+/// Feature *capability* ids for `SetFeatureSubscription` (distinct numbering from
+/// the `feature` modes above). From the app's `FeatureCapabilityId` enum.
+pub mod capability {
+    pub const RESEARCH_DATA: u8 = 0x01;
+    pub const REAL_STEPS: u8 = 0x0b;
+    pub const AMBIENT_LIGHT: u8 = 0x10;
+    pub const RAW_DATA_SAMPLER: u8 = 0x14;
+    pub const ATLAS: u8 = 0x15; // bioZ / EDA sensing-discovery platform
+}
+
+/// Subscription modes for `SetFeatureSubscription` (app `SubscriptionMode`).
+pub mod subscription_mode {
+    pub const OFF: u8 = 0x00;
+    pub const STATE: u8 = 0x01;
+    pub const LATEST: u8 = 0x02;
+    pub const FEATURE_DATA: u8 = 0x04;
+}
+
+/// `SetFeatureSubscription` — subscribe/unsubscribe a feature capability (e.g.
+/// real steps, Atlas/bioZ). Extended op `0x2f`, sub-op `0x26`; response sub-op is
+/// `0x27`. From the app's `SetFeatureSubscription` operation.
+pub fn req_set_feature_subscription(capability: u8, mode: u8) -> Vec<u8> {
+    vec![0x2f, 0x03, 0x26, capability, mode]
+}
+
 /// Ask the ring to run sleep analysis (`28 01 <force>`). After it postprocesses,
 /// `sleep_phase`/`sleep_summary` events appear in history. Response tag `0x29`.
 pub fn req_check_sleep_analysis(force: bool) -> Vec<u8> {
