@@ -200,6 +200,27 @@ impl Store {
         Ok((decoded_count, total))
     }
 
+    /// All decoded events as `(ring_timestamp_deciseconds, tag, decoded_json,
+    /// captured_unix)`, ordered by ring time. For analysis/reporting commands that
+    /// reconstruct time series from stored events.
+    pub fn decoded_events(&self) -> Result<Vec<(i64, u8, String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT ring_timestamp, tag, decoded_json, captured_unix FROM events \
+             WHERE decoded_json IS NOT NULL ORDER BY ring_timestamp",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)? as u8,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// Distinct device serials that have stored events.
     pub fn device_serials(&self) -> Result<Vec<String>> {
         let mut stmt = self

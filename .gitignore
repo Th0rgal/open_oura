@@ -35,3 +35,6 @@ notes/
 
 # Playwright MCP artifacts
 .playwright-mcp/
+
+# mitmproxy-captured tokens (local only)
+tools/oura_tokens.txt

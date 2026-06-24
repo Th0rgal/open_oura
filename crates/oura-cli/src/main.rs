@@ -119,6 +119,13 @@ enum Command {
         #[arg(long)]
         enable_spo2: bool,
     },
+    /// Detect activity/exposure sessions (workout, swim, sauna, cold) from stored
+    /// events. Heuristic — open_oura's own, not an Oura algorithm.
+    Sessions {
+        /// Timezone offset (hours from UTC) for displayed times.
+        #[arg(long, default_value_t = 0)]
+        tz_offset: i64,
+    },
 }
 
 fn feature_mode_name(mode: u8) -> &'static str {
@@ -242,7 +249,106 @@ async fn main() -> Result<()> {
             enable_hr,
             enable_spo2,
         } => cmd_features(&cli, &key, *enable_hr, *enable_spo2).await,
+        Command::Sessions { tz_offset } => cmd_sessions(&cli, *tz_offset),
     }
+}
+
+/// Detect activity/exposure sessions from stored events (open_oura heuristic).
+fn cmd_sessions(cli: &Cli, tz_offset: i64) -> Result<()> {
+    use oura_analysis::original::activity_session::{detect, Config, MinuteSample};
+    use std::collections::BTreeMap;
+
+    let store = Store::open(&cli.db)?;
+    let events = store.decoded_events()?;
+    if events.is_empty() {
+        println!("No decoded events in {}. Run `oura sync` first.", cli.db.display());
+        return Ok(());
+    }
+    // Anchor ring deciseconds to wall-clock using the latest event's capture time.
+    let (max_ds, anchor_unix) = events
+        .iter()
+        .map(|(ds, _, _, cu)| (*ds, *cu))
+        .max_by_key(|(ds, _)| *ds)
+        .unwrap();
+    let minute_of = |ds: i64| -> i64 { (anchor_unix - (max_ds - ds) / 10) / 60 };
+
+    // Aggregate per-minute signals from the relevant event types.
+    #[derive(Default)]
+    struct Bucket {
+        met: Option<f64>,
+        motion: u32,
+        temp: Vec<f64>,
+        hr: Vec<u32>,
+    }
+    let mut buckets: BTreeMap<i64, Bucket> = BTreeMap::new();
+    for (ds, tag, json, _) in &events {
+        let v: serde_json::Value = match serde_json::from_str(json) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let b = buckets.entry(minute_of(*ds)).or_default();
+        match tag {
+            0x46 | 0x69 | 0x75 => {
+                if let Some(a) = v.get("temps_c").and_then(|t| t.as_array()) {
+                    b.temp.extend(a.iter().filter_map(|x| x.as_f64()));
+                }
+            }
+            0x47 => {
+                if let Some(hi) = v.get("high_intensity").and_then(|x| x.as_u64()) {
+                    b.motion += hi as u32;
+                }
+            }
+            0x50 => {
+                if let Some(a) = v.get("met").and_then(|t| t.as_array()) {
+                    let m = a.iter().filter_map(|x| x.as_f64()).fold(0.0, f64::max);
+                    b.met = Some(b.met.unwrap_or(0.0).max(m));
+                }
+            }
+            0x80 => {
+                if let Some(a) = v.get("hr_bpm").and_then(|t| t.as_array()) {
+                    b.hr.extend(a.iter().filter_map(|x| x.as_u64().map(|n| n as u32)));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let samples: Vec<MinuteSample> = buckets
+        .into_iter()
+        .map(|(minute, b)| MinuteSample {
+            minute,
+            met: b.met,
+            motion: b.motion,
+            temp_c: (!b.temp.is_empty()).then(|| b.temp.iter().sum::<f64>() / b.temp.len() as f64),
+            hr: (!b.hr.is_empty()).then(|| b.hr.iter().sum::<u32>() / b.hr.len() as u32),
+        })
+        .collect();
+
+    let sessions = detect(&samples, &Config::default());
+    if sessions.is_empty() {
+        println!("No activity/exposure sessions detected.");
+        return Ok(());
+    }
+    let hm = |minute: i64| -> String {
+        let sod = (minute * 60 + tz_offset * 3600).rem_euclid(86400);
+        format!("{:02}:{:02}", sod / 3600, (sod % 3600) / 60)
+    };
+    println!("Detected sessions (open_oura heuristic — not Oura's classification):\n");
+    println!("  {:<13}  {:<13}  {:>4}  {:>8}  {:>4}  temp(C)", "kind", "time", "min", "peakMET", "HR");
+    for s in &sessions {
+        let temp = match (s.temp_min, s.temp_max) {
+            (Some(lo), Some(hi)) => format!("[{lo:.1}, {hi:.1}]"),
+            _ => "-".into(),
+        };
+        let hr = s.mean_hr.map(|h| h.to_string()).unwrap_or_else(|| "-".into());
+        let kind = format!("{:?}", s.kind);
+        let span = format!("{}-{}", hm(s.start_minute), hm(s.end_minute));
+        println!(
+            "  {kind:<13}  {span:<13}  {:>4}  {:>8.1}  {hr:>4}  {temp}",
+            s.minutes, s.peak_met,
+        );
+    }
+    Ok(())
 }
 
 async fn cmd_features(

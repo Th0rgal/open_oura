@@ -768,6 +768,7 @@ dependencies = [
  "oura-link",
  "oura-protocol",
  "oura-store",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

@@ -41,7 +41,7 @@ cargo build --release
 
 See [`crates/README.md`](crates/README.md) for all commands (`scan`, `pair`,
 `info`, `sync`, `latest`, `live-hr`, `accel`, `viz`, `game`, `features`, `rdata`,
-`events`, `redecode`, `sleep-analyze`) and the auth-key details. `oura viz` opens a
+`events`, `redecode`, `sleep-analyze`, `sessions`) and the auth-key details. `oura viz` opens a
 real-time 3D motion visualizer in the browser; `oura game` is a tilt-controlled
 asteroid game driven by the ring.
 
