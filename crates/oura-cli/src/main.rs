@@ -12,6 +12,8 @@ use oura_core::ble::{self, BleTransport};
 use oura_core::storage::Store;
 use oura_core::OuraClient;
 
+mod game;
+mod motion_server;
 mod viz;
 
 /// Read sleep/HR/activity signals straight from an Oura ring (Ring 3/4/5).
@@ -93,6 +95,20 @@ enum Command {
         /// Minutes the ring streams per "Start" (it auto-stops after this).
         #[arg(long, default_value_t = 5)]
         minutes: u16,
+    },
+    /// Tilt-controlled asteroid game (web UI) — steer a ship by tilting the ring.
+    Game {
+        /// Local HTTP port to serve the game on.
+        #[arg(long, default_value_t = 8089)]
+        port: u16,
+        /// Minutes the ring streams per "Start" (it auto-stops after this).
+        #[arg(long, default_value_t = 10)]
+        minutes: u16,
+    },
+    /// Ask the ring to run sleep analysis (so it emits hypnogram/summary events).
+    SleepAnalyze {
+        #[arg(long)]
+        force: bool,
     },
     /// Show feature status (HR, SpO2…) and optionally enable measurement.
     Features {
@@ -203,10 +219,16 @@ async fn main() -> Result<()> {
         Command::Latest => cmd_latest(&cli, &key).await,
         Command::LiveHr { seconds, raw } => cmd_live_hr(&cli, &key, *seconds, *raw).await,
         Command::Accel { seconds } => cmd_accel(&cli, &key, *seconds).await,
+        Command::SleepAnalyze { force } => cmd_sleep_analyze(&cli, &key, *force).await,
         Command::Viz { port, minutes } => {
             let client = connect(&cli).await?;
             maybe_auth(&client, &key).await?;
             viz::run(client, *port, *minutes).await
+        }
+        Command::Game { port, minutes } => {
+            let client = connect(&cli).await?;
+            maybe_auth(&client, &key).await?;
+            game::run(client, *port, *minutes).await
         }
         Command::Rdata { action } => cmd_rdata(&cli, &key, action).await,
         Command::Events => cmd_events(&cli).await,
@@ -466,6 +488,18 @@ async fn cmd_live_hr(cli: &Cli, key: &Option<[u8; 16]>, seconds: u64, raw: bool)
     if count == 0 {
         println!("No beats captured. Make sure the ring is worn.");
     }
+    let _ = client.transport().disconnect().await;
+    Ok(())
+}
+
+async fn cmd_sleep_analyze(cli: &Cli, key: &Option<[u8; 16]>, force: bool) -> Result<()> {
+    let client = connect(cli).await?;
+    maybe_auth(&client, key).await?;
+    let status = client.check_sleep_analysis(force).await?;
+    println!(
+        "Sleep analysis triggered (force={force}); status={status} (0 = ok). \
+         Give the ring time to postprocess, then `sync` to fetch sleep events."
+    );
     let _ = client.transport().disconnect().await;
     Ok(())
 }

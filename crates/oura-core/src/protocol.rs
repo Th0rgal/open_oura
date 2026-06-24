@@ -168,6 +168,12 @@ pub fn req_set_feature_mode(feature: u8, mode: u8) -> Vec<u8> {
     vec![0x2f, 0x03, 0x22, feature, mode]
 }
 
+/// Ask the ring to run sleep analysis (`28 01 <force>`). After it postprocesses,
+/// `sleep_phase`/`sleep_summary` events appear in history. Response tag `0x29`.
+pub fn req_check_sleep_analysis(force: bool) -> Vec<u8> {
+    vec![0x28, 0x01, force as u8]
+}
+
 /// Real-time measurement type bit flags for [`req_set_realtime`].
 pub mod realtime {
     /// Live accelerometer x/y/z stream (the "wave to test motion" path).

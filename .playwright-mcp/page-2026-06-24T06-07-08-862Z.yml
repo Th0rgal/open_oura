@@ -1,0 +1,37 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e3]:
+    - generic [ref=e4]: Ring Runner
+    - generic [ref=e5]:
+      - generic [ref=e6]: stream
+      - generic [ref=e7]:
+        - button "Start" [ref=e8] [cursor=pointer]
+        - button "Stop" [ref=e9] [cursor=pointer]
+    - generic [ref=e10]:
+      - generic [ref=e11]: status
+      - generic [ref=e12]: idle
+    - generic [ref=e13]:
+      - generic [ref=e14]: rate
+      - generic [ref=e15]: "-- Hz"
+    - separator [ref=e16]
+    - generic [ref=e17]:
+      - generic [ref=e18]: sensitivity
+      - slider [ref=e19]: "120"
+    - generic [ref=e20]:
+      - generic [ref=e21]: dead-zone
+      - slider [ref=e22]: "25"
+    - generic [ref=e23]:
+      - generic [ref=e24]: smoothing
+      - slider [ref=e25]: "10"
+    - generic [ref=e26]:
+      - generic [ref=e27]: invert vertical ↕
+      - checkbox [ref=e28]
+    - button "Recalibrate" [ref=e29] [cursor=pointer]
+    - generic [ref=e31]: stick
+    - generic [ref=e34]: tilt = steer · arrows = test
+  - generic [ref=e35]:
+    - generic [ref=e36]: "0"
+    - generic [ref=e37]: best 0
+  - generic:
+    - heading "Ring Runner" [level=1]
+    - paragraph: Put on your ring, then press Start. You'll get 3 seconds to hold your hand in a comfortable neutral pose — that becomes the centre of the stick. Then tilt to dodge.
+    - paragraph

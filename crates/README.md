@@ -185,13 +185,16 @@ real bytes** (the Ring 5 hasn't emitted these):
 - `spo2_event` (`0x6f` summarized %), `sleep_phase_*` (hypnogram), `ambient`/`ehr`
   u16 — logic clear, awaiting data.
 
-**Not emitted even after a full overnight sync:** `sleep_phase_*`,
-`sleep_summary_1..4`, and the summarized `spo2_event` (`0x6f`) did **not** appear —
-the ring produced the **raw** streams (IBI, HRV, SpO2 R/PI, sleep temp, sleep ACM)
-but not the computed sleep architecture. That on-device sleep analysis likely runs
-in a separate postprocessing pass (possibly app-triggered via `CheckSleepAnalysis`,
-or over more nights). So sleep stages/summaries would, for now, have to be computed
-from the raw inputs we do have — the same way the cloud does.
+**Sleep analysis is partial on-device.** After a full overnight sync the ring
+emitted only the **raw** streams (IBI, HRV, SpO2 R/PI, sleep temp, sleep ACM), not
+the computed architecture. Triggering it explicitly with `oura sleep-analyze
+--force` (`CheckSleepAnalysis`) **does** make the ring emit `bedtime_period` — the
+detected sleep window (validated: ~7.28 h, decoded as two `u32` ring timestamps).
+But the full hypnogram (`sleep_phase_*`) and `sleep_summary_1..4`, and the
+summarized `spo2_event` (`0x6f`), still did **not** appear via this path — that
+detailed staging is likely finished in the official app's fuller flow or
+cloud-side. So sleep *stages/summaries* would, for now, have to be computed locally
+from the raw inputs we have (HR/HRV/temp/motion) — the way the cloud does.
 
 **Assumptions** baked in: event-body timestamps are the envelope's ring time
 (deciseconds), not the native's resolved wall-clock; batched events' per-sample

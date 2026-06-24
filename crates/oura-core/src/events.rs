@@ -86,6 +86,8 @@ fn decode_body(tag: u8, body: &[u8]) -> Option<serde_json::Value> {
         0x4b | 0x4e | 0x5a => decode_sleep_phases(body),
         // motion_event: orientation + per-axis average motion + intensity.
         0x47 => decode_motion(body),
+        // bedtime_period: detected sleep window (start/end ring deciseconds).
+        0x76 => decode_bedtime_period(body),
         // sleep_acm_period: 6 accelerometer MAD statistics (fixed-point floats).
         0x72 => decode_sleep_acm_period(body),
         // spo2_r_pi_event (Ring 5 tag 0x8b): SpO2 R-ratio + perfusion index.
@@ -350,6 +352,22 @@ fn decode_motion(body: &[u8]) -> Option<serde_json::Value> {
     Some(v)
 }
 
+/// `bedtime_period` (tag `0x76`): the ring's detected sleep window as two `u32`
+/// little-endian ring timestamps (deciseconds). Produced by sleep analysis.
+fn decode_bedtime_period(body: &[u8]) -> Option<serde_json::Value> {
+    if body.len() < 8 {
+        return None;
+    }
+    let start = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
+    let end = u32::from_le_bytes([body[4], body[5], body[6], body[7]]);
+    let hours = end.saturating_sub(start) as f64 / 10.0 / 3600.0;
+    Some(serde_json::json!({
+        "bedtime_start_ds": start,
+        "bedtime_end_ds": end,
+        "duration_hours": (hours * 100.0).round() / 100.0,
+    }))
+}
+
 /// A single leading byte under a named key.
 fn decode_first_byte(body: &[u8], key: &str) -> Option<serde_json::Value> {
     body.first().map(|&b| serde_json::json!({ key: b }))
@@ -574,6 +592,15 @@ mod tests {
         assert_eq!(m.len(), 6);
         assert_eq!(m[0].as_f64().unwrap(), 0.6941); // 177/255
         assert_eq!(m[1].as_f64().unwrap(), 1.2745); // 1 + 70/255
+    }
+
+    #[test]
+    fn decodes_bedtime_period_real_bytes() {
+        // Captured after triggering sleep analysis: ~7.28 h window.
+        let v = decode_bedtime_period(&hex::decode("74376100e6366500").unwrap()).unwrap();
+        assert_eq!(v["bedtime_start_ds"].as_u64().unwrap(), 6_371_188);
+        assert_eq!(v["bedtime_end_ds"].as_u64().unwrap(), 6_633_190);
+        assert_eq!(v["duration_hours"].as_f64().unwrap(), 7.28);
     }
 
     #[test]

@@ -313,6 +313,16 @@ impl<T: Transport> OuraClient<T> {
         Ok(out)
     }
 
+    /// Trigger the ring's sleep analysis. Returns the `0x29` status byte.
+    pub async fn check_sleep_analysis(&self, force: bool) -> Result<u8> {
+        let packets = self
+            .request(&protocol::req_check_sleep_analysis(force))
+            .await?;
+        Self::find(&packets, 0x29)
+            .and_then(|p| p.payload.first().copied())
+            .ok_or_else(|| Error::Protocol("no sleep-analysis response".into()))
+    }
+
     /// Read a feature's status (mode/state/subscription).
     pub async fn feature_status(&self, feature_id: u8) -> Result<FeatureStatus> {
         let packets = self.request(&protocol::req_feature_status(feature_id)).await?;
