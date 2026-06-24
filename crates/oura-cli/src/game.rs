@@ -350,6 +350,7 @@ function startGame(){
  bR=norm(sub(seed,sc(u0,dot(seed,u0))));
  bF=cross(u0,bR);
  ship={x:0,y:0};rocks=[];ex=[];score=0;spawnAcc=0;sx=sy=psx=psy=0;paused=false;tStart=performance.now();state='playing';
+ for(let i=0;i<7;i++)spawnRock(-200+Math.random()*170);   // light pre-fill across the full depth
  $('status').textContent='flying';hideCenter();}
 function die(){state='dead';best=Math.max(best,Math.floor(score));localStorage.ringRunnerBest=best;
  $('status').textContent='wrecked';shake=1.0;boom();
@@ -362,6 +363,10 @@ function showCenter(t,big,hint){$('center').classList.remove('hidden');$('ctitle
  if(big===''){$('cbig').classList.add('hidden');}else{$('cbig').classList.remove('hidden');$('cbig').textContent=big;}
  $('cbody').style.display=(t==='RING RUNNER')?'block':'none';$('chint').innerHTML=hint||'';}
 function hideCenter(){$('center').classList.add('hidden');}
+function spawnRock(z){const s=0.2+Math.pow(Math.random(),2.3)*3.2;   // lots of small, rare big
+ const spread=4.2+s*1.7;                                            // big boulders sit wider out (scenery)
+ rocks.push({x:(Math.random()*2-1)*spread,y:(Math.random()*2-1)*(2.8+s*0.9),z:z,s:s,mi:(Math.random()*ROCKS.length)|0,
+ ax:norm([Math.random()*2-1,Math.random()*2-1,Math.random()*2-1]),aa:Math.random()*6.28,spin:(Math.random()-0.5)*1.6});}
 function togglePause(){if(state!=='playing')return;paused=!paused;
  if(paused){$('status').textContent='paused';showCenter('PAUSED','','press SPACE to resume');
   if(eng&&AC)eng.master.gain.setTargetAtTime(0,AC.currentTime,0.1);}
@@ -390,19 +395,16 @@ function update(dt,now){
  if(ex.length){for(const e of ex){e.p=add(e.p,sc(e.v,dt));e.v=sc(e.v,0.94);e.life-=dt*1.1;}ex=ex.filter(e=>e.life>0);}
  if(state!=='playing'||paused)return;
  const t=(now-tStart)/1000;
- const speed=38+t*1.7, interval=Math.max(0.32,0.72-t*0.012);
+ const speed=24+t*1.0, interval=Math.max(0.6,1.15-t*0.008);
  const [nx,ny]=stickTarget();
  const f=1-Math.pow(0.0001,dt);
  sx+=(nx-sx)*f;sy+=(ny-sy)*f;
  ship.x+=(nx*3.6-ship.x)*f;ship.y+=(ny*2.3-ship.y)*f;
  ship.x=clamp(ship.x,-4.4,4.4);ship.y=clamp(ship.y,-2.8,2.8);
- spawnAcc+=dt;while(spawnAcc>=interval){spawnAcc-=interval;
-  rocks.push({x:(Math.random()*2-1)*5,y:(Math.random()*2-1)*3.4,z:-160,
-   s:0.28+Math.random()*Math.random()*2.7,mi:(Math.random()*ROCKS.length)|0,
-   ax:norm([Math.random()*2-1,Math.random()*2-1,Math.random()*2-1]),aa:Math.random()*6.28,spin:(Math.random()-0.5)*1.6});}
+ spawnAcc+=dt;while(spawnAcc>=interval){spawnAcc-=interval;spawnRock(-200);}
  const shipR=0.6;
  for(let i=rocks.length-1;i>=0;i--){const o=rocks[i];o.z+=speed*dt;o.aa+=o.spin*dt;
-  if(o.z>9){rocks.splice(i,1);score+=10;continue;}
+  if(o.z>7){rocks.splice(i,1);score+=10;continue;}
   if(o.z>-1.3&&o.z<1.3&&Math.hypot(o.x-ship.x,o.y-ship.y)<o.s*1.0+shipR){die();break;}}
  score+=dt*8;
  // visuals + audio drive
@@ -413,6 +415,7 @@ function update(dt,now){
 }
 
 // ---- render --------------------------------------------------------------
+const ZCAM=6.2;   // camera distance behind the ship
 const KEY=norm([0.5,0.8,0.35]),FILL=norm([-0.6,-0.2,0.4]);
 const FOG=[0.02,0.05,0.10];
 let _VP=null;
@@ -437,8 +440,10 @@ function render(now,dt){
  const asp=cv.width/cv.height;
  const P=M.persp(1.0,asp,0.1,400);
  const shk=shake*0.18;
- const eye=[ship.x*0.14+Math.sin(now*0.0006)*0.05+(Math.random()*2-1)*shk,2.5+(Math.random()*2-1)*shk,5.6];
- const ctr=[ship.x*0.32,0.55+ship.y*0.22,-9];
+ // camera looks straight down the lane so the ship sits dead-centre; rocks spawn
+ // far and grow as they approach. only a tiny idle sway + death shake.
+ const eye=[Math.sin(now*0.0006)*0.04+(Math.random()*2-1)*shk,(Math.random()*2-1)*shk,ZCAM];
+ const ctr=[0,0,-9];
  const V=M.look(eye,ctr,[0,1,0]);
  const VP=M.mul(P,V);
  // camera basis for billboards
@@ -551,6 +556,9 @@ $('snd').onclick=()=>{muted=!muted;$('snd').classList.toggle('on',!muted);$('snd
 addEventListener('keydown',e=>{keys[e.key]=true;if(e.code==='Space'){e.preventDefault();
  if(state==='dead')startGame();else if(state==='idle')$('start').click();else if(state==='playing')togglePause();}});
 addEventListener('keyup',e=>{keys[e.key]=false;});
+// Stop the ring stream the moment the tab is closed/navigated away (keepalive lets
+// the request outlive the page); the server also stops on disconnect as a backstop.
+addEventListener('pagehide',()=>{try{fetch('/stop',{headers:H.headers,keepalive:true});}catch(e){}});
 $('best').textContent=best;
 </script>
 </body></html>"##;

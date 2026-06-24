@@ -5,6 +5,7 @@
 //! the BLE stream. Each caller supplies its own page via `index_html`; everything
 //! else — parsing, fan-out, and the loopback/CSRF defences — is shared.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -30,6 +31,9 @@ pub async fn run(
 ) -> Result<()> {
     let client: Client = Arc::new(client);
     let (tx, _) = broadcast::channel::<String>(512);
+    // Count of live SSE clients: when the last one drops (tab closed), stop the
+    // ring so we don't keep streaming (and draining battery) until its timer.
+    let clients = Arc::new(AtomicUsize::new(0));
 
     // Always-on parser: raw ring notifications -> ACM samples -> JSON to the page.
     let mut raw_rx = client.transport().subscribe();
@@ -62,7 +66,8 @@ pub async fn run(
                 if let Ok((sock, _)) = accept {
                     let rx = tx.subscribe();
                     let c = client.clone();
-                    tokio::spawn(async move { let _ = handle(sock, rx, c, port, minutes, index_html).await; });
+                    let cl = clients.clone();
+                    tokio::spawn(async move { let _ = handle(sock, rx, c, cl, port, minutes, index_html).await; });
                 }
             }
         }
@@ -82,6 +87,7 @@ async fn handle(
     mut sock: TcpStream,
     mut rx: broadcast::Receiver<String>,
     client: Client,
+    clients: Arc<AtomicUsize>,
     port: u16,
     minutes: u16,
     index_html: &'static str,
@@ -124,6 +130,7 @@ async fn handle(
                   Cache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n",
             )
             .await?;
+            clients.fetch_add(1, Ordering::SeqCst);
             loop {
                 match rx.recv().await {
                     Ok(line) => {
@@ -138,6 +145,10 @@ async fn handle(
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(_) => break,
                 }
+            }
+            // This client is gone; if it was the last one, stop the ring stream.
+            if clients.fetch_sub(1, Ordering::SeqCst) == 1 {
+                let _ = client.transport().write(&protocol::req_realtime_off()).await;
             }
         }
         "/start" => {

@@ -136,5 +136,6 @@ $('reset').onclick=()=>{trail=[];pos=[0,0,0];vel=[0,0,0];};
 const H={headers:{'X-Oura-Viz':'1'}};
 $('start').onclick=async()=>{await fetch('/start',H);streaming=true;$('start').classList.add('on');$('stop').classList.remove('on');$('status').textContent='streaming';};
 $('stop').onclick=async()=>{await fetch('/stop',H);streaming=false;$('start').classList.remove('on');$('stop').classList.add('on');$('status').textContent='stopped';};
+addEventListener('pagehide',()=>{try{fetch('/stop',{headers:H.headers,keepalive:true});}catch(e){}});
 </script>
 </body></html>"##;
