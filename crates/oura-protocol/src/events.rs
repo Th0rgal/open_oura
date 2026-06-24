@@ -572,14 +572,15 @@ fn decode_aohr(body: &[u8]) -> Option<serde_json::Value> {
     if body.len() != count * 2 + 3 {
         return None;
     }
-    let values: Vec<u8> = (0..count).map(|i| body[3 + 2 * i]).collect();
-    let status: Vec<u8> = (0..count).map(|i| body[4 + 2 * i]).collect();
+    // Field names per the AohrEvent protobuf: per-sample (bpm, quality).
+    let bpm: Vec<u8> = (0..count).map(|i| body[3 + 2 * i]).collect();
+    let quality: Vec<u8> = (0..count).map(|i| body[4 + 2 * i]).collect();
     Some(serde_json::json!({
         "flag": body[0] & 1,
         "base_offset": body[1],
         "interval_ms": 1920,
-        "values": values,
-        "status": status,
+        "bpm": bpm,
+        "quality": quality,
         "_status": "unvalidated",
     }))
 }
@@ -795,7 +796,8 @@ mod tests {
             b.push(1);
         }
         let v = decode_aohr(&b).unwrap();
-        assert_eq!(v["values"].as_array().unwrap().len(), 6);
+        assert_eq!(v["bpm"].as_array().unwrap().len(), 6);
+        assert_eq!(v["quality"].as_array().unwrap().len(), 6);
         assert_eq!(v["interval_ms"], 1920);
         assert_eq!(v["_status"], "unvalidated");
     }

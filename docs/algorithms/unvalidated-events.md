@@ -23,11 +23,11 @@ fields. The handler `@ address` is cited in `crates/oura-protocol/src/events.rs`
 | `0x4f` | sleep_summary_3 | structure (3 fields are ÷8 fixed-point) | after a processed sleep period |
 | `0x58` | sleep_summary_4 | structure only | after a processed sleep period |
 | `0x7e`/`0x7f` | real_steps_features | bit-unpacked fields, names TBD | walk with the step feature on |
-| `0x86` | aohr_event | shape (1920 ms interval, value+status) | enable always-on HR |
+| `0x86` | aohr_event | fields (bpm, quality, 1920 ms interval) | no toggle — rides on daytime HR (enabled); appears when worn |
 | `0x84` | ambient_event | i16 @ 5 min, units TBD | appears with ambient sensing |
-| `0x87` | atlas_metadata | start-stream control msg | Ring-5 bioZ measurement |
-| `0x88` | atlas_raw_bioz_data | delta-coded i32 stream | Ring-5 bioZ measurement |
-| `0x61`/`0x11` | charging_time | u32 (units TBD) | put the ring on the charger |
+| `0x87` | atlas_metadata | start-stream control msg | **backend-gated** (`sensing_discovery/atlas` FeatureDefinition, cloud-delivered) — not enableable from an independent client |
+| `0x88` | atlas_raw_bioz_data | delta-coded i32 stream | same backend gate as `0x87` |
+| `0x61`/`0x11` | charging_time | u32 (units TBD) | **not emitted in normal use** — charge-end comes via `charging_ended_statistics` (0x20/0x27) instead; likely needs a full low→full cycle or is Ring-3-only |
 
 ## Not decoded (low value / diagnostic only)
 
