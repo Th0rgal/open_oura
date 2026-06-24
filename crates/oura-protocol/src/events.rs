@@ -96,6 +96,18 @@ fn decode_body(tag: u8, body: &[u8]) -> Option<serde_json::Value> {
         0x60 => decode_ibi_amplitude(body),
         // alert_event: single alert-type byte.
         0x56 => decode_first_byte(body, "alert_type"),
+        // motion_period: header byte + packed 2-bit motion levels (4/byte, MSB-first).
+        // From the native parser `parse_api_motion_period @ 0x3c7cd8`.
+        0x6b => decode_motion_period(body),
+        // feature_session: [feature_id][session_status][optional u16 value].
+        // From `parse_api_feature_session @ 0x3c1de0`.
+        0x6c => decode_feature_session(body),
+        // BLE/radio telemetry + self-test diagnostics. Identified from the native
+        // parser registration table; bodies preserved (layouts are device-internal).
+        0x5b => decode_telemetry(body, "ble_connection_ind"), // parse_api_ble_connection_ind @ 0x3c6118
+        0x79 => decode_telemetry(body, "self_test_data"),     // parse_api_selftest_data_event @ 0x3ca74c
+        0x82 => decode_telemetry(body, "scan_start"),         // parse_api_scan_start @ 0x3cbe20
+        0x83 => decode_telemetry(body, "scan_end"),           // parse_api_scan_end @ 0x3cc43c
         _ => None,
     }
 }
@@ -374,6 +386,64 @@ fn decode_first_byte(body: &[u8], key: &str) -> Option<serde_json::Value> {
 }
 
 /// Map an event tag to its name. Mirrors the Android app's event taxonomy.
+/// `motion_period` (tag `0x6b`): a compact activity timeline. The header byte
+/// packs `type` (bits 6-7), the sample count of the final byte (bits 4-5), and a
+/// low nibble; each subsequent byte holds four 2-bit motion levels (0-3), MSB
+/// first. Layout from the native parser `parse_api_motion_period @ 0x3c7cd8`.
+fn decode_motion_period(body: &[u8]) -> Option<serde_json::Value> {
+    if body.len() < 2 {
+        return None;
+    }
+    let header = body[0];
+    let period_type = header >> 6;
+    let low_nibble = header & 0x0f;
+    let last_count = ((header >> 4) & 0x03) as usize;
+    let mut levels: Vec<u8> = Vec::new();
+    for (i, &b) in body[1..].iter().enumerate() {
+        let n = if i == body.len() - 2 { last_count } else { 4 };
+        for k in 0..n {
+            levels.push((b >> (6 - 2 * k)) & 0x03);
+        }
+    }
+    Some(serde_json::json!({
+        "period_type": period_type,
+        "low_nibble": low_nibble,
+        "motion_levels": levels,
+    }))
+}
+
+/// `feature_session` (tag `0x6c`): start/stop markers for an on-ring measurement
+/// feature. `feature_id` (byte 0, < 8), `session_status` (byte 1, 0-12), and an
+/// optional `value` (u16 LE) for feature-specific payloads. From the native parser
+/// `parse_api_feature_session @ 0x3c1de0`.
+fn decode_feature_session(body: &[u8]) -> Option<serde_json::Value> {
+    if body.len() < 2 {
+        return None;
+    }
+    let mut v = serde_json::json!({
+        "feature_id": body[0],
+        "session_status": body[1],
+    });
+    if body.len() >= 4 {
+        v["value"] = serde_json::json!(u16::from_le_bytes([body[2], body[3]]));
+    }
+    Some(v)
+}
+
+/// Identify a BLE/radio-telemetry or diagnostic event whose payload layout is
+/// device-internal: tag the event by name and preserve the raw body (plus the
+/// leading sub-type byte, which these events use as a discriminator).
+fn decode_telemetry(body: &[u8], kind: &str) -> Option<serde_json::Value> {
+    if body.is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({
+        "kind": kind,
+        "subtype": body[0],
+        "raw": hex::encode(body),
+    }))
+}
+
 pub fn event_name(tag: u8) -> &'static str {
     match tag {
         0x41 => "ring_start",
@@ -469,6 +539,25 @@ impl EventBatchSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decodes_feature_session() {
+        // captured 0x6c body: feature 2, status 1, value 5
+        let v = decode_feature_session(&[0x02, 0x01, 0x05, 0x00]).unwrap();
+        assert_eq!(v["feature_id"], 2);
+        assert_eq!(v["session_status"], 1);
+        assert_eq!(v["value"], 5);
+    }
+
+    #[test]
+    fn decodes_motion_period() {
+        // captured 0x6b body (14 B): header 0x30 -> type 0, last byte holds 3 levels
+        let body = hex::decode("30abefaa596ea89669197afffffb").unwrap();
+        let v = decode_motion_period(&body).unwrap();
+        assert_eq!(v["period_type"], 0);
+        // 12 full bytes x4 + final byte x3 = 51 two-bit levels
+        assert_eq!(v["motion_levels"].as_array().unwrap().len(), 51);
+    }
 
     #[test]
     fn parses_batch_summary() {
