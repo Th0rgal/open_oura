@@ -1,15 +1,18 @@
 //! `oura-analysis` — the *interpretation (high level)* layer: turning decoded
-//! samples into daily metrics, by porting Oura's on-phone `ecore` engine
-//! (`libappecore.so`) algorithms. Each metric's provenance, formula and
-//! validation status is documented under `docs/algorithms/`.
+//! samples into daily metrics and derived insights.
 //!
-//! Status: scaffolding + the first ported, validated algorithms (HRV RMSSD, SpO2
-//! simple curve). Sleep summary, the three scores, baselines, temperature and
-//! cycle are being ported from the decompiled ecore (see docs/algorithms/).
-pub mod baseline;
-pub mod hrv;
-pub mod metabolic;
-pub mod sleep;
-pub mod sleep_debt;
-pub mod spo2;
-pub mod temperature;
+//! Code here is split by **provenance**, so it is always clear whether a result is
+//! Oura's or ours:
+//!
+//! - [`ported`] — algorithms **reverse-engineered from Oura's own software** (the
+//!   on-device `ecore` engine). These aim to reproduce Oura's results and cite the
+//!   source function `@ address`. See `docs/algorithms/`.
+//! - [`original`] — open_oura's **own heuristics**, which Oura does not ship and
+//!   which will not match the Oura app. Used for things Oura computes in its cloud
+//!   (so they can't be ported) or doesn't offer.
+//!
+//! Call sites keep the distinction visible: `ported::hrv::rmssd(..)` vs
+//! `original::activity_session::detect(..)`.
+
+pub mod original;
+pub mod ported;
