@@ -694,11 +694,19 @@ async fn cmd_sync(cli: &Cli, key: &Option<[u8; 16]>, sync_time: bool) -> Result<
 
     let mut inserted = 0u32;
     let outcome = client
-        .drain_events(cursor, |ev| {
-            if store.insert_event(&serial, ev).unwrap_or(false) {
-                inserted += 1;
-            }
-        })
+        .drain_events(
+            cursor,
+            |ev| {
+                if store.insert_event(&serial, ev).unwrap_or(false) {
+                    inserted += 1;
+                }
+            },
+            // Persist the cursor after each batch so an interrupted sync still
+            // makes forward progress next time.
+            |c| {
+                let _ = store.set_cursor(&serial, c);
+            },
+        )
         .await?;
 
     store.set_cursor(&serial, outcome.next_cursor)?;

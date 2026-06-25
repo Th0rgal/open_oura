@@ -220,9 +220,21 @@ impl<T: Transport> OuraClient<T> {
     /// Drain history events starting from `cursor` (deciseconds), invoking
     /// `on_event` for each. Loops until the ring reports no bytes left. Returns
     /// the count synced and the next cursor to persist for incremental sync.
-    pub async fn drain_events<F>(&self, cursor: u32, mut on_event: F) -> Result<SyncOutcome>
+    ///
+    /// `on_batch` is called with the advanced cursor after every fully-processed
+    /// batch, so callers can persist it incrementally — otherwise an interrupted
+    /// sync (timeout / BLE drop) inserts events but loses the cursor advance,
+    /// forcing the next sync to re-pull from the old cursor (and never reach new
+    /// events if a batch cap is hit first).
+    pub async fn drain_events<F, G>(
+        &self,
+        cursor: u32,
+        mut on_event: F,
+        mut on_batch: G,
+    ) -> Result<SyncOutcome>
     where
         F: FnMut(&RingEvent),
+        G: FnMut(u32),
     {
         let mut start = cursor;
         let mut total = 0u32;
@@ -253,6 +265,7 @@ impl<T: Transport> OuraClient<T> {
             let progressed = batch_events > 0 && next > start;
             if progressed {
                 start = next;
+                on_batch(start); // persist incrementally (this batch is fully drained)
             }
             // Stop when drained, or when we can make no further progress.
             if bytes_left == 0 || !progressed {
