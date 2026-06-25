@@ -68,7 +68,15 @@ pub struct Store {
 impl Store {
     /// Open (creating if needed) a database at `path` and ensure the schema.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let path = path.as_ref();
         let conn = Connection::open(path)?;
+        // Health data + device identifiers are sensitive; keep the DB owner-only.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| crate::error::Error::Storage(e.to_string()))?;
+        }
         conn.execute_batch(SCHEMA)?;
         Ok(Self { conn })
     }
