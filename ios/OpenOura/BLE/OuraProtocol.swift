@@ -71,6 +71,8 @@ enum Req {
     static func authenticate(_ enc: Data) -> Data { packet(0x2f, [0x2d] + [UInt8](enc)) }
     /// Install a 16-byte auth key (only valid on a factory-reset ring).
     static func setAuthKey(_ key: Data) -> Data { packet(0x24, [UInt8](key)) }
+    /// Factory-reset the ring (wipes its auth key + user data). Returns tag 0x1b.
+    static let factoryReset = Data([0x1a, 0x00])
     static func capabilities(_ page: UInt8) -> Data { Data([0x2f, 0x02, 0x01, page]) }
     static func setNotification(_ flags: UInt8) -> Data { packet(0x1c, [flags]) }
     static func featureStatus(_ f: UInt8) -> Data { Data([0x2f, 0x02, 0x20, f]) }

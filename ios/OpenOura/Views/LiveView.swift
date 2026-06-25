@@ -4,55 +4,55 @@ struct LiveView: View {
     @EnvironmentObject var ring: OuraRing
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                StatusBanner().padding(.top, 4)
+        TabScaffold(title: "Live") {
+            Card {
                 VStack(spacing: 14) {
-                    MetricCard(title: "Heart rate", accent: .pink) {
-                        HStack(alignment: .firstTextBaseline) {
-                            BigValue(value: ring.liveHR.map(String.init) ?? "--", unit: "bpm")
-                            Spacer()
-                            VStack(alignment: .trailing) {
-                                Text("HRV \(ring.liveHRV.map(String.init) ?? "--") ms")
-                                    .font(.caption).foregroundColor(.secondary)
-                            }
-                        }
-                        Sparkline(values: ring.hrSeries, color: .pink).frame(height: 70)
+                    ScoreRing(value: ring.liveHR.map(Double.init), range: 40...140, color: Brand.hr,
+                              caption: ring.liveActive ? "LIVE" : "HEART RATE", unit: "bpm",
+                              pulse: ring.liveActive)
+                        .frame(width: 190, height: 190)
+                        .padding(.top, 6)
+                    if ring.liveActive && ring.liveHR == nil {
+                        Text("Measuring… keep the ring snug and still")
+                            .font(.caption).foregroundStyle(Brand.dim)
                     }
-
-                    MetricCard(title: "Motion", accent: .blue) {
-                        HStack(alignment: .firstTextBaseline) {
-                            BigValue(value: ring.motionG.map { String(format: "%.2f", $0) } ?? "--", unit: "g")
-                            Spacer()
-                            Text("restless \(ring.restlessness.map(String.init) ?? "0")%")
-                                .font(.caption).foregroundColor(.secondary)
-                        }
-                        Sparkline(values: ring.motionSeries, color: .blue, minY: 0, maxY: 3).frame(height: 70)
-                    }
-
-                    MetricCard(title: "HRV trend (RMSSD)", accent: .purple) {
-                        Sparkline(values: ring.hrvSeries, color: .purple).frame(height: 60)
-                    }
-
-                    Button(action: toggle) {
-                        Text(ring.liveActive ? "Stop live" : "Start live")
-                            .frame(maxWidth: .infinity).padding(.vertical, 6)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(ring.liveActive ? .gray : .pink)
-                    .disabled(ring.state != .ready)
-
-                    Text("Forces the green-LED measurement and streams motion. Give it ~10–20 s on your finger to lock the first beat.")
-                        .font(.caption2).foregroundColor(.secondary)
-                        .multilineTextAlignment(.center).padding(.horizontal)
                 }
-                .padding()
             }
-            .navigationTitle("Live")
-        }
-    }
+            .padding(.horizontal, 16)
 
-    private func toggle() {
-        if ring.liveActive { ring.stopLive() } else { ring.startLive() }
+            HStack(spacing: 12) {
+                MetricTile(title: "HRV (RMSSD)", value: ring.liveHRV.map { "\($0)" } ?? "—",
+                           unit: "ms", accent: Brand.hrv, spark: ring.hrvSeries.suffix(60))
+                MetricTile(title: "Motion", value: ring.motionG.map { String(format: "%.2f", $0) } ?? "—",
+                           unit: "g", accent: Brand.motion, spark: ring.motionSeries.suffix(80))
+            }
+            .padding(.horizontal, 16)
+
+            Card {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("HEART RATE").font(.caption2.weight(.semibold)).foregroundStyle(Brand.hr)
+                    Sparkline(values: ring.hrSeries, color: Brand.hr).frame(height: 90)
+                    HStack {
+                        Label("\(ring.restlessness ?? 0)% restless", systemImage: "figure.walk.motion")
+                        Spacer()
+                        if let g = ring.motionG { Text("|a| \(String(format: "%.2f", g)) g") }
+                    }.font(.caption2).foregroundStyle(Brand.dim)
+                }
+            }
+            .padding(.horizontal, 16)
+
+            Button(action: { ring.liveActive ? ring.stopLive() : ring.startLive() }) {
+                Label(ring.liveActive ? "Stop live" : "Start live",
+                      systemImage: ring.liveActive ? "stop.fill" : "play.fill")
+                    .frame(maxWidth: .infinity).padding(.vertical, 8)
+            }
+            .buttonStyle(.borderedProminent).tint(ring.liveActive ? Brand.dim : Brand.hr)
+            .disabled(ring.state != .ready)
+            .padding(.horizontal, 16)
+
+            Text("Live mode forces the green-LED measurement and streams motion. Heart rate arrives in bursts every few seconds; wear the ring snugly.")
+                .font(.caption2).foregroundStyle(Brand.dim)
+                .multilineTextAlignment(.center).padding(.horizontal, 28)
+        }
     }
 }

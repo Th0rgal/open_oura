@@ -41,6 +41,7 @@ final class OuraRing: NSObject, ObservableObject {
     @Published var syncing = false
     @Published var events: [DecodedEvent] = []
     @Published var health = HealthData()
+    @Published var lastSync: Date? = HealthStore.lastSync
     @Published var alert: String?   // surfaced as a user-facing alert on failure
     @Published var showConnectGuide = false   // drives the onboarding/connect sheet
 
@@ -582,15 +583,50 @@ final class OuraRing: NSObject, ObservableObject {
 
     func syncHistory() async {
         guard state == .ready, !syncing else { return }
-        publish { self.syncing = true; self.status = "Syncing history…" }
+        publish { self.syncing = true }
+        // Drain into a scratch buffer; the displayed model is only swapped in once
+        // the sync *completes*, so the UI never shows a half-synced state.
         var collected: [DecodedEvent] = []
         _ = await drainEventsLive(cursor: 0) { ev in collected.append(ev) }
         let model = HealthData(events: collected)
+        HealthStore.save(collected)
         publish {
             self.events = collected
             self.health = model
             self.syncing = false
-            self.status = "Synced \(collected.count) events"
+            self.lastSync = HealthStore.lastSync
+            self.status = "Connected"
+        }
+    }
+
+    /// Load the last synced history from disk so the UI has real data immediately.
+    func loadCachedHistory() {
+        let cached = HealthStore.load()
+        guard !cached.isEmpty else { return }
+        let model = HealthData(events: cached)
+        publish { self.events = cached; self.health = model }
+    }
+
+    /// Factory-reset the ring (wipes its key + data) and clear all local state so
+    /// the user can pair fresh. Danger — gated behind a confirmation in the UI.
+    func factoryReset() async {
+        guard state == .ready else { return }
+        dbg("factory reset requested")
+        _ = await requestUntil(Req.factoryReset, tag: 0x1b, ext: nil, timeout: 2.0)
+        KeyStore.clear()
+        UserDefaults.standard.removeObject(forKey: "ringPeripheralID")
+        HealthStore.clear()
+        bleQueue.async {
+            self.userDisconnecting = true
+            self.wantsAutoReconnect = false
+            if let p = self.peripheral { self.central.cancelPeripheralConnection(p) }
+        }
+        publish {
+            self.state = .idle
+            self.status = "Ring factory-reset — pair again"
+            self.firmware = nil; self.serial = nil; self.hardware = nil
+            self.batteryPercent = nil; self.events = []; self.health = HealthData(); self.lastSync = nil
+            self.showConnectGuide = true
         }
     }
 }

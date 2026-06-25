@@ -1,0 +1,20 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="ring" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f38ba8"/>
+      <stop offset="0.45" stop-color="#cba6f7"/>
+      <stop offset="1" stop-color="#94e2d5"/>
+    </linearGradient>
+    <radialGradient id="bg" cx="0.5" cy="0.42" r="0.85">
+      <stop offset="0" stop-color="#1b1f2b"/>
+      <stop offset="1" stop-color="#0b0d12"/>
+    </radialGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="224" fill="url(#bg)"/>
+  <!-- "open" ring: a gapped torus, gap at the top, soft round ends -->
+  <circle cx="512" cy="512" r="300" fill="none" stroke="url(#ring)" stroke-width="118"
+          stroke-linecap="round" stroke-dasharray="1640 245" transform="rotate(-112 512 512)"/>
+  <!-- a single heartbeat tick across the lower ring -->
+  <path d="M392 600 h66 l26 -52 l34 104 l26 -52 h66" fill="none" stroke="#0b0d12"
+        stroke-width="26" stroke-linecap="round" stroke-linejoin="round" opacity="0.9"/>
+</svg>
