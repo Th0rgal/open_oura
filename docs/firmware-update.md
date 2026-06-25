@@ -125,3 +125,70 @@ image** (e.g. re-flash stock firmware) - not to mint a new one.
 These opcodes are catalogued as danger-gated in `tools/oura_protocol.py`
 (`start_fw_update`, `dfu_reset`, `dfu_start`, `dfu_block`, `dfu_activate`) and are
 never sent during normal use.
+
+## Downloading firmware from the cloud (reconstructed, working)
+
+With a mobile session token, the OTA download is fully working:
+
+1. `POST /api/v2/client/config` with the ring described in `rings[]` (key fields:
+   `hardware_type` = the **codename** e.g. `oreo`/`gen2x`/`cooper`, `firmware_version`,
+   `serial_number`, `mac_address`, `capabilities`; also a valid `device.device_uid`
+   and a `components` block, else 400 Invalid payload). Response includes
+   `ota_files: [{type, version, slug}]`.
+2. `GET /api/v2/file/{type}/{version}/{slug}` -> manifest `{filename, size, md5,
+   sha256, url}` with a signed `cdn-updates.ouraring.com` URL. The `slug` is a
+   server-issued secret; the manifest endpoint 404s for any other slug (no
+   enumeration).
+3. Download the signed URL; verify md5/sha256.
+
+Hardware-code -> codename (`GetProductInfoKt.fromId`), and codename -> ring:
+- `BLB_` -> `gen2x` = Ring 3 (Horizon), latest **3.4.3**
+- `ORE_`/`JAD_` -> `oreo` (GEN4) = Ring 4, latest **2.11.0**
+- `COR_` -> `cooper` = Ring 5, on **2.1.3**
+- others: `GPS_M`->gen2m, `KTH_`->gen4k, `BEN_/BEM_`->bentley, `AST_`->aston,
+  `PRC_`->nomad, `NMC_`->nomad2 (Nomad* = charger accessories).
+
+### The "claim outdated to get the latest image" trick (partial)
+Claiming an old `firmware_version` makes the server offer the latest for that
+codename: `oreo`@1.0.0 -> offers `firmware_oreo 2.11.0`; `gen2x`@1.0.0 -> `3.4.3`.
+This works for the **legacy** rings with any (even fake) serial. It does NOT work
+for the newer rings: `cooper`/`bentley`/`aston` return only `assa_config`, never a
+firmware entry, at any claimed version/serial/format. So either no Ring 5 update
+newer than 2.1.3 has shipped yet, or newer-ring firmware uses a gated/staged
+channel only activated for genuinely eligible registered devices. Either way the
+slug (hence the download) is not obtainable for Cooper from a synthetic request.
+
+We have downloaded and integrity-verified `firmware_oreo 2.11.0` (Ring 4) locally
+(notes/firmware/), and analyzed it (below).
+
+## Per-device encryption status: every Oura device firmware is encrypted
+Checked the bundled images in the `ring_firmware` split and the downloaded 2.11.0:
+all carry `@EIV`, ~8.0/8 byte entropy, and the same PSoC6 header `01002108E221`
+(SiliconID `0x08210001`): gen2 (`2.36.1`), gen2x (`3.0.2`), nomad (`2.0.4`),
+nomad2 (`0.5.0`), oreo (`2.7.0`/`2.11.0`), both bootloaders. **None are plaintext.**
+So there is a decryption key for every Oura device's software (rings AND the
+charger accessories), and in every case it is device-resident. Same silicon +
+same scheme across the whole line suggests a shared/product key (extracting it
+once could decrypt the family), but it still requires getting the key off a chip.
+
+### CYACD2 analysis of `firmware_oreo 2.11.0` (Ring 4)
+PSoC6 CYACD2: header SiliconID `0x08210001`, rev `0xE2`, checksum `0x21`;
+`@APPINFO:0x10003c00,0x7ddfc` (app at flash `0x10003C00`, ~515 KB); 1007 rows;
+`@EIV` = 128-bit AES IV; payload entropy 7.9997/8 -> fully AES-encrypted, no
+plaintext strings. Downloadable + integrity-checkable, but not disassemblable
+without the device key.
+
+## Can the firmware key be retrieved or broken?
+- **In software: no.** It is not in the app, the OTA package, or any API. There is
+  a `model-encryption-keys` endpoint for the ML models, but **no equivalent for
+  firmware**. The DFU protocol is write-only for images (push encrypted rows + IV;
+  no command reads the key or flash).
+- **Brute force: no, ever.** AES-128 = 2^128, AES-256 = 2^256. Even a fleet of
+  AI/GPU boxes (e.g. an NVIDIA DGX Spark) at a generous 1e12 AES/s would need
+  ~1e19 years for AES-128 and ~1e57 for AES-256; the Landauer thermodynamic limit
+  rules it out regardless of hardware. Quantum (Grover) only square-roots the work
+  and still leaves AES-256 safe and AES-128 impractical.
+- **Only realistic avenue: hardware extraction** from the ring's PSoC6 (SWD readout
+  if unlocked, fault injection/glitching, or side-channel DPA/CPA). All are
+  equipment-heavy, destructive, and not guaranteed; the bottleneck is physical chip
+  access, not compute (a GPU box would only speed the side-channel statistics).

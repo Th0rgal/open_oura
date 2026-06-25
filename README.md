@@ -67,8 +67,12 @@ State-changing and destructive commands are hidden behind `--include-state` and
   pulls each data channel, and the minimal client sync recipe.
 - [`docs/ring-5-observations.md`](docs/ring-5-observations.md): Ring 5 BLE surface
   and first-contact findings.
-- [`docs/firmware-update.md`](docs/firmware-update.md): the DFU/OTA opcodes and why
-  a custom image cannot be flashed (encrypted, device-resident key).
+- [`docs/firmware-update.md`](docs/firmware-update.md): the DFU/OTA opcodes, the
+  working cloud download pipeline + codename map, per-device encryption status, and
+  why the firmware key is unreachable (device-resident; not brute-forceable).
+- [`docs/security-observations.md`](docs/security-observations.md): findings-only
+  notes on the model/firmware encryption (the "what", not the "how" — no keys,
+  endpoints, or procedures).
 - [`docs/architecture.md`](docs/architecture.md): the fetch/interpret/apply crate
   layering and where to add things.
 - [`docs/algorithms/README.md`](docs/algorithms/README.md): the on-device ecore

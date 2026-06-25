@@ -12,6 +12,8 @@ use oura_link::ble::{self, BleTransport};
 use oura_store::storage::Store;
 use oura_link::OuraClient;
 
+#[cfg(feature = "torch")]
+mod activity_model;
 mod game;
 mod motion_server;
 mod viz;
@@ -120,12 +122,19 @@ enum Command {
         #[arg(long)]
         enable_spo2: bool,
     },
-    /// Detect activity/exposure sessions (workout, swim, sauna, cold) from stored
-    /// events. Heuristic — open_oura's own, not an Oura algorithm.
+    /// Detect & label activity sessions from stored events using Oura's OWN
+    /// `automatic_activity_detection` model (runs via tools/run_activity_model.py;
+    /// needs the Python venv with torch). Not a heuristic.
     Sessions {
         /// Timezone offset (hours from UTC) for displayed times.
         #[arg(long, default_value_t = 0)]
         tz_offset: i64,
+        /// is_workout probability at/above which a segment is marked a workout.
+        #[arg(long, default_value_t = 0.5)]
+        threshold: f64,
+        /// Emit machine-readable JSON instead of a table.
+        #[arg(long)]
+        json: bool,
     },
     /// Subscribe a feature capability (real_steps | atlas | ambient | raw_data |
     /// research_data) via SetFeatureSubscription, to make the ring emit its events.
@@ -272,7 +281,9 @@ async fn main() -> Result<()> {
             enable_hr,
             enable_spo2,
         } => cmd_features(&cli, &key, *enable_hr, *enable_spo2).await,
-        Command::Sessions { tz_offset } => cmd_sessions(&cli, *tz_offset),
+        Command::Sessions { tz_offset, threshold, json } => {
+            cmd_sessions(&cli, *tz_offset, *threshold, *json)
+        }
         Command::Subscribe { feature, mode } => cmd_subscribe(&cli, &key, feature, mode).await,
         Command::FeatureMode { feature, mode } => cmd_feature_mode(&cli, &key, feature, mode).await,
         Command::FeatureStatus => cmd_feature_status(&cli, &key).await,
@@ -399,136 +410,70 @@ async fn cmd_feature_status(cli: &Cli, key: &Option<[u8; 16]>) -> Result<()> {
     Ok(())
 }
 
-/// Detect activity/exposure sessions from stored events (open_oura heuristic).
-fn cmd_sessions(cli: &Cli, tz_offset: i64) -> Result<()> {
-    use oura_analysis::original::activity_session::{detect, Config, MinuteSample};
-    use std::collections::BTreeMap;
-
-    let store = Store::open(&cli.db)?;
-    let events = store.decoded_events()?;
-    if events.is_empty() {
-        println!("No decoded events in {}. Run `oura sync` first.", cli.db.display());
-        return Ok(());
-    }
-    // Anchor ring deciseconds to wall-clock using the latest event's capture time.
-    let (max_ds, anchor_unix) = events
-        .iter()
-        .map(|(ds, _, _, cu)| (*ds, *cu))
-        .max_by_key(|(ds, _)| *ds)
-        .unwrap();
-    let minute_of = |ds: i64| -> i64 { (anchor_unix - (max_ds - ds) / 10) / 60 };
-
-    // Aggregate per-minute signals from the relevant event types.
-    #[derive(Default)]
-    struct Bucket {
-        met: Option<f64>,
-        motion: u32,
-        active_seconds: u32,
-        temp: Vec<f64>,
-        hr: Vec<u32>,
-    }
-    let mut buckets: BTreeMap<i64, Bucket> = BTreeMap::new();
-    for (ds, tag, json, _) in &events {
-        let v: serde_json::Value = match serde_json::from_str(json) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let b = buckets.entry(minute_of(*ds)).or_default();
-        match tag {
-            0x46 | 0x69 | 0x75 => {
-                if let Some(a) = v.get("temps_c").and_then(|t| t.as_array()) {
-                    b.temp.extend(a.iter().filter_map(|x| x.as_f64()));
-                }
-            }
-            0x47 => {
-                if let Some(hi) = v.get("high_intensity").and_then(|x| x.as_u64()) {
-                    b.motion += hi as u32;
-                }
-                if let Some(sec) = v.get("motion_seconds").and_then(|x| x.as_u64()) {
-                    b.active_seconds += sec as u32;
-                }
-            }
-            0x50 => {
-                if let Some(a) = v.get("met").and_then(|t| t.as_array()) {
-                    let m = a.iter().filter_map(|x| x.as_f64()).fold(0.0, f64::max);
-                    b.met = Some(b.met.unwrap_or(0.0).max(m));
-                }
-            }
-            0x80 => {
-                if let Some(a) = v.get("hr_bpm").and_then(|t| t.as_array()) {
-                    b.hr.extend(a.iter().filter_map(|x| x.as_u64().map(|n| n as u32)));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let samples: Vec<MinuteSample> = buckets
-        .into_iter()
-        .map(|(minute, b)| MinuteSample {
-            minute,
-            met: b.met,
-            motion: b.motion,
-            active_seconds: b.active_seconds.min(60),
-            temp_c: (!b.temp.is_empty()).then(|| b.temp.iter().sum::<f64>() / b.temp.len() as f64),
-            hr: (!b.hr.is_empty()).then(|| b.hr.iter().sum::<u32>() / b.hr.len() as u32),
-        })
-        .collect();
-
-    let sessions = detect(&samples, &Config::default());
-    if sessions.is_empty() {
-        println!("No activity/exposure sessions detected.");
-        return Ok(());
-    }
-    let hm = |minute: i64| -> String {
-        let sod = (minute * 60 + tz_offset * 3600).rem_euclid(86400);
-        format!("{:02}:{:02}", sod / 3600, (sod % 3600) / 60)
+/// Label activity sessions by running Oura's own `automatic_activity_detection`
+/// TorchScript model over the stored events. Built with `--features torch` it
+/// runs the model in-process via LibTorch; otherwise it shells out to the
+/// equivalent `tools/run_activity_model.py`. Either way the model — not a
+/// heuristic — produces the labels.
+fn cmd_sessions(cli: &Cli, tz_offset: i64, threshold: f64, json: bool) -> Result<()> {
+    // Locate the repo root by a stable marker present for both backends. Try the
+    // current dir first, then the compiled-in manifest dir, so the binary keeps
+    // working when invoked from elsewhere in the checkout.
+    let marker = Path::new("notes/models/automatic_activity_detection_3_1_11.pt");
+    let find_root = |start: &Path| -> Option<PathBuf> {
+        start.ancestors().find(|d| d.join(marker).is_file()).map(Path::to_path_buf)
     };
-    println!("Detected sessions (open_oura heuristic — not Oura's classification):\n");
-    println!("  {:<13}  {:<13}  {:>4}  {:>8}  {:>4}  temp(C)", "kind", "time", "min", "peakMET", "HR");
-    for s in &sessions {
-        let temp = match (s.temp_min, s.temp_max) {
-            (Some(lo), Some(hi)) => format!("[{lo:.1}, {hi:.1}]"),
-            _ => "-".into(),
-        };
-        let hr = s.mean_hr.map(|h| h.to_string()).unwrap_or_else(|| "-".into());
-        let kind = format!("{:?}", s.kind);
-        let span = format!("{}-{}", hm(s.start_minute), hm(s.end_minute));
-        println!(
-            "  {kind:<13}  {span:<13}  {:>4}  {:>8.1}  {hr:>4}  {temp}",
-            s.minutes, s.peak_met,
-        );
+    let root = std::env::current_dir()
+        .ok()
+        .and_then(|d| find_root(&d))
+        .or_else(|| find_root(Path::new(env!("CARGO_MANIFEST_DIR"))))
+        .ok_or_else(|| {
+            anyhow!(
+                "could not locate the model under notes/models — run `oura sessions` \
+                 from inside the open_oura checkout"
+            )
+        })?;
+
+    // Absolute DB path (the Python child runs with cwd = repo root).
+    let db = cli
+        .db
+        .canonicalize()
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(&cli.db));
+
+    #[cfg(feature = "torch")]
+    {
+        return activity_model::run(&db, &root, tz_offset, threshold, json);
     }
 
-    // Per-swim detail. NOTE: motion is stored as one ~30 s window-average, so this
-    // is an effort *envelope* only — it cannot resolve laps, strokes, or turns.
-    // (That needs high-rate raw accel via RData; see docs/sync-orchestration.md.)
-    use oura_analysis::original::activity_session::SessionKind;
-    let fmt_mmss = |secs: u32| -> String { format!("{}:{:02}", secs / 60, secs % 60) };
-    let bars = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-    let spark = |xs: &[u32]| -> String {
-        let hi = xs.iter().copied().max().unwrap_or(0).max(1);
-        xs.iter()
-            .map(|&x| bars[((x * (bars.len() as u32 - 1)) / hi) as usize])
-            .collect()
-    };
-    for s in sessions.iter().filter(|s| s.kind == SessionKind::Swim) {
-        let elapsed = (s.minutes * 60) as u32;
-        let moving_pct = if elapsed > 0 { s.active_seconds * 100 / elapsed } else { 0 };
-        println!("\nSwim {}-{} (open_oura heuristic, 30 s resolution):", hm(s.start_minute), hm(s.end_minute));
-        println!("  duration     {} min ({} elapsed)", s.minutes, fmt_mmss(elapsed));
-        println!("  moving time  {} ({}% of elapsed)", fmt_mmss(s.active_seconds), moving_pct);
-        println!("  intensity    peak {} units/30s", s.peak_motion);
-        if let Some(hr) = s.mean_hr {
-            println!("  heart rate   mean {hr} bpm");
+    #[cfg(not(feature = "torch"))]
+    {
+        use std::process::Command as Proc;
+        let script_rel = Path::new("tools/run_activity_model.py");
+        // Prefer the repo's venv python (has torch); fall back to python3 on PATH.
+        let venv_py = root.join(".venv/bin/python");
+        let python = if venv_py.is_file() { venv_py } else { PathBuf::from("python3") };
+        let mut cmd = Proc::new(&python);
+        cmd.current_dir(&root)
+            .arg(root.join(script_rel))
+            .arg(&db)
+            .arg("--tz")
+            .arg(tz_offset.to_string())
+            .arg("--threshold")
+            .arg(threshold.to_string());
+        if json {
+            cmd.arg("--json");
         }
-        if let (Some(lo), Some(hi)) = (s.temp_min, s.temp_max) {
-            println!("  water temp   [{lo:.1}, {hi:.1}] C");
+        let status = cmd.status().with_context(|| {
+            format!(
+                "running the activity model via {} (is the Python venv with torch set up?)",
+                python.display()
+            )
+        })?;
+        if !status.success() {
+            return Err(anyhow!("activity model exited with {status}"));
         }
-        println!("  effort       {}", spark(&s.motion_profile));
-        println!("  (no lap/stroke/turn data — sensor is 30 s windowed, not raw)");
+        Ok(())
     }
-    Ok(())
 }
 
 async fn cmd_features(

@@ -5,10 +5,45 @@ TorchScript `automatic_activity_detection_3_1_11.pt` and prints detected activit
 segments — **no raw IMU / RData needed**, it runs on the windowed signals we
 already sync.
 
+**This is the engine behind `oura sessions`.** The Rust CLI no longer ships a
+temperature/MET heuristic; `oura sessions` shells out to this script (it locates
+the repo's `.venv/bin/python`, falling back to `python3`). Use the CLI for the
+normal path and this script directly for `--json`, `--verbose`, or a custom
+`--threshold`/`--min-duration`.
+
 ```
-python tools/run_activity_model.py [DB=captures/ring5.db] [TZ_OFFSET_HOURS=1]
+python tools/run_activity_model.py [DB] [--tz HOURS] [--threshold P] [--json] [--verbose]
+oura sessions --tz-offset 1            # same thing, via the CLI
 ```
-Requires `torch` (CPU is fine) in the venv. The model lives in `notes/models/`.
+`DB` defaults to `./oura.db` then `captures/ring5.db`. Requires `torch` (CPU is
+fine) in the venv. The model lives in `notes/models/`.
+
+## In-process (Rust + LibTorch, no Python at runtime)
+
+Built with `--features torch`, `oura sessions` runs the model in-process via the
+`tch` crate (LibTorch C bindings) instead of shelling out — bit-identical output
+(verified against the Python runner; only a ±0.001 display-rounding and JSON
+key-order differ). The header then reads `… in-process via LibTorch`.
+
+On Apple Silicon the only libtorch is the pip wheel, so the repo **venv is aligned
+to torch 2.9.0** (Python 3.11) — the exact version `tch 0.22` targets — and we link
+against it with **no version-check bypass**:
+
+```
+export PATH="$PWD/.venv/bin:$PATH"
+export LIBTORCH_USE_PYTORCH=1
+cargo build --features torch
+oura sessions --tz-offset 1     # no DYLD_LIBRARY_PATH needed — build.rs bakes the rpath
+```
+
+`build.rs` embeds the venv torch `lib/` as an rpath, so the binary loads
+`libtorch_*.dylib` without `DYLD_LIBRARY_PATH`. The default build (no feature)
+needs no libtorch and keeps using the Python runner. Note LibTorch prints a
+one-time `searchsorted` perf warning to stderr (harmless; stdout/JSON stay clean).
+
+Version coupling: `tch X` pins one exact libtorch (0.20→2.7, 0.22→2.9, 0.24→2.11);
+there is **no 2.8 release**. The venv torch must match the `tch` pin, and torch
+≥2.9 needs Python ≥3.10. If you bump either, bump both together.
 
 ## What works / what doesn't
 

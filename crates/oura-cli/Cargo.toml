@@ -14,7 +14,6 @@ path = "src/main.rs"
 oura-protocol = { path = "../oura-protocol" }
 oura-link = { path = "../oura-link" }
 oura-store = { path = "../oura-store" }
-oura-analysis = { path = "../oura-analysis" }
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
@@ -22,3 +21,14 @@ hex = "0.4"
 serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tch = { version = "=0.22.0", optional = true } # pinned to libtorch 2.9.0 (repo venv)
+
+[features]
+# Run the activity model in-process via LibTorch instead of shelling out to
+# tools/run_activity_model.py. On Apple Silicon the only libtorch is the pip
+# wheel, so the repo venv is aligned to torch 2.9.0 — the exact version tch 0.22
+# targets — and we link against it (no version-check bypass needed). build.rs
+# bakes the rpath, so no DYLD_LIBRARY_PATH at runtime:
+#   export PATH="$PWD/.venv/bin:$PATH" LIBTORCH_USE_PYTORCH=1
+#   cargo run --features torch -- sessions --tz-offset 1
+torch = ["dep:tch"]
