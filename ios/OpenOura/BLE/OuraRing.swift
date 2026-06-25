@@ -52,13 +52,11 @@ final class OuraRing: NSObject, ObservableObject {
         didSet { UserDefaults.standard.set(autoSync, forKey: "autoSync") }
     }
 
-    /// True once we've connected before (a known peripheral id is stored), so the
-    /// app can silently reconnect on launch instead of showing the guide.
-    var canAutoReconnect: Bool {
-        autoConnect && KeyStore.keyBytes() != nil
-            && UserDefaults.standard.string(forKey: "ringPeripheralID") != nil
-    }
+    /// Whether we can silently reconnect on launch (we have a key) — only a ring
+    /// with no key stored needs the onboarding guide.
+    var canAutoReconnect: Bool { autoConnect && KeyStore.keyBytes() != nil }
     private var wantsAutoReconnect = false
+    private var autoScanning = false
     private var userDisconnecting = false
 
     private let bleQueue = DispatchQueue(label: "com.openoura.ble")
@@ -158,7 +156,7 @@ final class OuraRing: NSObject, ObservableObject {
     private func failConnect(_ short: String, _ status: String) {
         bleQueue.async {
             self.dbg("connect failed: \(short)")
-            self.connecting = false; self.pendingConnect = false
+            self.connecting = false; self.pendingConnect = false; self.autoScanning = false
             self.scanTimer?.cancel(); self.connectTimer?.cancel()
             self.central.stopScan()
             if let p = self.peripheral { self.central.cancelPeripheralConnection(p) }
@@ -410,18 +408,25 @@ final class OuraRing: NSObject, ObservableObject {
 
     private func startAutoReconnectIfReady() {
         guard wantsAutoReconnect, autoConnect, !connecting, writeChar == nil,
-              central.state == .poweredOn,
-              KeyStore.keyBytes() != nil,
-              let idStr = UserDefaults.standard.string(forKey: "ringPeripheralID"),
-              let uuid = UUID(uuidString: idStr),
-              let p = central.retrievePeripherals(withIdentifiers: [uuid]).first
+              central.state == .poweredOn, KeyStore.keyBytes() != nil
         else { return }
         connecting = true
-        peripheral = p
-        p.delegate = self
-        dbg("auto-reconnect: pending connect (connects when the ring wakes)")
         publish { if self.state != .ready { self.state = .connecting }; self.status = "Waiting for ring…" }
-        central.connect(p)   // no timeout: iOS connects when the peripheral appears
+        if let idStr = UserDefaults.standard.string(forKey: "ringPeripheralID"),
+           let uuid = UUID(uuidString: idStr),
+           let p = central.retrievePeripherals(withIdentifiers: [uuid]).first {
+            // Known ring: pending connect, no timeout — completes when it wakes.
+            peripheral = p
+            p.delegate = self
+            dbg("auto-reconnect: pending connect to known ring")
+            central.connect(p)
+        } else {
+            // First reconnect on this install: scan silently (no timeout, no modal,
+            // no failure alert). When the ring advertises we connect + save its id.
+            autoScanning = true
+            dbg("auto-reconnect: scanning silently (no known ring id yet)")
+            central.scanForPeripherals(withServices: [OuraGATT.service])
+        }
     }
 
     func readDeviceInfo() async {
@@ -605,10 +610,16 @@ extension OuraRing: CBCentralManagerDelegate, CBPeripheralDelegate {
         scanTimer?.cancel()
         self.peripheral = peripheral
         peripheral.delegate = self
-        publish { self.state = .connecting; self.status = "Connecting…" }
+        publish { if self.state != .ready { self.state = .connecting }; self.status = "Connecting…" }
         central.connect(peripheral)
-        // CoreBluetooth connect() has no timeout of its own — bound it so a ring
-        // held by another central (e.g. a paired Mac) can't hang us forever.
+        if autoScanning {
+            // Silent background reconnect — no timeout, no failure alert.
+            autoScanning = false
+            dbg("auto-reconnect: connecting (no timeout)")
+            return
+        }
+        // Manual scan path: CoreBluetooth connect() has no timeout of its own — bound
+        // it so a ring held by another central (e.g. a paired Mac) can't hang us.
         connectTimer?.cancel()
         let t = DispatchSource.makeTimerSource(queue: bleQueue)
         t.schedule(deadline: .now() + 30)
