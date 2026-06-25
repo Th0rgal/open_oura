@@ -217,6 +217,11 @@ A native SwiftUI app exists under `ios/` (see `ios/README.md`). Architecture:
 - **Auto-reconnect/sync**: `OuraRing.autoReconnect()` uses a no-timeout CoreBluetooth
   pending connect on the saved peripheral id, so the app silently reconnects when the
   ring wakes (and auto-syncs); toggles in Settings.
+- **Background**: the central manager has a restore identifier + `willRestoreState`
+  (CB state preservation/restoration) so iOS relaunches the app in the background for
+  connection events; auto-sync is **incremental** (drains from a persisted cursor,
+  merges into the on-disk cache) and runs inside a `UIApplication` background task.
+  This mirrors Oura's opportunistic background sync — not continuous live polling.
 - The Simulator has **no Bluetooth** — ring features only work on a real device.
 - **Connecting gotchas** (verified on device): the ring must be **awake** to accept a
   connection — off-charger-and-not-worn it deep-sleeps and `connect()` hangs with no
