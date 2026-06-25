@@ -38,6 +38,8 @@ def ms(ds):  # device deciseconds -> absolute epoch ms (int64), consistent acros
 
 if start_ds is None:  # default: first bedtime_period in the DB
     bt = con.execute("SELECT decoded_json FROM events WHERE tag=118 ORDER BY ring_timestamp").fetchone()
+    if bt is None:
+        raise SystemExit("no bedtime_period (tag 0x76) in DB — pass start/end deciseconds or sync overnight data first")
     v = json.loads(bt[0])
     start_ds, end_ds = v["bedtime_start_ds"], v["bedtime_end_ds"]
 

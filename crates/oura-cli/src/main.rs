@@ -77,7 +77,7 @@ enum Command {
     /// Re-run decoders over already-stored raw event bodies (offline).
     Redecode,
     /// RData bulk raw-sampler control: `state` (read), `stop`/`clear` (teardown),
-    /// `probe` (arm ACM-50 ~10 min, measure data rate + battery, auto-teardown).
+    /// `probe` (arm ACM-50 ~30 s, measure data rate + battery, auto-teardown).
     /// `probe` writes a persistent flash session but always tears itself down
     /// (see docs/rdata-capacity-probe.md).
     Rdata {
@@ -638,21 +638,35 @@ async fn cmd_sync(cli: &Cli, key: &Option<[u8; 16]>, sync_time: bool) -> Result<
     println!("Syncing events for {serial} from cursor {cursor} ...");
 
     let mut inserted = 0u32;
+    // Capture any insert error so a DB write failure surfaces loudly instead of
+    // being swallowed — and so the cursor is never advanced past events we failed
+    // to store (which would drop them permanently on the next sync).
+    let insert_err = std::cell::RefCell::new(None);
     let outcome = client
         .drain_events(
             cursor,
             |ev| {
-                if store.insert_event(&serial, ev).unwrap_or(false) {
-                    inserted += 1;
+                if insert_err.borrow().is_some() {
+                    return;
+                }
+                match store.insert_event(&serial, ev) {
+                    Ok(true) => inserted += 1,
+                    Ok(false) => {}
+                    Err(e) => *insert_err.borrow_mut() = Some(e),
                 }
             },
-            // Persist the cursor after each batch so an interrupted sync still
-            // makes forward progress next time.
+            // Persist the cursor after each fully-drained batch (so an interrupted
+            // sync still makes progress) — but not once an insert has failed.
             |c| {
-                let _ = store.set_cursor(&serial, c);
+                if insert_err.borrow().is_none() {
+                    let _ = store.set_cursor(&serial, c);
+                }
             },
         )
         .await?;
+    if let Some(e) = insert_err.into_inner() {
+        return Err(e).context("storing event during sync (cursor not advanced)");
+    }
 
     store.set_cursor(&serial, outcome.next_cursor)?;
     println!(

@@ -6,8 +6,9 @@ models whose inputs we can supply from synced data are wired here; see
 docs/model-usage-map / the feasibility matrix for what's blocked and why.
 
 Usage: python tools/run_models.py <model> [DB] [--tz H]
-  model = bdi | moonstone | daily_medians | energy | aad | all
+  model = bdi | daily_medians | moonstone | all
 """
+import json
 import sys
 import sqlite3
 from pathlib import Path
@@ -43,14 +44,19 @@ def f32(x):
     return torch.tensor(x, dtype=torch.float32)
 
 
+def last_bedtime(rows):
+    """Most recent bedtime_period dict, or a clear error if none were synced."""
+    beds = [json.loads(j) for ds, n, j, _ in rows if n == "bedtime_period"]
+    if not beds:
+        sys.exit("no bedtime_period (tag 0x76) in DB — sync overnight data first")
+    return beds[-1]
+
+
 # ---- sleepnet_bdi_0_4_0: bedtime_input, ibi_values, ibi_timestamps ----
 def run_bdi(db, tz):
-    import json
     rows = events(db)
     unix_s = anchor(rows)
-    # most recent bedtime period
-    beds = [(ds, json.loads(j)) for ds, n, j, _ in rows if n == "bedtime_period"]
-    _, bp = beds[-1]
+    bp = last_bedtime(rows)
     bstart = unix_s(bp["bedtime_start_ds"])
     bend = unix_s(bp["bedtime_end_ds"])
     # IBIs within the sleep window (absolute beat timeline by cumulative IBI)
@@ -70,8 +76,8 @@ def run_bdi(db, tz):
             if ms and ms > 0:
                 amp = amps[k] if k < len(amps) else 0
                 ibi_rows.append([float(ms), float(amp), 1.0])
+                acc += ms  # a beat occurs at the END of its interval
                 ibi_t.append((t0 * 1000.0) + acc)  # ms
-                acc += ms
     print(f"bedtime {bstart:.0f}..{bend:.0f} ({(bend-bstart)/3600:.2f} h), {len(ibi_rows)} IBIs")
     m = load("sleepnet_bdi_0_4_0")
     bedtime_input = torch.tensor([int(bstart * 1000), int(bend * 1000)], dtype=torch.long)
@@ -119,8 +125,7 @@ def run_daily_medians(db, tz):
         elif n == "activity_information":
             for k, v in enumerate(d.get("met", [])):
                 met.append(float(v)); met_t.append(int((t + k * 60) * 1000))
-    beds = [json.loads(j) for ds, n, j, _ in rows if n == "bedtime_period"]
-    bp = beds[-1]
+    bp = last_bedtime(rows)
     sleep_ts = [int(unix_s(bp["bedtime_start_ds"]) * 1000), int(unix_s(bp["bedtime_end_ds"]) * 1000)]
     print(f"hrv={len(hrv)} temp={len(temp)} met={len(met)} hr_min={len(hr_min)}")
     m = load("daily_medians_1_1_0")
@@ -142,7 +147,7 @@ def run_moonstone(db, tz):
     import json
     rows = events(db)
     unix_s = anchor(rows)
-    bp = [json.loads(j) for ds, n, j, _ in rows if n == "bedtime_period"][-1]
+    bp = last_bedtime(rows)
     bstart, bend = unix_s(bp["bedtime_start_ds"]), unix_s(bp["bedtime_end_ds"])
     inwin = lambda t: bstart - 60 <= t <= bend + 60
 
@@ -158,7 +163,8 @@ def run_moonstone(db, tz):
             for k, ms in enumerate(d.get("ibi_ms", [])):
                 if ms and ms > 0:
                     ibi_rows.append([float(ms), float(amps[k]) if k < len(amps) else 0.0, 1.0])
-                    ibi_t.append(int((t * 1000) + acc)); acc += ms
+                    acc += ms  # a beat occurs at the END of its interval
+                    ibi_t.append(int((t * 1000) + acc))
         elif n == "sleep_acm_period":
             vals = d.get("acm_mad", [])
             for k, v in enumerate(vals):
@@ -203,6 +209,8 @@ def main():
             except Exception as e:
                 print(f"  FAILED: {type(e).__name__}: {e}")
         return
+    if model not in RUNNERS:
+        sys.exit(f"unknown model '{model}' (choose: {', '.join(RUNNERS)} | all)")
     RUNNERS[model](db, tz)
 
 
