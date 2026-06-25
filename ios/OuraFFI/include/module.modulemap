@@ -1,0 +1,4 @@
+module OuraFFI {
+    header "ouraffi.h"
+    export *
+}

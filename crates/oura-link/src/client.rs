@@ -111,6 +111,82 @@ impl<T: Transport> OuraClient<T> {
         Ok(frames.iter().filter_map(|f| Packet::parse(f)).collect())
     }
 
+    /// Write `bytes` and return the first response packet matching `tag` (and
+    /// `ext_tag`, when given), ignoring everything else, with a hard `timeout`.
+    ///
+    /// Unlike [`Self::request`] this does *not* wait for a quiet window, so it is
+    /// safe to poll while a high-rate stream (e.g. live accelerometer) is active —
+    /// the quiet-window collector would otherwise never see the link go idle.
+    /// Returns `None` if no matching frame arrives before the timeout.
+    pub async fn request_until(
+        &self,
+        bytes: &[u8],
+        tag: u8,
+        ext_tag: Option<u8>,
+        timeout: Duration,
+    ) -> Result<Option<Packet>> {
+        let mut rx = self.transport.subscribe();
+        while rx.try_recv().is_ok() {}
+        self.transport.write(bytes).await?;
+
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Ok(None);
+            }
+            match tokio::time::timeout(remaining, rx.recv()).await {
+                Ok(Ok(frame)) => {
+                    if let Some(p) = Packet::parse(&frame) {
+                        if p.tag == tag && (ext_tag.is_none() || p.ext_tag() == ext_tag) {
+                            return Ok(Some(p));
+                        }
+                    }
+                }
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+                _ => return Ok(None),
+            }
+        }
+    }
+
+    /// Stream-safe poll of a feature's latest cached values (see
+    /// [`Self::feature_latest`]). Uses [`Self::request_until`] so it can run while
+    /// the live accelerometer stream is active. Returns defaults if no response.
+    pub async fn feature_latest_live(
+        &self,
+        feature_id: u8,
+        timeout: Duration,
+    ) -> Result<LatestValues> {
+        match self
+            .request_until(&protocol::req_feature_latest(feature_id), 0x2f, Some(0x25), timeout)
+            .await?
+        {
+            Some(p) => Ok(parse_latest_values(feature_id, p.payload.get(7..).unwrap_or(&[]))),
+            None => Ok(LatestValues::default()),
+        }
+    }
+
+    /// Stream-safe poll of battery state (see [`Self::battery`]).
+    pub async fn battery_live(&self, timeout: Duration) -> Result<Option<Battery>> {
+        Ok(self
+            .request_until(&protocol::req_battery(), 0x0d, None, timeout)
+            .await?
+            .and_then(|p| Battery::parse(&p)))
+    }
+
+    /// Stream-safe poll of a feature's status (see [`Self::feature_status`]).
+    pub async fn feature_status_live(
+        &self,
+        feature_id: u8,
+        timeout: Duration,
+    ) -> Result<Option<FeatureStatus>> {
+        Ok(self
+            .request_until(&protocol::req_feature_status(feature_id), 0x2f, Some(0x21), timeout)
+            .await?
+            .as_ref()
+            .and_then(FeatureStatus::parse))
+    }
+
     fn find(packets: &[Packet], tag: u8) -> Option<&Packet> {
         packets.iter().find(|p| p.tag == tag)
     }
@@ -265,6 +341,75 @@ impl<T: Transport> OuraClient<T> {
         })
     }
 
+    /// Like [`Self::drain_events`] but **stream-safe**: each `GetEvent` batch is
+    /// collected with a bounded per-request timeout (waiting for the `0x11` summary)
+    /// instead of a quiet window, and accelerometer/control frames are ignored. Use
+    /// this to incrementally pull freshly-recorded events (e.g. live HR `0x80`)
+    /// while the accelerometer realtime stream is active — the quiet-window drain
+    /// would never see the link go idle.
+    pub async fn drain_events_live<F>(
+        &self,
+        cursor: u32,
+        request_timeout: Duration,
+        mut on_event: F,
+    ) -> Result<SyncOutcome>
+    where
+        F: FnMut(&RingEvent),
+    {
+        let mut rx = self.transport.subscribe();
+        let mut start = cursor;
+        let mut total = 0u32;
+        for _ in 0..10_000 {
+            while rx.try_recv().is_ok() {}
+            self.transport
+                .write(&protocol::req_get_event(start, 255, -1))
+                .await?;
+
+            let mut summary: Option<EventBatchSummary> = None;
+            let mut max_ts = start;
+            let mut batch_events = 0u32;
+            let deadline = tokio::time::Instant::now() + request_timeout;
+            loop {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                match tokio::time::timeout(remaining, rx.recv()).await {
+                    Ok(Ok(frame)) => {
+                        let Some(p) = Packet::parse(&frame) else { continue };
+                        if p.tag == 0x11 {
+                            summary = EventBatchSummary::parse(&p);
+                            break;
+                        } else if p.tag >= protocol::HISTORY_EVENT_PREFIX {
+                            let ev = RingEvent::from_packet(&p);
+                            max_ts = max_ts.max(ev.timestamp);
+                            batch_events += 1;
+                            total += 1;
+                            on_event(&ev);
+                        }
+                        // ignore ACM (0x33), control ACKs (0x07), etc.
+                    }
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+                    _ => break,
+                }
+            }
+
+            let bytes_left = summary.map(|s| s.bytes_left).unwrap_or(0);
+            let next = max_ts.saturating_add(1);
+            let progressed = batch_events > 0 && next > start;
+            if progressed {
+                start = next;
+            }
+            if bytes_left == 0 || !progressed {
+                break;
+            }
+        }
+        Ok(SyncOutcome {
+            events_synced: total,
+            next_cursor: start,
+        })
+    }
+
     // --- live / latest -----------------------------------------------------
 
     /// Read a feature's latest cached values (HR / SpO2). Reflects the last
@@ -277,40 +422,7 @@ impl<T: Transport> OuraClient<T> {
             .ok_or_else(|| Error::Protocol("no feature-latest response".into()))?;
         // payload: [0]=0x25,[1]=feature,[2]=result,[3]=status,[4]=state,
         //          [5..7]=counter, [7..]=feature-specific data.
-        let data = p.payload.get(7..).unwrap_or(&[]);
-        let mut out = LatestValues::default();
-        match feature_id {
-            feature::DAYTIME_HR => {
-                // data[0..2] = rr-corrected IBI (ms); bpm = 60000 / ibi.
-                if data.len() >= 2 {
-                    let ibi = u16::from_le_bytes([data[0], data[1]]);
-                    out.bpm = bpm_from_ibi(ibi);
-                }
-            }
-            feature::EXERCISE_HR => {
-                // data[4] = last HR value (bpm).
-                if let Some(&bpm) = data.get(4) {
-                    if bpm > 0 {
-                        out.bpm = Some(bpm as u16);
-                    }
-                }
-            }
-            feature::SPO2 => {
-                // data[3] = SpO2 %, data[4] = HR bpm.
-                if let Some(&spo2) = data.get(3) {
-                    if spo2 > 0 {
-                        out.spo2_percent = Some(spo2);
-                    }
-                }
-                if let Some(&bpm) = data.get(4) {
-                    if bpm > 0 {
-                        out.bpm = Some(bpm as u16);
-                    }
-                }
-            }
-            _ => {}
-        }
-        Ok(out)
+        Ok(parse_latest_values(feature_id, p.payload.get(7..).unwrap_or(&[])))
     }
 
     /// Trigger the ring's sleep analysis. Returns the `0x29` status byte.
@@ -501,6 +613,44 @@ fn parse_acm_frame(frame: &[u8]) -> Vec<AcmSample> {
             y: s(12),
             z: s(14),
         });
+    }
+    out
+}
+
+/// Decode the feature-specific data tail of a `GetFeatureLatestValues` (`0x25`)
+/// response into [`LatestValues`]. `data` is the payload after the 7-byte header.
+pub fn parse_latest_values(feature_id: u8, data: &[u8]) -> LatestValues {
+    let mut out = LatestValues::default();
+    match feature_id {
+        feature::DAYTIME_HR => {
+            // data[0..2] = rr-corrected IBI (ms); bpm = 60000 / ibi.
+            if data.len() >= 2 {
+                let ibi = u16::from_le_bytes([data[0], data[1]]);
+                out.bpm = bpm_from_ibi(ibi);
+            }
+        }
+        feature::EXERCISE_HR => {
+            // data[4] = last HR value (bpm).
+            if let Some(&bpm) = data.get(4) {
+                if bpm > 0 {
+                    out.bpm = Some(bpm as u16);
+                }
+            }
+        }
+        feature::SPO2 => {
+            // data[3] = SpO2 %, data[4] = HR bpm.
+            if let Some(&spo2) = data.get(3) {
+                if spo2 > 0 {
+                    out.spo2_percent = Some(spo2);
+                }
+            }
+            if let Some(&bpm) = data.get(4) {
+                if bpm > 0 {
+                    out.bpm = Some(bpm as u16);
+                }
+            }
+        }
+        _ => {}
     }
     out
 }

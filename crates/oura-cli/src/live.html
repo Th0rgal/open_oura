@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Oura — live health dashboard</title>
+<style>
+ :root{--bg:#0b0d12;--card:#11131a;--line:#1e2030;--bd:#313244;--fg:#cdd6f4;--dim:#7f849c;
+       --hr:#f38ba8;--mo:#89b4fa;--sp:#94e2d5;--bt:#a6e3a1;--tp:#fab387;--hv:#cba6f7;--wn:#f9e2af}
+ html,body{margin:0;background:var(--bg);color:var(--fg);font:13px ui-monospace,SFMono-Regular,monospace}
+ header{display:flex;align-items:center;gap:14px;padding:12px 18px;border-bottom:1px solid var(--line)}
+ header h1{font-size:15px;margin:0;letter-spacing:.3px}
+ header .sp{flex:1}
+ button{background:#1e2030;color:var(--fg);border:1px solid #45475a;border-radius:6px;padding:7px 16px;cursor:pointer;font:inherit}
+ button.on{background:var(--bt);color:#11131a;border-color:var(--bt)}
+ #state{color:var(--dim)}
+ .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px;padding:16px}
+ .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+ .card h2{margin:0 0 2px;font-size:12px;font-weight:600;color:var(--dim);text-transform:uppercase;letter-spacing:.6px}
+ .big{font-size:40px;font-weight:700;line-height:1.1}
+ .unit{font-size:14px;color:var(--dim);font-weight:400}
+ .sub{color:var(--dim);font-size:12px;margin-top:2px;min-height:16px}
+ canvas{display:block;width:100%;height:80px;margin-top:8px}
+ .pill{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;border:1px solid var(--bd)}
+ .pill.measuring{color:var(--bt);border-color:var(--bt)}
+ .pill.idle{color:var(--dim)}
+ .row{display:flex;justify-content:space-between;align-items:baseline}
+ .note{padding:0 18px 18px;color:var(--dim);max-width:920px;line-height:1.6}
+ .legend{font-size:11px;color:var(--dim)}
+</style></head>
+<body>
+<header>
+ <h1>Oura · live health dashboard</h1>
+ <span class="pill" id="ringstate">—</span>
+ <span class="sp"></span>
+ <span id="state">idle</span>
+ <button id="start">Start live</button>
+ <button id="stop">Stop</button>
+</header>
+
+<div class="grid">
+ <div class="card">
+  <h2 style="color:var(--hr)">Heart rate</h2>
+  <div class="row"><div class="big"><span id="hr">--</span> <span class="unit">bpm</span></div>
+   <div class="legend">HRV <span id="hrv">--</span> ms · <span id="beats">0</span> beats</div></div>
+  <div class="sub" id="hrsub">press Start, then wait ~10–20 s for the first reading…</div>
+  <canvas id="hrc"></canvas>
+ </div>
+
+ <div class="card">
+  <h2 style="color:var(--mo)">Motion</h2>
+  <div class="row"><div class="big"><span id="mo">--</span> <span class="unit">g</span></div>
+   <div class="legend"><span id="rate">0</span> Hz · restless <span id="rest">0</span>%</div></div>
+  <div class="sub" id="mosub">accelerometer — live stream</div>
+  <canvas id="moc"></canvas>
+ </div>
+
+ <div class="card">
+  <h2 style="color:var(--tp)">Skin temperature</h2>
+  <div class="big"><span id="tp">--</span> <span class="unit">°C</span></div>
+  <div class="sub" id="tpsub">recorded during measurement</div>
+  <canvas id="tpc"></canvas>
+ </div>
+
+ <div class="card">
+  <h2 style="color:var(--sp)">Blood oxygen</h2>
+  <div class="big"><span id="sp">--</span> <span class="unit">% SpO₂</span></div>
+  <div class="sub" id="spsub">needs long stillness to measure</div>
+  <canvas id="spc"></canvas>
+ </div>
+
+ <div class="card">
+  <h2 style="color:var(--bt)">Battery</h2>
+  <div class="big"><span id="bt">--</span> <span class="unit">%</span></div>
+  <div class="sub" id="btsub">—</div>
+  <canvas id="btc"></canvas>
+ </div>
+</div>
+
+<div class="note">
+ <b>How this works:</b> pressing Start enables notifications and forces the green-LED
+ HR measurement; the ring records <code>0x80</code> HR events (bpm + per-beat IBI +
+ quality) which we sync every ~2&nbsp;s — that's your live HR, and the IBIs give
+ <b>HRV (RMSSD)</b>. Motion is a true ~50&nbsp;Hz accelerometer stream. Skin temp
+ appears when the ring records it; SpO₂ needs long stillness. Press <b>Stop</b> to
+ return the ring to its normal background mode.
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const H={headers:{'X-Oura-Viz':'1'}};
+
+// ---- tiny canvas line chart -------------------------------------------------
+function Chart(cv,color,opts={}){
+ const ctx=cv.getContext('2d');let data=[],min=opts.min,max=opts.max,cap=opts.cap||300;
+ function resize(){const r=cv.getBoundingClientRect();cv.width=r.width*devicePixelRatio;cv.height=r.height*devicePixelRatio;}
+ function push(v){data.push(v);if(data.length>cap)data.shift();}
+ function draw(){
+  resize();const w=cv.width,h=cv.height;ctx.clearRect(0,0,w,h);
+  if(!data.length)return;
+  let lo=min!==undefined?min:Math.min(...data),hi=max!==undefined?max:Math.max(...data);
+  if(hi-lo<1e-6){hi=lo+1;}
+  const pad=6*devicePixelRatio;
+  const X=i=>i/(cap-1)*w, Y=v=>h-pad-(v-lo)/(hi-lo)*(h-2*pad);
+  ctx.strokeStyle='#1e2030';ctx.lineWidth=1*devicePixelRatio;
+  ctx.beginPath();ctx.moveTo(0,h-pad);ctx.lineTo(w,h-pad);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(X(0),Y(data[0]));
+  for(let i=1;i<data.length;i++)ctx.lineTo(X(i),Y(data[i]));
+  ctx.lineTo(X(data.length-1),h);ctx.lineTo(X(0),h);ctx.closePath();
+  ctx.fillStyle=color+'22';ctx.fill();
+  ctx.beginPath();ctx.moveTo(X(0),Y(data[0]));
+  for(let i=1;i<data.length;i++)ctx.lineTo(X(i),Y(data[i]));
+  ctx.strokeStyle=color;ctx.lineWidth=2*devicePixelRatio;ctx.stroke();
+ }
+ return {push,draw,len:()=>data.length};
+}
+const hrC=Chart($('hrc'),'#f38ba8',{cap:240});
+const moC=Chart($('moc'),'#89b4fa',{cap:300,min:0,max:3});
+const tpC=Chart($('tpc'),'#fab387',{cap:120});
+const spC=Chart($('spc'),'#94e2d5',{cap:120,min:85,max:100});
+const btC=Chart($('btc'),'#a6e3a1',{cap:120,min:0,max:100});
+function drawAll(){hrC.draw();moC.draw();tpC.draw();spC.draw();btC.draw();requestAnimationFrame(drawAll);}
+drawAll();
+
+// ---- signal state -----------------------------------------------------------
+let frames=0,restMoves=0,restWin=0,beatCount=0,ibiBuf=[];
+
+function rmssd(arr){ // RMS of successive IBI differences, skipping artifact jumps
+ if(arr.length<2)return null;
+ let s=0,n=0;for(let i=1;i<arr.length;i++){const d=arr[i]-arr[i-1];
+  if(Math.abs(d)>250)continue; // reject ectopic/artifact beat-to-beat jumps
+  s+=d*d;n++;}
+ return n>=2?Math.round(Math.sqrt(s/n)):null;
+}
+
+function feed(m){
+ if(m.t==='accel'){
+  const g=Math.hypot(m.x,m.y,m.z)/1024;
+  moC.push(g);$('mo').textContent=g.toFixed(2);frames++;
+  restWin++; if(Math.abs(g-1)>0.06) restMoves++;
+ } else if(m.t==='hr80'){
+  const d=m.d||{};
+  // bpm: last finite positive value in hr_bpm
+  const bpms=(d.hr_bpm||[]).filter(x=>x>30&&x<240);
+  if(bpms.length){const bpm=bpms[bpms.length-1];$('hr').textContent=bpm;hrC.push(bpm);$('hrsub').textContent='live (green-LED)';}
+  // HRV: collect physiologically plausible IBIs (40–150 bpm) into a rolling buffer.
+  // (The 'quality' byte is unreliable here, so we filter by range + artifact guard.)
+  const ibi=d.ibi_ms||[];
+  for(let i=0;i<ibi.length;i++){
+   if(ibi[i]>=400 && ibi[i]<=1300){ibiBuf.push(ibi[i]);beatCount++;}
+  }
+  while(ibiBuf.length>40)ibiBuf.shift();
+  const h=rmssd(ibiBuf); if(h!==null)$('hrv').textContent=h;
+  $('beats').textContent=beatCount;
+ } else if(m.t==='temp'){
+  const d=m.d||{};const arr=(d.temps_c||d.temps||[]).filter(x=>x>20&&x<45);
+  if(arr.length){const t=arr[arr.length-1];$('tp').textContent=t.toFixed(2);tpC.push(t);}
+ } else if(m.t==='spo2e'){
+  const d=m.d||{};const v=d.spo2_percent??d.spo2??d.pct;
+  if(v>50){$('sp').textContent=v;spC.push(v);$('spsub').textContent='measured';}
+ } else if(m.t==='batt'){
+  $('bt').textContent=m.pct;btC.push(m.pct);
+  $('btsub').textContent=m.charging?'charging ⚡':'on battery';
+ } else if(m.t==='status'){
+  setLive(m.live);
+  if(m.live){$('ringstate').textContent='measuring';$('ringstate').className='pill measuring';}
+ }
+}
+
+setInterval(()=>{
+ $('rate').textContent=frames;frames=0;
+ const pct=restWin?Math.round(restMoves/restWin*100):0;
+ $('rest').textContent=pct;restMoves=0;restWin=0;
+},1000);
+
+// ---- controls ---------------------------------------------------------------
+let liveOn=false;
+function setLive(on){liveOn=on;
+ $('start').classList.toggle('on',on);$('stop').classList.toggle('on',!on);
+ $('state').textContent=on?'● live':'idle';
+ if(!on){$('ringstate').textContent='—';$('ringstate').className='pill idle';}
+}
+$('start').onclick=async()=>{await fetch('/start',H);setLive(true);};
+$('stop').onclick=async()=>{await fetch('/stop',H);setLive(false);};
+addEventListener('pagehide',()=>{try{fetch('/stop',{headers:H.headers,keepalive:true});}catch(e){}});
+
+const es=new EventSource('/stream');
+es.onmessage=e=>{try{feed(JSON.parse(e.data));}catch(err){}};
+</script>
+</body></html>
