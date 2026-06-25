@@ -47,7 +47,7 @@ for ds, tag, js, _ in rows:
     if not (lo <= ds <= hi):
         continue
     v = json.loads(js)
-    if tag == 0x60 and v.get("ibi_ms"):
+    if tag in (0x60, 0x80) and v.get("ibi_ms"):  # ibi_and_amplitude + green_ibi_quality
         ibi = v["ibi_ms"]; amp = v.get("amplitude", [0] * len(ibi))
         t = ms(ds); acc = 0
         for i, x in enumerate(ibi):
