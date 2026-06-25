@@ -1,6 +1,7 @@
 import Combine
 import CoreBluetooth
 import Foundation
+import UIKit
 import os
 
 /// One decoded history event (timestamp in ring deciseconds + decoded JSON).
@@ -84,7 +85,11 @@ final class OuraRing: NSObject, ObservableObject {
 
     override init() {
         super.init()
-        central = CBCentralManager(delegate: self, queue: bleQueue)
+        // A restore identifier lets iOS preserve our BLE state and relaunch the app
+        // into the background for connection/notification events (state restoration).
+        central = CBCentralManager(delegate: self, queue: bleQueue, options: [
+            CBCentralManagerOptionRestoreIdentifierKey: "com.openoura.central"
+        ])
     }
 
     // MARK: - Publishing helper
@@ -356,7 +361,7 @@ final class OuraRing: NSObject, ObservableObject {
             }
             return
         }
-        if await runAuth(), autoSync { await syncHistory() }
+        if await runAuth(), autoSync { await autoSyncIncremental() }
     }
 
     /// Authenticate over an already-established link, read metadata. Returns success.
@@ -581,13 +586,15 @@ final class OuraRing: NSObject, ObservableObject {
 
     // MARK: - Full history sync (Today/Sleep/Activity tabs)
 
+    /// Full re-sync from scratch (manual "Sync now"). Replaces the cached history.
     func syncHistory() async {
         guard state == .ready, !syncing else { return }
         publish { self.syncing = true }
         // Drain into a scratch buffer; the displayed model is only swapped in once
         // the sync *completes*, so the UI never shows a half-synced state.
         var collected: [DecodedEvent] = []
-        _ = await drainEventsLive(cursor: 0) { ev in collected.append(ev) }
+        let next = await drainEventsLive(cursor: 0) { ev in collected.append(ev) }
+        UserDefaults.standard.set(Int(next), forKey: "syncCursor")
         let model = HealthData(events: collected)
         HealthStore.save(collected)
         publish {
@@ -597,6 +604,46 @@ final class OuraRing: NSObject, ObservableObject {
             self.lastSync = HealthStore.lastSync
             self.status = "Connected"
         }
+    }
+
+    /// Incremental, background-safe sync: drain only events newer than the saved
+    /// cursor, merge into the cached set, persist. Wrapped in a background task so
+    /// it can finish when the app was woken in the background by state restoration.
+    func autoSyncIncremental() async {
+        guard state == .ready, !syncing else { return }
+        let bg = await beginBG()
+        defer { Task { await endBG(bg) } }
+        publish { self.syncing = true }
+        let start = UInt32(truncatingIfNeeded: UserDefaults.standard.integer(forKey: "syncCursor"))
+        var fresh: [DecodedEvent] = []
+        let next = await drainEventsLive(cursor: start) { fresh.append($0) }
+        UserDefaults.standard.set(Int(next), forKey: "syncCursor")
+
+        var all = HealthStore.load()
+        var seen = Set(all.map { "\($0.tag)-\($0.timestamp)" })
+        for e in fresh where seen.insert("\(e.tag)-\(e.timestamp)").inserted { all.append(e) }
+        if all.count > 100_000 { all = Array(all.suffix(100_000)) }
+        let model = HealthData(events: all)
+        HealthStore.save(all)
+        dbg("incremental sync: +\(fresh.count) events (cursor \(start)→\(next)), \(all.count) total")
+        publish {
+            self.events = all
+            self.health = model
+            self.syncing = false
+            self.lastSync = HealthStore.lastSync
+            self.status = "Connected"
+        }
+    }
+
+    @MainActor private func beginBG() -> UIBackgroundTaskIdentifier {
+        var id: UIBackgroundTaskIdentifier = .invalid
+        id = UIApplication.shared.beginBackgroundTask(withName: "oura-sync") {
+            UIApplication.shared.endBackgroundTask(id)
+        }
+        return id
+    }
+    @MainActor private func endBG(_ id: UIBackgroundTaskIdentifier) {
+        if id != .invalid { UIApplication.shared.endBackgroundTask(id) }
     }
 
     /// Load the last synced history from disk so the UI has real data immediately.
@@ -633,8 +680,32 @@ final class OuraRing: NSObject, ObservableObject {
 
 // MARK: - CoreBluetooth delegates
 extension OuraRing: CBCentralManagerDelegate, CBPeripheralDelegate {
+    /// iOS relaunched us (possibly into the background) and is handing back the BLE
+    /// objects it preserved. Re-acquire the peripheral; we resume once powered on.
+    func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
+        let ps = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] ?? []
+        dbg("willRestoreState: \(ps.count) peripheral(s)")
+        if let p = ps.first {
+            peripheral = p
+            p.delegate = self
+            wantsAutoReconnect = true
+            connecting = true   // resumed in didUpdateState once .poweredOn
+        }
+    }
+
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         dbg("central state -> \(central.state.rawValue)")
+        // Resume a restored peripheral (state restoration) before anything else.
+        if central.state == .poweredOn, let p = peripheral, connecting, writeChar == nil {
+            if p.state == .connected {
+                dbg("resume: restored peripheral connected — discovering services")
+                p.discoverServices([OuraGATT.service])
+            } else {
+                dbg("resume: reconnecting restored peripheral")
+                central.connect(p)
+            }
+            return
+        }
         startScanIfReady()           // resume a pending manual scan
         startAutoReconnectIfReady()  // resume a pending auto-reconnect
     }
@@ -722,8 +793,8 @@ extension OuraRing: CBCentralManagerDelegate, CBPeripheralDelegate {
                 // A manual authenticateAndLoad() is awaiting — let it drive auth.
                 readyContinuation = nil; c.resume()
             } else {
-                // Auto-reconnect path: authenticate (and sync) ourselves.
-                Task { if await self.runAuth(), self.autoSync { await self.syncHistory() } }
+                // Auto-reconnect / restoration path: authenticate + incremental sync.
+                Task { if await self.runAuth(), self.autoSync { await self.autoSyncIncremental() } }
             }
         } else {
             dbg("write characteristic not found in service")
