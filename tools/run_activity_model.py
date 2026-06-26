@@ -79,7 +79,7 @@ def resolve_db(arg):
     for cand in (Path.cwd() / "oura.db", REPO / "oura.db", REPO / "captures" / "ring5.db"):
         if cand.exists():
             return cand
-    return Path("oura.db")
+    return REPO / "oura.db"
 
 
 def main():

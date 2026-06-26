@@ -69,7 +69,7 @@ def run_bdi(db, tz):
         if n not in ("ibi_and_amplitude_event", "green_ibi_quality_event"):
             continue
         t0 = unix_s(ds)
-        if not (bstart - 60 <= t0 <= bend + 60):
+        if not (bstart - 600 <= t0 <= bend + 600):  # ±10 min margin, matches run_sleep_model.py
             continue
         d = json.loads(j)
         ibis = d.get("ibi_ms", [])
