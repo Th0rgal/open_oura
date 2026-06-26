@@ -211,9 +211,11 @@ pub fn run(db: &Path, root: &Path, tz: i64, threshold: f64, json: bool) -> Resul
         other => return Err(anyhow!("unexpected model output: {:?}", other)),
     };
 
-    // to_local for a rebased minute value.
+    // to_local for a rebased minute value. Keep the minute as a float through the
+    // *60 scaling (like the Python runner's `(minute + OFFSET) * 60`) so fractional
+    // minute boundaries don't get truncated to a different wall-clock minute.
     let to_local = |minute: f64| -> (String, String) {
-        let secs = (minute as i64 + offset) * 60 + tz * 3600;
+        let secs = ((minute + offset as f64) * 60.0 + (tz * 3600) as f64) as i64;
         let days = secs.div_euclid(86400);
         let sod = secs.rem_euclid(86400);
         let (y, mo, d) = civil(days);
