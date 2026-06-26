@@ -1,5 +1,9 @@
 # Cardiovascular age from raw PPG (`cva_ppg` → `cva_raw_ppg_data` → CVA model)
 
+> **Models are not included in this repo.** The decrypted `cva_2_1_0.pt` (and every
+> other `.pt`) is Oura's proprietary IP; it is **not committed** (gitignored under
+> `notes/models/`). Run this against your own locally-decrypted copy.
+
 When the **`cva_ppg`** feature (`CAP_CVA_PPG_SAMPLER`, id `0x0d`) is enabled, the
 ring records short raw-PPG bursts overnight and emits them as **`cva_raw_ppg_data`**
 events (BLE tag **`0x81`**). This is the raw photoplethysmography waveform the

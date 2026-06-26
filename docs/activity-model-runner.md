@@ -1,5 +1,9 @@
 # Running Oura's activity-detection model on our data
 
+> **Models are not included in this repo.** The decrypted `.pt` files are Oura's
+> proprietary IP; they are **not committed** (gitignored under `notes/models/`).
+> Run these against your own locally-decrypted copies.
+
 `tools/run_activity_model.py` feeds our stored ring events into Oura's decrypted
 TorchScript `automatic_activity_detection_3_1_11.pt` and prints detected activity
 segments — **no raw IMU / RData needed**, it runs on the windowed signals we

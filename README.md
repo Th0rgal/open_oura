@@ -21,8 +21,13 @@ engine and a set of on-device PyTorch models (the same `.pt` we run here), then
 uploaded; the cloud only stores and syncs them back. So they're reproducible
 offline. The one genuine cloud-only step is **workout auto-classification**
 (`POST /api/activity-tagging/v2`). See
-[`docs/data-recovery-map.md`](docs/data-recovery-map.md) and
-[`docs/algorithms/README.md`](docs/algorithms/README.md).
+[`docs/data-recovery-map.md`](docs/data-recovery-map.md),
+[`docs/algorithms/README.md`](docs/algorithms/README.md), and
+[`docs/model-runners.md`](docs/model-runners.md) for what runs.
+
+> **Those PyTorch models are Oura's proprietary IP and are NOT included in this
+> repo** (gitignored under `notes/models/`). The runners reference them by path; you
+> decrypt and supply your own locally. Nothing model-related is committed or pushed.
 
 ## Repository map
 
