@@ -26,17 +26,19 @@ from pathlib import Path
 
 import numpy as np
 
+from _common import resolve_db
+
 REPO = Path(__file__).resolve().parent.parent
 COEFFS = {"gen4": (-13.4, -5.1, 105.2), "cooper": (-12.1, -6.9, 106.3)}
 
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("db", nargs="?", default=str(REPO / "oura.db"))
+    p.add_argument("db", nargs="?", default=None)
     p.add_argument("--hw", default="gen4", choices=list(COEFFS))
     p.add_argument("--night", action="store_true", help="restrict to the most recent bedtime_period window")
     args = p.parse_args()
-    con = sqlite3.connect(args.db)
+    con = sqlite3.connect(str(resolve_db(args.db, REPO)))
 
     where, params = "name='spo2_r_pi_event'", ()
     if args.night:

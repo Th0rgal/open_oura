@@ -30,6 +30,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from _common import resolve_db
+
 REPO = Path(__file__).resolve().parent.parent
 MODEL = REPO / "notes" / "models" / "cva_2_1_0.pt"
 SEG_LEN = 1500          # samples per segment (hard model constant)
@@ -37,7 +39,7 @@ GAP_DS = 20             # >2 s (deciseconds) splits two PPG measurements
 
 
 def build_segments(db, since_ds):
-    con = sqlite3.connect(db)
+    con = sqlite3.connect(str(db))
     rows = con.execute(
         "SELECT ring_timestamp, body FROM events WHERE tag=129 AND ring_timestamp>? "
         "ORDER BY ring_timestamp",
@@ -66,7 +68,7 @@ def build_segments(db, since_ds):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("db", nargs="?", default=str(REPO / "oura.db"))
+    p.add_argument("db", nargs="?", default=None)
     p.add_argument("--sex", default="M", choices=["M", "F", "O"])
     p.add_argument("--age", type=float, default=30.0)
     p.add_argument("--height", type=float, default=1.78, help="meters")
@@ -77,7 +79,7 @@ def main():
     if not MODEL.exists():
         sys.exit(f"model not found: {MODEL}")
 
-    segs, n_runs = build_segments(args.db, args.since_cursor)
+    segs, n_runs = build_segments(resolve_db(args.db, REPO), args.since_cursor)
     if not segs:
         sys.exit(f"no full {SEG_LEN}-sample PPG segment available ({n_runs} measurement runs, all too short)")
     ppg = torch.tensor(np.stack(segs), dtype=torch.float32)
