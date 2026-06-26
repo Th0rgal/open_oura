@@ -36,8 +36,8 @@ max_ds, anchor_unix = max(((r[0], r[3]) for r in rows), key=lambda x: x[0])
 def ms(ds):  # device deciseconds -> absolute epoch ms (int64), consistent across signals
     return int(anchor_unix * 1000 - (max_ds - ds) * 100)
 
-if start_ds is None:  # default: first bedtime_period in the DB
-    bt = con.execute("SELECT decoded_json FROM events WHERE tag=118 ORDER BY ring_timestamp").fetchone()
+if start_ds is None:  # default: most recent bedtime_period in the DB (matches run_models.last_bedtime)
+    bt = con.execute("SELECT decoded_json FROM events WHERE tag=118 ORDER BY ring_timestamp DESC").fetchone()
     if bt is None:
         raise SystemExit("no bedtime_period (tag 0x76) in DB — pass start/end deciseconds or sync overnight data first")
     v = json.loads(bt[0])
@@ -53,6 +53,8 @@ for ds, tag, js, _ in rows:
         ibi = v["ibi_ms"]; amp = v.get("amplitude", [0] * len(ibi))
         t = ms(ds); acc = 0
         for i, x in enumerate(ibi):
+            if x <= 0:  # zero/negative IBI can't advance the beat clock — skip (matches run_bdi)
+                continue
             acc += x
             valid = 1 if 300 <= x <= 2000 else 0
             beats.append((t + acc, float(x), float(amp[i] if i < len(amp) else 0), valid))

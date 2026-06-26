@@ -638,34 +638,47 @@ async fn cmd_sync(cli: &Cli, key: &Option<[u8; 16]>, sync_time: bool) -> Result<
     println!("Syncing events for {serial} from cursor {cursor} ...");
 
     let mut inserted = 0u32;
-    // Capture any insert error so a DB write failure surfaces loudly instead of
-    // being swallowed — and so the cursor is never advanced past events we failed
-    // to store (which would drop them permanently on the next sync).
-    let insert_err = std::cell::RefCell::new(None);
+    // Capture any DB error (insert or cursor write) so a failure surfaces loudly
+    // instead of being swallowed — and so the cursor is never advanced past events
+    // we failed to store (which would drop them permanently on the next sync).
+    let db_err = std::cell::RefCell::new(None);
+    // Track whether any batch cursor was actually persisted, so the error message
+    // below is accurate even when earlier batches already advanced the cursor.
+    let cursor_advanced = std::cell::Cell::new(false);
     let outcome = client
         .drain_events(
             cursor,
             |ev| {
-                if insert_err.borrow().is_some() {
+                if db_err.borrow().is_some() {
                     return;
                 }
                 match store.insert_event(&serial, ev) {
                     Ok(true) => inserted += 1,
                     Ok(false) => {}
-                    Err(e) => *insert_err.borrow_mut() = Some(e),
+                    Err(e) => *db_err.borrow_mut() = Some(e),
                 }
             },
             // Persist the cursor after each fully-drained batch (so an interrupted
-            // sync still makes progress) — but not once an insert has failed.
+            // sync still makes progress) — but not once a DB write has failed. A
+            // failed cursor write is itself recorded so it can't be silently lost.
             |c| {
-                if insert_err.borrow().is_none() {
-                    let _ = store.set_cursor(&serial, c);
+                if db_err.borrow().is_some() {
+                    return;
+                }
+                match store.set_cursor(&serial, c) {
+                    Ok(()) => cursor_advanced.set(true),
+                    Err(e) => *db_err.borrow_mut() = Some(e),
                 }
             },
         )
         .await?;
-    if let Some(e) = insert_err.into_inner() {
-        return Err(e).context("storing event during sync (cursor not advanced)");
+    if let Some(e) = db_err.into_inner() {
+        let ctx = if cursor_advanced.get() {
+            "storing event during sync (cursor advanced through earlier batches)"
+        } else {
+            "storing event during sync (cursor not advanced)"
+        };
+        return Err(e).context(ctx);
     }
 
     store.set_cursor(&serial, outcome.next_cursor)?;
