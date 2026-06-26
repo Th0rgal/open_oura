@@ -1,0 +1,48 @@
+# open_oura web dashboard
+
+A local, single-page health dashboard that turns your synced ring data into the
+few numbers that matter. Follows the product vision in
+`notes/dashboard-v2-brainstorm.md`: a calm, baseline-aware view across **sleep,
+cardiovascular, blood-oxygen, activity**, and a **Device & Data Health** panel.
+Everything is computed and served locally; nothing leaves the machine.
+
+## Run
+
+```bash
+oura sync                                    # refresh your data first
+oura dashboard --tz-offset 1 --age 30 --sex M --height 1.78 --weight 75
+# → open http://127.0.0.1:8090
+```
+
+`--age/--sex/--height/--weight` feed only the cardiovascular-age model; every other
+metric is signal-derived. Default port `8090`; loopback-only.
+
+## How it's built
+
+- **Rust does the work** (`crates/oura-cli/src/dashboard.rs`): reads `oura.db`, and
+  computes per-night HRV / resting-HR / skin-temp, SpO2 % (Oura's R→% calibration),
+  baselines + deltas, the device/data-health panel, and the one-line digest. It also
+  serves the page and the `/api/summary` JSON.
+- **The AI models run via the Python runners**, shelled out exactly like
+  `oura sessions`: the sleep hypnogram (`run_sleep_model.py`), activity sessions
+  (`run_activity_model.py`), and cardiovascular age (`run_cva_model.py`). Each is
+  invoked with `--json`.
+- **Frontend** (`dashboard/web/`): vanilla HTML/CSS/JS, no build step, no external
+  fonts or libraries. Auto light/dark via `prefers-color-scheme` (force one with
+  `?` … set `document.documentElement.dataset.theme = 'dark' | 'light'`). The web
+  files are read from disk at request time, so you can edit and refresh without
+  recompiling (a copy is also embedded in the binary as a fallback).
+
+## Folder
+
+```
+dashboard/
+  web/                 # the static UI (served by the Rust server)
+    index.html
+    styles.css
+    app.js
+  README.md
+```
+
+Models are Oura's proprietary IP and are **not** committed; the runners reference
+your own locally-decrypted copies under `notes/models/`.

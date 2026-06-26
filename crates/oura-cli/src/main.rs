@@ -14,6 +14,7 @@ use oura_link::OuraClient;
 
 #[cfg(feature = "torch")]
 mod activity_model;
+mod dashboard;
 mod game;
 mod motion_server;
 mod viz;
@@ -158,6 +159,29 @@ enum Command {
     },
     /// Read the real on-ring MODE/status of the data features (what's actually on).
     FeatureStatus,
+    /// Serve a local web health dashboard (sleep, cardio, SpO2, activity, device)
+    /// at http://127.0.0.1:PORT. Rust computes from oura.db; torch models run via
+    /// the Python runners. All data stays on this machine.
+    Dashboard {
+        /// Local HTTP port.
+        #[arg(long, default_value_t = 8090)]
+        port: u16,
+        /// Timezone offset (hours from UTC) for displayed times.
+        #[arg(long, default_value_t = 0)]
+        tz_offset: i64,
+        /// Sex for the cardiovascular-age model: M | F | O.
+        #[arg(long, default_value = "M")]
+        sex: String,
+        /// Age (years) for the CVA model.
+        #[arg(long, default_value_t = 30.0)]
+        age: f64,
+        /// Height (meters) for the CVA model.
+        #[arg(long, default_value_t = 1.78)]
+        height: f64,
+        /// Weight (kg) for the CVA model.
+        #[arg(long, default_value_t = 75.0)]
+        weight: f64,
+    },
 }
 
 fn feature_mode_name(mode: u8) -> &'static str {
@@ -287,6 +311,15 @@ async fn main() -> Result<()> {
         Command::Subscribe { feature, mode } => cmd_subscribe(&cli, &key, feature, mode).await,
         Command::FeatureMode { feature, mode } => cmd_feature_mode(&cli, &key, feature, mode).await,
         Command::FeatureStatus => cmd_feature_status(&cli, &key).await,
+        Command::Dashboard { port, tz_offset, sex, age, height, weight } => {
+            let demo = dashboard::Demographics {
+                sex: sex.chars().next().unwrap_or('M').to_ascii_uppercase(),
+                age: *age,
+                height_m: *height,
+                weight_kg: *weight,
+            };
+            dashboard::serve(*port, cli.db.clone(), *tz_offset, demo).await
+        }
     }
 }
 

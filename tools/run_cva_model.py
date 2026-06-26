@@ -75,6 +75,7 @@ def main():
     p.add_argument("--weight", type=float, default=75.0, help="kg")
     p.add_argument("--ring", type=float, default=10.0, help="ring size")
     p.add_argument("--since-cursor", type=int, default=0, help="only events with ring_timestamp > this")
+    p.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     args = p.parse_args()
     if not MODEL.exists():
         sys.exit(f"model not found: {MODEL}")
@@ -89,6 +90,16 @@ def main():
     m = torch.jit.load(str(MODEL), map_location="cpu").eval()
     with torch.no_grad():
         cva, quality, raw_quality, pwv, seg_metrics = m(ppg, demo)
+
+    if args.json:
+        import json
+        print(json.dumps({
+            "segments": int(ppg.shape[0]), "measurements": n_runs,
+            "vascular_age": round(cva.item(), 1), "chronological_age": args.age,
+            "pwv_ms": round(pwv.item(), 2),
+            "quality": round(quality.item()), "raw_quality": round(raw_quality.item(), 2),
+        }))
+        return
 
     print(f"CVA (cardiovascular age) — {ppg.shape[0]} PPG segments from {n_runs} measurements")
     print(f"  demographics: sex={args.sex} age={args.age:.0f} height={args.height} weight={args.weight} ring={args.ring}")

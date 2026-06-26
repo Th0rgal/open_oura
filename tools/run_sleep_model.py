@@ -20,7 +20,8 @@ TZ = 1
 MODEL = str(REPO / "notes" / "models" / "sleepnet_moonstone_1_2_0.pt")
 STAGE = {1: "DEEP", 2: "LIGHT", 3: "REM", 4: "WAKE"}
 
-args = [a for a in sys.argv[1:]]
+JSON = "--json" in sys.argv
+args = [a for a in sys.argv[1:] if a != "--json"]
 start_ds = end_ds = None
 if len(args) >= 2 and args[0].isdigit():
     start_ds, end_ds = int(args[0]), int(args[1])
@@ -67,8 +68,9 @@ for ds, tag, js, _ in rows:
         temp.append((ms(ds), float(v["temps_c"][0])))
 
 beats.sort(); acm.sort(); temp.sort()
-print(f"window ds [{start_ds}..{end_ds}] ({(end_ds-start_ds)/10/3600:.1f}h)  "
-      f"beats={len(beats)} acm={len(acm)} temp={len(temp)}")
+if not JSON:
+    print(f"window ds [{start_ds}..{end_ds}] ({(end_ds-start_ds)/10/3600:.1f}h)  "
+          f"beats={len(beats)} acm={len(acm)} temp={len(temp)}")
 if not beats or not any(b[3] == 1 for b in beats):
     sys.exit("not enough valid IBI in this window")
 
@@ -98,16 +100,32 @@ if n == 0:
     sys.exit("SleepNet-moonstone returned zero epochs for this window")
 mins = {k: stages.count(c) * 0.5 for c, k in STAGE.items()}
 asleep = n * 0.5 - mins["WAKE"]
+in_bed = n * 0.5
+def hm(ms_):
+    return datetime.datetime.utcfromtimestamp(ms_/1000 + TZ*3600).strftime("%H:%M")
+
+if JSON:
+    out = {
+        "start_ds": start_ds, "end_ds": end_ds,
+        "start_local": hm(int(ts[0])), "end_local": hm(int(ts[-1])),
+        "epochs": n, "in_bed_min": in_bed,
+        "asleep_min": asleep, "efficiency_pct": round(100 * asleep / in_bed),
+        "stages": stages,  # per-30s ints: 1=DEEP 2=LIGHT 3=REM 4=WAKE
+    }
+    for c, k in STAGE.items():
+        out[k.lower() + "_min"] = mins[k]
+        out[k.lower() + "_pct"] = round(100 * mins[k] / in_bed)
+    print(json.dumps(out))
+    sys.exit(0)
+
 print(f"\nHypnogram: {n} epochs = {n*0.5:.0f} min in bed")
 for k in ["DEEP", "LIGHT", "REM", "WAKE"]:
-    pct = 100 * mins[k] / (n * 0.5) if n else 0
+    pct = 100 * mins[k] / in_bed if n else 0
     print(f"  {k:<6} {mins[k]:>6.0f} min  ({pct:4.0f}%)")
-print(f"  asleep {asleep:.0f} min,  sleep efficiency {100*asleep/(n*0.5):.0f}%")
+print(f"  asleep {asleep:.0f} min,  sleep efficiency {100*asleep/in_bed:.0f}%")
 
 # compact timeline: one glyph per ~10 min (20 epochs), majority stage
 g = {1: "D", 2: "L", 3: "R", 4: "W"}
-def hm(ms_):
-    return datetime.datetime.utcfromtimestamp(ms_/1000 + TZ*3600).strftime("%H:%M")
 print(f"\n  {hm(int(ts[0]))} ", end="")
 for i in range(0, n, 20):
     blk = stages[i:i+20]

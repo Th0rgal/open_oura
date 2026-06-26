@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light dark" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%230d9488'/%3E%3Ccircle cx='16' cy='16' r='6' fill='none' stroke='%23ffffff' stroke-width='4' opacity='.55'/%3E%3C/svg%3E" />
+  <title>open_oura</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="wrap">
+    <header class="top">
+      <div class="brand">
+        <span class="mark" aria-hidden="true"></span>
+        <span class="word">open_oura</span>
+      </div>
+      <div id="sync-chip" class="chip" title="Last sync">
+        <span class="dot" data-state="idle"></span>
+        <span id="sync-text">syncing</span>
+      </div>
+    </header>
+
+    <p id="digest" class="digest skeleton skeleton-text">&nbsp;</p>
+
+    <section class="tiles" id="tiles" aria-label="Key vitals">
+      <article class="tile skeleton"></article>
+      <article class="tile skeleton"></article>
+      <article class="tile skeleton"></article>
+      <article class="tile skeleton"></article>
+    </section>
+
+    <section class="panel" id="sleep-panel">
+      <div class="panel-head">
+        <h2>Sleep &amp; recovery</h2>
+        <div class="legend" id="sleep-legend" hidden>
+          <span><i class="sw deep"></i>Deep</span>
+          <span><i class="sw light"></i>Light</span>
+          <span><i class="sw rem"></i>REM</span>
+          <span><i class="sw wake"></i>Awake</span>
+        </div>
+      </div>
+      <div id="nights" class="nights">
+        <div class="night skeleton skeleton-row"></div>
+        <div class="night skeleton skeleton-row"></div>
+        <div class="night skeleton skeleton-row"></div>
+      </div>
+    </section>
+
+    <div class="cols-2">
+      <section class="panel" id="cardio-panel">
+        <div class="panel-head"><h2>Cardiovascular</h2></div>
+        <div id="cardio" class="cardio-body"><div class="skeleton skeleton-block"></div></div>
+      </section>
+
+      <section class="panel" id="spo2-panel">
+        <div class="panel-head"><h2>Blood oxygen</h2></div>
+        <div id="spo2" class="spo2-body"><div class="skeleton skeleton-block"></div></div>
+      </section>
+    </div>
+
+    <section class="panel" id="activity-panel">
+      <div class="panel-head"><h2>Activity</h2></div>
+      <div id="activity" class="activity"><div class="skeleton skeleton-block"></div></div>
+    </section>
+
+    <section class="panel" id="device-panel">
+      <div class="panel-head"><h2>Device &amp; data health</h2></div>
+      <div id="device" class="device"><div class="skeleton skeleton-block"></div></div>
+    </section>
+
+    <footer class="foot">
+      <span>Everything here is computed on this machine. Nothing left the device.</span>
+      <span id="foot-meta"></span>
+    </footer>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
