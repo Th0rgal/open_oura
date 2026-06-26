@@ -64,7 +64,9 @@ def run_bdi(db, tz):
     # ibi_values = [ibi_ms, amplitude, quality(1=valid)]; timestamps passed separately.
     ibi_rows, ibi_t = [], []
     for ds, n, j, _ in rows:
-        if n != "ibi_and_amplitude_event":
+        # both raw (0x60) and green-LED (0x80) IBI streams — on Ring 5 the green
+        # stream carries most overnight beats (matches run_sleep_model.py)
+        if n not in ("ibi_and_amplitude_event", "green_ibi_quality_event"):
             continue
         t0 = unix_s(ds)
         if not (bstart - 60 <= t0 <= bend + 60):
@@ -80,6 +82,8 @@ def run_bdi(db, tz):
                 acc += ms  # a beat occurs at the END of its interval
                 ibi_t.append((t0 * 1000.0) + acc)  # ms
     print(f"bedtime {bstart:.0f}..{bend:.0f} ({(bend-bstart)/3600:.2f} h), {len(ibi_rows)} IBIs")
+    if not ibi_rows:
+        sys.exit("no valid IBI in the sleep window — sync overnight IBI (0x60/0x80) data first")
     m = load("sleepnet_bdi_0_4_0")
     bedtime_input = torch.tensor([int(bstart * 1000), int(bend * 1000)], dtype=torch.long)
     ibi_vals = f32(ibi_rows)  # [N,3]
@@ -91,6 +95,8 @@ def run_bdi(db, tz):
     # exact deep/rem order not yet confirmed from the app's SleepStage enum)
     stage = sleep_stages[:, 1:5].argmax(dim=1)
     n = stage.shape[0]
+    if n == 0:
+        sys.exit("SleepNet-BDI returned zero epochs for this window")
     labels = ["awake?", "light?", "stageC?", "stageD?"]
     print(f"\nHypnogram: {n} epochs x 30s = {n*30/60:.0f} min")
     for s in range(4):
