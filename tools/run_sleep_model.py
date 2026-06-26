@@ -14,10 +14,19 @@ from pathlib import Path
 import torch
 
 REPO = Path(__file__).resolve().parent.parent
-DB = str(REPO / "captures" / "ring5.db")
 TZ = 1
 MODEL = str(REPO / "notes" / "models" / "sleepnet_moonstone_1_2_0.pt")
 STAGE = {1: "DEEP", 2: "LIGHT", 3: "REM", 4: "WAKE"}
+
+
+def resolve_db(arg):  # default search mirrors run_activity_model.py / run_models.py
+    if arg:
+        return Path(arg)
+    for cand in (Path.cwd() / "oura.db", REPO / "oura.db", REPO / "captures" / "ring5.db"):
+        if cand.exists():
+            return cand
+    return REPO / "oura.db"
+
 
 args = [a for a in sys.argv[1:]]
 start_ds = end_ds = None
@@ -26,12 +35,14 @@ if len(args) >= 2 and args[0].isdigit():
     rest = args[2:]
 else:
     rest = args
-if rest:
-    DB = rest[0]
+db_arg = rest[0] if rest else None
 if len(rest) > 1:
     TZ = int(rest[1])
+DB = resolve_db(db_arg)
+if not DB.exists():
+    sys.exit(f"error: database not found: {DB} (run `oura sync` first)")
 
-con = sqlite3.connect(DB)
+con = sqlite3.connect(str(DB))
 rows = con.execute("SELECT ring_timestamp, tag, decoded_json, captured_unix FROM events "
                    "WHERE decoded_json IS NOT NULL ORDER BY ring_timestamp").fetchall()
 max_ds, anchor_unix = max(((r[0], r[3]) for r in rows), key=lambda x: x[0])

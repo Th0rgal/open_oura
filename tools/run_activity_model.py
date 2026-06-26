@@ -142,11 +142,15 @@ def main():
     if not met:
         sys.exit("no MET (activity_information / tag 0x50) events in DB — cannot run the activity model")
 
-    def f32(seq):
-        return torch.tensor(seq, dtype=torch.float32)
+    def f32(seq, cols):
+        # keep rank 2 ([0, cols]) for empty series, matching the LibTorch mat() path;
+        # a bare torch.tensor([]) is 1-D and shape-mismatches the model.
+        if seq:
+            return torch.tensor(seq, dtype=torch.float32)
+        return torch.empty((0, cols), dtype=torch.float32)
 
-    met_t, motion_t = f32(met), f32(sorted(motion))
-    temp_t, hr_t = f32(sorted(temp)), f32(sorted(hr))
+    met_t, motion_t = f32(met, 2), f32(sorted(motion), 9)
+    temp_t, hr_t = f32(sorted(temp), 2), f32(sorted(hr), 2)
     # stepmotion stub: NaN features spanning the FULL range, else its last
     # timestamp caps the model's last_valid_time and truncates every series.
     step_t = torch.full((2, 12), float("nan"), dtype=torch.float32)
