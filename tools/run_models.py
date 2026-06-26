@@ -151,11 +151,16 @@ RUNNERS = {"bdi": run_bdi, "daily_medians": run_daily_medians}
 
 
 def main():
-    model = sys.argv[1] if len(sys.argv) > 1 else "bdi"
-    db = next((a for a in sys.argv[2:] if not a.startswith("-")), str(REPO / "oura.db"))
+    argv = sys.argv[1:]
     tz = 1
-    if "--tz" in sys.argv:
-        tz = int(sys.argv[sys.argv.index("--tz") + 1])
+    if "--tz" in argv:  # strip "--tz H" so its value isn't mistaken for the DB path
+        i = argv.index("--tz")
+        if i + 1 >= len(argv):
+            sys.exit("--tz requires a value")
+        tz = int(argv[i + 1])
+        del argv[i:i + 2]
+    model = argv[0] if argv else "bdi"
+    db = next((a for a in argv[1:] if not a.startswith("-")), str(REPO / "oura.db"))
     if model == "all":
         for k, fn in RUNNERS.items():
             print("=" * 70, k)

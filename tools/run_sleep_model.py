@@ -10,11 +10,13 @@ Usage: python tools/run_sleep_model.py START_DS END_DS [DB] [TZ=1]
        (no args → uses the bedtime_period in the DB)
 """
 import sys, json, sqlite3, datetime
+from pathlib import Path
 import torch
 
-DB = "captures/ring5.db"
+REPO = Path(__file__).resolve().parent.parent
+DB = str(REPO / "captures" / "ring5.db")
 TZ = 1
-MODEL = "notes/models/sleepnet_moonstone_1_2_0.pt"
+MODEL = str(REPO / "notes" / "models" / "sleepnet_moonstone_1_2_0.pt")
 STAGE = {1: "DEEP", 2: "LIGHT", 3: "REM", 4: "WAKE"}
 
 args = [a for a in sys.argv[1:]]
