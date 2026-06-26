@@ -440,6 +440,15 @@ fn cmd_sessions(cli: &Cli, tz_offset: i64, threshold: f64, json: bool) -> Result
         .canonicalize()
         .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(&cli.db));
 
+    // Fail clearly on a missing DB instead of letting the LibTorch path's
+    // Store::open create an empty one (matches the Python runner's resolve_db).
+    if !db.exists() {
+        return Err(anyhow!(
+            "database not found: {} (run `oura sync` first)",
+            db.display()
+        ));
+    }
+
     #[cfg(feature = "torch")]
     {
         return activity_model::run(&db, &root, tz_offset, threshold, json);
