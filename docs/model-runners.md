@@ -1,5 +1,10 @@
 # Running Oura's on-device models on your synced data
 
+> **Models are not included in this repo.** The decrypted `.pt` files are Oura's
+> proprietary IP and are **not committed or pushed** (gitignored under
+> `notes/models/`). The runners reference them by path; you supply your own
+> locally-decrypted copies.
+
 The ring ships Oura's analysis as encrypted on-device PyTorch models. Once
 decrypted locally (into the gitignored `notes/models/`), several of them run on
 the signals we already sync into `oura.db`. This page indexes the runners and what
