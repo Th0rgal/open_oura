@@ -592,7 +592,7 @@ mod tests {
         let mock = MockTransport::new();
         mock.on(
             "0803000000",
-            &["091202000003040301000105000ca56c2af838a0"],
+            &["091202000003040301000105000cffeeddccbbaa"],
         );
         let client = OuraClient::new(mock).with_quiet(Duration::from_millis(20));
         let info = client.firmware().await.unwrap();

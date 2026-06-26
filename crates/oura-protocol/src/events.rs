@@ -64,7 +64,7 @@ fn decode_body(tag: u8, body: &[u8]) -> Option<serde_json::Value> {
     match tag {
         // time_sync: u32 LE unix timestamp (plus trailing timezone bytes).
         0x42 => decode_time_sync(body),
-        // debug_event: ASCII strings (e.g. "git;ca22327", "SNH;4369").
+        // debug_event: ASCII strings (e.g. "git;ca22327", "SNH;XXXX").
         0x43 => decode_ascii(body),
         // debug_data: ASCII when printable, else binary DebugData subtypes
         // (charging/battery/…) dispatched on the first byte (parse_api_debug_data).
