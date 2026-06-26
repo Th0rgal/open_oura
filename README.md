@@ -73,6 +73,15 @@ State-changing and destructive commands are hidden behind `--include-state` and
   pulls each data channel, and the minimal client sync recipe.
 - [`docs/ring-5-observations.md`](docs/ring-5-observations.md): Ring 5 BLE surface
   and first-contact findings.
+- [`docs/ring-features.md`](docs/ring-features.md): the feature capabilities, runtime
+  modes, what's on by default, and which event each enabled feature produces (incl.
+  what `experimental` does — and doesn't).
+- [`docs/model-runners.md`](docs/model-runners.md): running Oura's decrypted on-device
+  models on your synced data — what runs (activity, sleep, CVA, SpO2) vs what's blocked.
+- [`docs/cva-cardiovascular-age.md`](docs/cva-cardiovascular-age.md): decoding the raw
+  PPG (`cva_raw_ppg_data` 0x81) and running the cardiovascular-age model.
+- [`docs/spo2-calibration.md`](docs/spo2-calibration.md): turning the SpO2 R-ratio into
+  a percentage with Oura's own calibration.
 - [`docs/firmware-update.md`](docs/firmware-update.md): the DFU/OTA opcodes, the
   working cloud download pipeline + codename map, per-device encryption status, and
   why the firmware key is unreachable (device-resident; not brute-forceable).

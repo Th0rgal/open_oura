@@ -27,14 +27,37 @@ Two different things are easy to confuse:
 | DAYTIME_HR | 0x02 | **AUTOMATIC** | ✅ on for everyone | background daytime HR |
 | SPO2 | 0x04 | **AUTOMATIC** | ✅ on for everyone | `spo2_r_pi` events |
 | RESTING_HR | 0x08 | **AUTOMATIC** | ✅ on for everyone | resting HR |
-| REAL_STEPS | 0x0b | **AUTOMATIC** | ❌ off by default (server-flag gated) — we enabled it | `real_steps_features` (0x7e/0x7f) → stepmotion |
-| EXERCISE_HR | 0x03 | **OFF** | ❌ not in default set | workout HR |
-| CVA_PPG_SAMPLER | 0x0d | **OFF** | ❌ not in default set | cardiovascular PPG (cva models) |
-| EXPERIMENTAL | 0x0c | **OFF** | ❌ off | — |
+| REAL_STEPS | 0x0b | **AUTOMATIC** | ❌ off by default (server-flag gated) — we enabled it | `real_step_event_feature_1/2` (0x7e/0x7f) → stepmotion |
+| EXERCISE_HR | 0x03 | **AUTOMATIC** | ❌ not in default set — we enabled it | `ehr_trace_event` 0x73 + `ehr_acm_intensity_event` 0x74 |
+| CVA_PPG_SAMPLER | 0x0d | **AUTOMATIC** | ❌ not in default set — we enabled it | **`cva_raw_ppg_data` 0x81** (raw PPG → CVA model; see [cva-cardiovascular-age.md](cva-cardiovascular-age.md)) |
+| EXPERIMENTAL | 0x0c | **AUTOMATIC** | ❌ not in default set — we enabled it | **— (firmware-only gate; no app-visible event type)** |
 
-So a stock ring has **DAYTIME_HR + SPO2 + RESTING_HR** running automatically (plus
+A *stock* ring has **DAYTIME_HR + SPO2 + RESTING_HR** running automatically (plus
 the always-on base streams: motion 0x47, temperature 0x46, MET/activity 0x50,
-IBI/HR 0x60/0x80). EXERCISE_HR / CVA_PPG / EXPERIMENTAL are off unless enabled.
+IBI/HR 0x60/0x80). On **our** ring we additionally enabled REAL_STEPS, EXERCISE_HR,
+CVA_PPG_SAMPLER and EXPERIMENTAL — all now AUTOMATIC (verified live with
+`oura feature-status`).
+
+**What each enabled feature actually produced** (cross-checked: enum
+`FeatureCapabilityId` → event tag `RingEventType`, plus the `feature_session`
+volumes seen in our sync):
+
+| feature (id) | event(s) it produces |
+| --- | --- |
+| DAYTIME_HR (0x02) | `ibi_and_amplitude` 0x60, `green_ibi_quality` 0x80 |
+| EXERCISE_HR (0x03) | `ehr_trace` 0x73, `ehr_acm_intensity` 0x74 |
+| SPO2 (0x04) | `spo2_r_pi` 0x8b (R-ratio + PI; → [spo2-calibration.md](spo2-calibration.md)) |
+| REAL_STEPS (0x0b) | `real_step_event_feature_1/2` 0x7e/0x7f |
+| CVA_PPG_SAMPLER (0x0d) | `cva_raw_ppg_data` 0x81 (raw PPG) |
+| **EXPERIMENTAL (0x0c)** | **nothing decodable — see below** |
+
+**EXPERIMENTAL adds no app-visible data.** Empirically it emits **zero**
+`feature_session` events and **no** event type of its own; in the decompiled app
+`CAP_EXPERIMENTAL` is referenced by no parser, no `RingEventType` tag, and no
+`RdataFeatureId`. It only flips a firmware switch (`ENABLE_EXPERIMENTAL_FEATURES`,
+gated server-side by `firmware/experimental`). Whatever it changes is internal to
+the firmware and opaque to us — enabling it did **not** add any extra stream we can
+read.
 
 ## Enable conditions (from the Android app)
 
@@ -77,8 +100,11 @@ EXERCISE_HR stayed off too. Forcing REAL_STEPS + EXERCISE_HR by hand reconstruct
 the AWHR setup.
 
 **EXPERIMENTAL (0x0c)** = server-controlled "experimental firmware features"
-switch (`firmware/experimental`): turns on experimental/research firmware
-behaviors. Off for normal consumers; only on for opted-in cohorts.
+switch (`firmware/experimental`): flips a firmware-internal behavior. Off for
+normal consumers; only on for opted-in cohorts. **It produces no app-visible event
+type** (no parser / tag / RdataFeatureId references it; zero `feature_session`
+events in our data) — whatever it changes stays inside the firmware and is opaque
+to us. See the feature→event table above.
 
 ### What we enabled by hand, and what stayed locked
 
