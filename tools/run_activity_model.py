@@ -72,6 +72,14 @@ def parse_args():
             args.tz = float(extra[0])
         except (ValueError, IndexError):
             pass
+    # A bare numeric positional (e.g. `2` for UTC+2) is a legacy tz offset, not a
+    # DB path — reinterpret it so resolve_db doesn't fail with "database not found".
+    if args.db is not None and not Path(args.db).exists():
+        try:
+            args.tz = float(args.db)
+            args.db = None
+        except ValueError:
+            pass
     return args
 
 

@@ -9,6 +9,7 @@ Usage: python tools/run_models.py <model> [DB] [--tz H]
   model = bdi | daily_medians | all
 (sleepnet_moonstone has its own runner: tools/run_sleep_model.py)
 """
+import datetime
 import json
 import sys
 import sqlite3
@@ -84,7 +85,8 @@ def run_bdi(db, tz):
                 ibi_rows.append([float(ms), float(amp), valid])
                 acc += ms  # a beat occurs at the END of its interval
                 ibi_t.append((t0 * 1000.0) + acc)  # ms
-    print(f"bedtime {bstart:.0f}..{bend:.0f} ({(bend-bstart)/3600:.2f} h), {len(ibi_rows)} IBIs")
+    local = lambda s: datetime.datetime.utcfromtimestamp(s + tz * 3600).strftime("%Y-%m-%d %H:%M")
+    print(f"bedtime {local(bstart)} → {local(bend)} ({(bend-bstart)/3600:.2f} h), {len(ibi_rows)} IBIs")
     if not ibi_rows:
         sys.exit("no valid IBI in the sleep window — sync overnight IBI (0x60/0x80) data first")
     m = load("sleepnet_bdi_0_4_0")
@@ -112,7 +114,7 @@ def run_bdi(db, tz):
 
 
 # ---- daily_medians_1_1_0: HRV/HR/temp/MET medians over a day ----
-def run_daily_medians(db, tz):
+def run_daily_medians(db, _tz):  # no wall-clock output → tz unused here
     import json
     rows = events(db)
     unix_s = anchor(rows)
