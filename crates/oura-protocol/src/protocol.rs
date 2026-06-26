@@ -174,7 +174,9 @@ pub mod capability {
     pub const RESEARCH_DATA: u8 = 0x01;
     pub const REAL_STEPS: u8 = 0x0b;
     pub const AMBIENT_LIGHT: u8 = 0x10;
-    pub const RAW_DATA_SAMPLER: u8 = 0x14;
+    // 0x12 per the app's FeatureCapabilityId (CAP_RAW_DATA_SAMPLER = DFUStart.REQUEST_LENGTH = 18).
+    // (Was mislabeled 0x14, which is a different, version-0 capability on Ring 5.)
+    pub const RAW_DATA_SAMPLER: u8 = 0x12;
     pub const ATLAS: u8 = 0x15; // bioZ / EDA sensing-discovery platform
 }
 

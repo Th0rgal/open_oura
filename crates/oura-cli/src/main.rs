@@ -12,6 +12,8 @@ use oura_link::ble::{self, BleTransport};
 use oura_store::storage::Store;
 use oura_link::OuraClient;
 
+#[cfg(feature = "torch")]
+mod activity_model;
 mod game;
 mod motion_server;
 mod viz;
@@ -74,11 +76,12 @@ enum Command {
     Events,
     /// Re-run decoders over already-stored raw event bodies (offline).
     Redecode,
-    /// RData bulk raw-sampler control: `state` (read), `stop`/`clear` (teardown).
-    /// Starting a collection is intentionally not exposed here — it writes a
-    /// persistent flash session that must be torn down (see docs/native-decoder.md).
+    /// RData bulk raw-sampler control: `state` (read), `stop`/`clear` (teardown),
+    /// `probe` (arm ACM-50 ~30 s, measure data rate + battery, auto-teardown).
+    /// `probe` writes a persistent flash session but always tears itself down
+    /// (see docs/rdata-capacity-probe.md).
     Rdata {
-        /// One of: state | stop | clear
+        /// One of: state | stop | clear | probe
         #[arg(default_value = "state")]
         action: String,
     },
@@ -119,12 +122,19 @@ enum Command {
         #[arg(long)]
         enable_spo2: bool,
     },
-    /// Detect activity/exposure sessions (workout, swim, sauna, cold) from stored
-    /// events. Heuristic — open_oura's own, not an Oura algorithm.
+    /// Detect & label activity sessions from stored events using Oura's OWN
+    /// `automatic_activity_detection` model (runs via tools/run_activity_model.py;
+    /// needs the Python venv with torch). Not a heuristic.
     Sessions {
         /// Timezone offset (hours from UTC) for displayed times.
         #[arg(long, default_value_t = 0)]
         tz_offset: i64,
+        /// is_workout probability at/above which a segment is marked a workout.
+        #[arg(long, default_value_t = 0.5)]
+        threshold: f64,
+        /// Emit machine-readable JSON instead of a table.
+        #[arg(long)]
+        json: bool,
     },
     /// Subscribe a feature capability (real_steps | atlas | ambient | raw_data |
     /// research_data) via SetFeatureSubscription, to make the ring emit its events.
@@ -136,6 +146,18 @@ enum Command {
         #[arg(long, default_value = "data")]
         mode: String,
     },
+    /// Set a feature's operating MODE via SetFeatureMode (e.g. turn on real_steps).
+    /// This is the consumer-feature enable path (distinct from `subscribe`).
+    FeatureMode {
+        /// Feature: real_steps | exercise_hr | resting_hr | cva_ppg | ambient,
+        /// or a raw id like 0x0b.
+        feature: String,
+        /// Mode: off | automatic | requested | connected_live (default: automatic).
+        #[arg(long, default_value = "automatic")]
+        mode: String,
+    },
+    /// Read the real on-ring MODE/status of the data features (what's actually on).
+    FeatureStatus,
 }
 
 fn feature_mode_name(mode: u8) -> &'static str {
@@ -259,8 +281,12 @@ async fn main() -> Result<()> {
             enable_hr,
             enable_spo2,
         } => cmd_features(&cli, &key, *enable_hr, *enable_spo2).await,
-        Command::Sessions { tz_offset } => cmd_sessions(&cli, *tz_offset),
+        Command::Sessions { tz_offset, threshold, json } => {
+            cmd_sessions(&cli, *tz_offset, *threshold, *json)
+        }
         Command::Subscribe { feature, mode } => cmd_subscribe(&cli, &key, feature, mode).await,
+        Command::FeatureMode { feature, mode } => cmd_feature_mode(&cli, &key, feature, mode).await,
+        Command::FeatureStatus => cmd_feature_status(&cli, &key).await,
     }
 }
 
@@ -313,102 +339,150 @@ async fn cmd_subscribe(
     Ok(())
 }
 
-/// Detect activity/exposure sessions from stored events (open_oura heuristic).
-fn cmd_sessions(cli: &Cli, tz_offset: i64) -> Result<()> {
-    use oura_analysis::original::activity_session::{detect, Config, MinuteSample};
-    use std::collections::BTreeMap;
-
-    let store = Store::open(&cli.db)?;
-    let events = store.decoded_events()?;
-    if events.is_empty() {
-        println!("No decoded events in {}. Run `oura sync` first.", cli.db.display());
-        return Ok(());
-    }
-    // Anchor ring deciseconds to wall-clock using the latest event's capture time.
-    let (max_ds, anchor_unix) = events
-        .iter()
-        .map(|(ds, _, _, cu)| (*ds, *cu))
-        .max_by_key(|(ds, _)| *ds)
-        .unwrap();
-    let minute_of = |ds: i64| -> i64 { (anchor_unix - (max_ds - ds) / 10) / 60 };
-
-    // Aggregate per-minute signals from the relevant event types.
-    #[derive(Default)]
-    struct Bucket {
-        met: Option<f64>,
-        motion: u32,
-        temp: Vec<f64>,
-        hr: Vec<u32>,
-    }
-    let mut buckets: BTreeMap<i64, Bucket> = BTreeMap::new();
-    for (ds, tag, json, _) in &events {
-        let v: serde_json::Value = match serde_json::from_str(json) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let b = buckets.entry(minute_of(*ds)).or_default();
-        match tag {
-            0x46 | 0x69 | 0x75 => {
-                if let Some(a) = v.get("temps_c").and_then(|t| t.as_array()) {
-                    b.temp.extend(a.iter().filter_map(|x| x.as_f64()));
-                }
-            }
-            0x47 => {
-                if let Some(hi) = v.get("high_intensity").and_then(|x| x.as_u64()) {
-                    b.motion += hi as u32;
-                }
-            }
-            0x50 => {
-                if let Some(a) = v.get("met").and_then(|t| t.as_array()) {
-                    let m = a.iter().filter_map(|x| x.as_f64()).fold(0.0, f64::max);
-                    b.met = Some(b.met.unwrap_or(0.0).max(m));
-                }
-            }
-            0x80 => {
-                if let Some(a) = v.get("hr_bpm").and_then(|t| t.as_array()) {
-                    b.hr.extend(a.iter().filter_map(|x| x.as_u64().map(|n| n as u32)));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let samples: Vec<MinuteSample> = buckets
-        .into_iter()
-        .map(|(minute, b)| MinuteSample {
-            minute,
-            met: b.met,
-            motion: b.motion,
-            temp_c: (!b.temp.is_empty()).then(|| b.temp.iter().sum::<f64>() / b.temp.len() as f64),
-            hr: (!b.hr.is_empty()).then(|| b.hr.iter().sum::<u32>() / b.hr.len() as u32),
-        })
-        .collect();
-
-    let sessions = detect(&samples, &Config::default());
-    if sessions.is_empty() {
-        println!("No activity/exposure sessions detected.");
-        return Ok(());
-    }
-    let hm = |minute: i64| -> String {
-        let sod = (minute * 60 + tz_offset * 3600).rem_euclid(86400);
-        format!("{:02}:{:02}", sod / 3600, (sod % 3600) / 60)
+/// Set a feature's operating mode (SetFeatureMode). The consumer-feature enable
+/// path — e.g. `feature-mode real_steps` turns on the on-ring step/gait DSP whose
+/// `real_steps_features` events (0x7e/0x7f) feed the steps_motion_decoder.
+async fn cmd_feature_mode(cli: &Cli, key: &Option<[u8; 16]>, feature: &str, mode: &str) -> Result<()> {
+    use oura_protocol::protocol::feature_mode;
+    let id: u8 = match feature {
+        "real_steps" => 0x0b,
+        "daytime_hr" => 0x02,
+        "exercise_hr" => 0x03,
+        "spo2" => 0x04,
+        "resting_hr" => 0x08,
+        "cva_ppg" => 0x0d,
+        "ambient" => 0x10,
+        other => other
+            .strip_prefix("0x")
+            .and_then(|h| u8::from_str_radix(h, 16).ok())
+            .or_else(|| other.parse().ok())
+            .ok_or_else(|| anyhow!("unknown feature {other} (use a name or 0xNN)"))?,
     };
-    println!("Detected sessions (open_oura heuristic — not Oura's classification):\n");
-    println!("  {:<13}  {:<13}  {:>4}  {:>8}  {:>4}  temp(C)", "kind", "time", "min", "peakMET", "HR");
-    for s in &sessions {
-        let temp = match (s.temp_min, s.temp_max) {
-            (Some(lo), Some(hi)) => format!("[{lo:.1}, {hi:.1}]"),
-            _ => "-".into(),
-        };
-        let hr = s.mean_hr.map(|h| h.to_string()).unwrap_or_else(|| "-".into());
-        let kind = format!("{:?}", s.kind);
-        let span = format!("{}-{}", hm(s.start_minute), hm(s.end_minute));
-        println!(
-            "  {kind:<13}  {span:<13}  {:>4}  {:>8.1}  {hr:>4}  {temp}",
-            s.minutes, s.peak_met,
-        );
+    let m = match mode {
+        "off" => feature_mode::OFF,
+        "automatic" => feature_mode::AUTOMATIC,
+        "requested" => feature_mode::REQUESTED,
+        "connected_live" => feature_mode::CONNECTED_LIVE,
+        other => return Err(anyhow!("unknown mode {other}")),
+    };
+    let client = connect(cli).await?;
+    if !maybe_auth(&client, key).await? {
+        return Err(anyhow!("set-feature-mode requires --key-file (authentication)"));
+    }
+    match client.set_feature_mode(id, m).await {
+        Ok(()) => {
+            println!("SetFeatureMode({feature}=0x{id:02x}, {mode}): SUCCESS.");
+            println!("Wear the ring; the feature's events should appear on the next sync.");
+        }
+        Err(e) => println!("SetFeatureMode({feature}=0x{id:02x}, {mode}) rejected: {e}"),
     }
     Ok(())
+}
+
+/// Read the actual on-ring mode/status of the data-producing features.
+async fn cmd_feature_status(cli: &Cli, key: &Option<[u8; 16]>) -> Result<()> {
+    let client = connect(cli).await?;
+    if !maybe_auth(&client, key).await? {
+        return Err(anyhow!("feature-status requires --key-file (authentication)"));
+    }
+    let mode_name = |m: u8| match m {
+        0 => "OFF",
+        1 => "AUTOMATIC",
+        2 => "REQUESTED",
+        3 => "CONNECTED_LIVE",
+        _ => "?",
+    };
+    let feats = [
+        (0x02u8, "daytime_hr"), (0x03, "exercise_hr"), (0x04, "spo2"),
+        (0x08, "resting_hr"), (0x0b, "real_steps"), (0x0c, "experimental"),
+        (0x0d, "cva_ppg"),
+    ];
+    println!("  {:<14} {:>3}  {:<14} status state sub", "feature", "id", "mode");
+    for (id, name) in feats {
+        match client.feature_status(id).await {
+            Ok(s) => println!(
+                "  {name:<14} {id:>3}  {:<14} {:>6} {:>5} {:>3}",
+                mode_name(s.mode), s.status, s.state, s.subscription
+            ),
+            Err(e) => println!("  {name:<14} {id:>3}  <read failed: {e}>"),
+        }
+    }
+    Ok(())
+}
+
+/// Label activity sessions by running Oura's own `automatic_activity_detection`
+/// TorchScript model over the stored events. Built with `--features torch` it
+/// runs the model in-process via LibTorch; otherwise it shells out to the
+/// equivalent `tools/run_activity_model.py`. Either way the model — not a
+/// heuristic — produces the labels.
+fn cmd_sessions(cli: &Cli, tz_offset: i64, threshold: f64, json: bool) -> Result<()> {
+    // Locate the repo root by a stable marker present for both backends. Try the
+    // current dir first, then the compiled-in manifest dir, so the binary keeps
+    // working when invoked from elsewhere in the checkout.
+    let marker = Path::new("notes/models/automatic_activity_detection_3_1_11.pt");
+    let find_root = |start: &Path| -> Option<PathBuf> {
+        start.ancestors().find(|d| d.join(marker).is_file()).map(Path::to_path_buf)
+    };
+    let root = std::env::current_dir()
+        .ok()
+        .and_then(|d| find_root(&d))
+        .or_else(|| find_root(Path::new(env!("CARGO_MANIFEST_DIR"))))
+        .ok_or_else(|| {
+            anyhow!(
+                "could not locate the model under notes/models — run `oura sessions` \
+                 from inside the open_oura checkout"
+            )
+        })?;
+
+    // Absolute DB path (the Python child runs with cwd = repo root).
+    let db = cli
+        .db
+        .canonicalize()
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(&cli.db));
+
+    // Fail clearly on a missing DB instead of letting the LibTorch path's
+    // Store::open create an empty one (matches the Python runner's resolve_db).
+    if !db.exists() {
+        return Err(anyhow!(
+            "database not found: {} (run `oura sync` first)",
+            db.display()
+        ));
+    }
+
+    #[cfg(feature = "torch")]
+    {
+        return activity_model::run(&db, &root, tz_offset, threshold, json);
+    }
+
+    #[cfg(not(feature = "torch"))]
+    {
+        use std::process::Command as Proc;
+        let script_rel = Path::new("tools/run_activity_model.py");
+        // Prefer the repo's venv python (has torch); fall back to python3 on PATH.
+        let venv_py = root.join(".venv/bin/python");
+        let python = if venv_py.is_file() { venv_py } else { PathBuf::from("python3") };
+        let mut cmd = Proc::new(&python);
+        cmd.current_dir(&root)
+            .arg(root.join(script_rel))
+            .arg(&db)
+            .arg("--tz")
+            .arg(tz_offset.to_string())
+            .arg("--threshold")
+            .arg(threshold.to_string());
+        if json {
+            cmd.arg("--json");
+        }
+        let status = cmd.status().with_context(|| {
+            format!(
+                "running the activity model via {} (is the Python venv with torch set up?)",
+                python.display()
+            )
+        })?;
+        if !status.success() {
+            return Err(anyhow!("activity model exited with {status}"));
+        }
+        Ok(())
+    }
 }
 
 async fn cmd_features(
@@ -573,13 +647,48 @@ async fn cmd_sync(cli: &Cli, key: &Option<[u8; 16]>, sync_time: bool) -> Result<
     println!("Syncing events for {serial} from cursor {cursor} ...");
 
     let mut inserted = 0u32;
+    // Capture any DB error (insert or cursor write) so a failure surfaces loudly
+    // instead of being swallowed — and so the cursor is never advanced past events
+    // we failed to store (which would drop them permanently on the next sync).
+    let db_err = std::cell::RefCell::new(None);
+    // Track whether any batch cursor was actually persisted, so the error message
+    // below is accurate even when earlier batches already advanced the cursor.
+    let cursor_advanced = std::cell::Cell::new(false);
     let outcome = client
-        .drain_events(cursor, |ev| {
-            if store.insert_event(&serial, ev).unwrap_or(false) {
-                inserted += 1;
-            }
-        })
+        .drain_events(
+            cursor,
+            |ev| {
+                if db_err.borrow().is_some() {
+                    return;
+                }
+                match store.insert_event(&serial, ev) {
+                    Ok(true) => inserted += 1,
+                    Ok(false) => {}
+                    Err(e) => *db_err.borrow_mut() = Some(e),
+                }
+            },
+            // Persist the cursor after each fully-drained batch (so an interrupted
+            // sync still makes progress) — but not once a DB write has failed. A
+            // failed cursor write is itself recorded so it can't be silently lost.
+            |c| {
+                if db_err.borrow().is_some() {
+                    return;
+                }
+                match store.set_cursor(&serial, c) {
+                    Ok(()) => cursor_advanced.set(true),
+                    Err(e) => *db_err.borrow_mut() = Some(e),
+                }
+            },
+        )
         .await?;
+    if let Some(e) = db_err.into_inner() {
+        let ctx = if cursor_advanced.get() {
+            "storing event during sync (cursor advanced through earlier batches)"
+        } else {
+            "storing event during sync (cursor not advanced)"
+        };
+        return Err(e).context(ctx);
+    }
 
     store.set_cursor(&serial, outcome.next_cursor)?;
     println!(
@@ -712,18 +821,278 @@ async fn cmd_rdata(cli: &Cli, key: &Option<[u8; 16]>, action: &str) -> Result<()
             println!("RData state: subtag={subtag} status={status} (0 = idle/none active)");
         }
         "stop" => {
-            client.rdata_stop().await?;
-            println!("RData stop sent.");
+            let s = client.rdata_stop().await?;
+            println!("RData stop -> status {s} ({})", rdata_status_name(s));
         }
         "clear" => {
-            client.rdata_clear().await?;
-            println!("RData clear sent.");
+            let s = client.rdata_clear().await?;
+            println!("RData clear -> status {s} ({})", rdata_status_name(s));
+        }
+        "probe" => {
+            rdata_probe(&client, 30).await?;
+        }
+        "sweep" => {
+            rdata_sweep(&client).await?;
+        }
+        "recipe" => {
+            rdata_recipe(&client).await?;
+        }
+        "unlock" => {
+            rdata_unlock(&client).await?;
         }
         other => {
-            anyhow::bail!("unknown rdata action '{other}' (use state | stop | clear)");
+            anyhow::bail!("unknown rdata action '{other}' (use state | stop | clear | probe)");
         }
     }
     let _ = client.transport().disconnect().await;
+    Ok(())
+}
+
+/// RData capacity rate-probe (Phase-2 spike): arm ACM-50, record briefly, then
+/// stop and drain pages to measure the real byte rate and page size. **ALWAYS**
+/// tears down (stop + clear) even on error. Ring should be on the charger and
+/// still — sampling rate is fixed at 50 Hz regardless of motion.
+async fn rdata_probe(client: &OuraClient<BleTransport>, secs: u64) -> Result<()> {
+    use oura_protocol::protocol::rdata::DataType;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    // The ring validates configure timestamps against its own clock, so sync it
+    // to host UTC first — without this, arming returns idle (status 3).
+    client.sync_time().await?;
+    let (sub0, st0) = client.rdata_state().await?;
+    let batt0 = client.battery().await?;
+    println!("After sync_time: RData state subtag={sub0} status={st0}; battery {}%", batt0.percent);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as u32)
+        .unwrap_or(0);
+
+    let (csub, cst) = client.rdata_configure(&[DataType::Acm2g50Hz], now, now).await?;
+    println!("Armed ACM 2g @ 50 Hz: configure subtag={csub} status={cst}");
+
+    // From here on, tear down NO MATTER WHAT.
+    let body = async {
+        println!("Recording for {secs}s ({:.1} min)...", secs as f64 / 60.0);
+        tokio::time::sleep(Duration::from_secs(secs)).await;
+        let (subm, stm) = client.rdata_state().await?;
+        let batt1 = client.battery().await?;
+        println!(
+            "After record: RData state subtag={subm} status={stm}; battery {}% (Δ {} pts over {:.1} min)",
+            batt1.percent,
+            batt0.percent as i16 - batt1.percent as i16,
+            secs as f64 / 60.0
+        );
+        // Drain BEFORE stop — the documented lifecycle is configure -> get_page ->
+        // stop -> clear, and stop may discard the buffer.
+        println!("Draining pages (before stop)...");
+        let mut pages = 0u32;
+        let mut total_bytes = 0usize;
+        let mut page_len = 0usize;
+        for page in 0u16..4000 {
+            let (status, bytes) = client.rdata_get_page(page).await?;
+            if page == 0 {
+                println!("  page 0: status={status}, {} bytes, raw={}", bytes.len(), hex::encode(&bytes));
+            }
+            if status == 6 || bytes.is_empty() {
+                break; // NO_DATA -> past the end of recorded data
+            }
+            page_len = page_len.max(bytes.len());
+            total_bytes += bytes.len();
+            pages += 1;
+        }
+        Ok::<_, anyhow::Error>((pages, total_bytes, page_len, batt1.percent))
+    }
+    .await;
+
+    // Mandatory teardown.
+    if let Err(e) = client.rdata_stop().await {
+        eprintln!("warning: teardown stop failed: {e}");
+    }
+    if let Err(e) = client.rdata_clear().await {
+        eprintln!("warning: teardown clear failed: {e}");
+    }
+    let st1 = client.rdata_state().await.map(|(_, s)| s).unwrap_or(255);
+    println!("RData state after teardown: status={st1}");
+
+    let (pages, total_bytes, page_len, batt1) = body?;
+    if pages == 0 {
+        println!(
+            "\nNo pages drained. Either nothing recorded, or `stop` discards the \
+             buffer (in which case we must drain BEFORE stop). Will adjust and retry."
+        );
+        return Ok(());
+    }
+    let rate = total_bytes as f64 / secs as f64;
+    let batt_delta = batt0.percent as i16 - batt1 as i16;
+    println!("\n--- RData rate probe (ACM 2g @ 50 Hz, {secs}s / {:.1} min) ---", secs as f64 / 60.0);
+    println!("pages drained  : {pages}");
+    println!("max page size  : {page_len} bytes (payload after subtag+status header)");
+    println!("total bytes    : {total_bytes}");
+    println!("byte rate      : {rate:.0} B/s  (~{:.1} KB/min)", rate * 60.0 / 1024.0);
+    println!("battery        : {}% -> {batt1}% (Δ {batt_delta} pts)", batt0.percent);
+    if batt_delta > 0 {
+        let pct_per_hr = batt_delta as f64 * 3600.0 / secs as f64;
+        println!("battery rate   : ~{pct_per_hr:.1} %/hr while sampling");
+    } else {
+        println!("battery        : drop below 1% resolution over this window");
+    }
+    if rate > 0.0 {
+        let max_addr_bytes = (page_len.max(1) * 65536) as f64;
+        println!(
+            "addressable ceiling (65536 pages × {page_len} B, IF all flash-backed): \
+             ~{:.0} min of capture",
+            max_addr_bytes / rate / 60.0
+        );
+    }
+    Ok(())
+}
+
+/// RData status-code name (from the decompiled app's `RDataStatusCode`).
+fn rdata_status_name(s: u8) -> &'static str {
+    match s {
+        0 => "SUCCESS",
+        3 => "INVALID_SUBTAG",
+        5 => "NOT_INITIALIZED",
+        7 => "RECORDING_ON",
+        11 => "SYNC_NOT_IDLE",
+        12 => "MEMORY_FULL",
+        _ => "?",
+    }
+}
+
+/// Test 1: run the app's strict start recipe — Clear (require SUCCESS) -> state ->
+/// CONFIGURE with startTime=0 — and report each status. Tears down afterward.
+async fn rdata_recipe(client: &OuraClient<BleTransport>) -> Result<()> {
+    use oura_protocol::protocol::rdata::DataType;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    client.sync_time().await?;
+    let clear = client.rdata_clear().await?;
+    println!("RDataClear  -> status {clear} ({})", rdata_status_name(clear));
+    let (ssub, sbyte) = client.rdata_state().await?;
+    println!("RDataState  -> subtag {ssub}, state byte {sbyte} (0 IDLE,1 SCHED,2 REC,3 STOP,4 BUSY)");
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as u32)
+        .unwrap_or(0);
+    let (csub, cst) = client.rdata_configure(&[DataType::Acm2g50Hz], 0, now).await?;
+    println!(
+        "RDataConfigure(start=0) -> subtag {csub}, status {cst} ({})",
+        rdata_status_name(cst)
+    );
+    if cst == 0 {
+        println!(">>> START ACCEPTED — capability is enabled after all!");
+    } else {
+        println!(">>> still {} — capability gate confirmed.", rdata_status_name(cst));
+    }
+    // Teardown regardless.
+    let _ = client.rdata_stop().await;
+    let _ = client.rdata_clear().await;
+    Ok(())
+}
+
+/// Combined in-session unlock attempt: confirm RAW_DATA_SAMPLER is advertised,
+/// try enabling it (subscription + feature-mode) on the correct id 0x12, then
+/// Clear -> Configure in the SAME session. If Configure is accepted, do a short
+/// capture and drain. Always tears down (stop/clear/unsubscribe).
+async fn rdata_unlock(client: &OuraClient<BleTransport>) -> Result<()> {
+    use oura_protocol::protocol::rdata::DataType;
+    use oura_protocol::protocol::{capability, feature_mode, subscription_mode};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    client.sync_time().await?;
+    let caps = client.capabilities().await?;
+    let ver = |id: u8| caps.iter().find(|c| c.feature == id).map(|c| c.value);
+    println!(
+        "capabilities: RAW_DATA_SAMPLER(0x12)={:?}  RESEARCH_DATA(0x01)={:?}",
+        ver(capability::RAW_DATA_SAMPLER),
+        ver(capability::RESEARCH_DATA),
+    );
+
+    // Try both enable paths (best-effort; report outcomes).
+    match client.set_feature_subscription(capability::RAW_DATA_SAMPLER, subscription_mode::FEATURE_DATA).await {
+        Ok(r) => println!("subscribe RAW_DATA_SAMPLER(data) -> result {r}"),
+        Err(e) => println!("subscribe RAW_DATA_SAMPLER failed: {e}"),
+    }
+    match client.set_feature_mode(capability::RAW_DATA_SAMPLER, feature_mode::REQUESTED).await {
+        Ok(()) => println!("set_feature_mode RAW_DATA_SAMPLER(REQUESTED) -> SUCCESS"),
+        Err(e) => println!("set_feature_mode RAW_DATA_SAMPLER -> {e}"),
+    }
+
+    let clear = client.rdata_clear().await?;
+    println!("RDataClear -> status {clear} ({})", rdata_status_name(clear));
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as u32)
+        .unwrap_or(0);
+    let (_, cst) = client.rdata_configure(&[DataType::Acm2g50Hz], 0, now).await?;
+    println!("RDataConfigure(start=0) -> status {cst} ({})", rdata_status_name(cst));
+
+    let mut captured = (0u32, 0usize);
+    if cst == 0 {
+        println!(">>> ACCEPTED! Recording 30 s...");
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        for page in 0u16..4000 {
+            let (status, bytes) = client.rdata_get_page(page).await?;
+            if status == 6 || bytes.is_empty() {
+                break;
+            }
+            captured.0 += 1;
+            captured.1 += bytes.len();
+        }
+        println!(">>> drained {} pages, {} bytes", captured.0, captured.1);
+    } else {
+        println!(">>> still {} — enabling did not unlock CONFIGURE.", rdata_status_name(cst));
+    }
+
+    // Teardown.
+    let _ = client.rdata_stop().await;
+    let _ = client.rdata_clear().await;
+    let _ = client
+        .set_feature_subscription(capability::RAW_DATA_SAMPLER, subscription_mode::OFF)
+        .await;
+    Ok(())
+}
+
+/// Try several RData `configure` argument variants and report which (if any)
+/// moves the ring out of the idle state (status 3). Each attempt is immediately
+/// torn down. Pure diagnostic for the Phase-2 spike — no long recording.
+async fn rdata_sweep(client: &OuraClient<BleTransport>) -> Result<()> {
+    use oura_protocol::protocol::rdata::DataType;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    client.sync_time().await?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as u32)
+        .unwrap_or(0);
+
+    // (label, types, start, current)
+    let variants: &[(&str, &[DataType], u32, u32)] = &[
+        ("ACM, start=now",          &[DataType::Acm2g50Hz], now, now),
+        ("ACM, start=0",            &[DataType::Acm2g50Hz], 0, now),
+        ("Metadata+ACM, start=now", &[DataType::Metadata, DataType::Acm2g50Hz], now, now),
+        ("Metadata+ACM, start=0",   &[DataType::Metadata, DataType::Acm2g50Hz], 0, now),
+        ("ACM 8g, start=now",       &[DataType::Acm8g50Hz], now, now),
+    ];
+
+    let (_, idle) = client.rdata_state().await?;
+    println!("baseline idle status = {idle}\n");
+    for (label, types, start, cur) in variants {
+        let (csub, cst) = client.rdata_configure(types, *start, *cur).await?;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let (ssub, sst) = client.rdata_state().await?;
+        let engaged = sst != idle;
+        println!(
+            "{label:<26} configure(sub={csub},st={cst}) -> state(sub={ssub},st={sst}) {}",
+            if engaged { "<<< STATE CHANGED" } else { "(still idle)" }
+        );
+        // tear down before the next attempt
+        let _ = client.rdata_stop().await;
+        let _ = client.rdata_clear().await;
+    }
+    println!("\nIf every variant stayed idle, RDataStart needs a precondition we");
+    println!("haven't replicated — next step is decompiling the app's start path.");
     Ok(())
 }
 

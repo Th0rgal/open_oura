@@ -64,7 +64,7 @@ fn decode_body(tag: u8, body: &[u8]) -> Option<serde_json::Value> {
     match tag {
         // time_sync: u32 LE unix timestamp (plus trailing timezone bytes).
         0x42 => decode_time_sync(body),
-        // debug_event: ASCII strings (e.g. "git;ca22327", "SNH;4369").
+        // debug_event: ASCII strings (e.g. "git;ca22327", "SNH;XXXX").
         0x43 => decode_ascii(body),
         // debug_data: ASCII when printable, else binary DebugData subtypes
         // (charging/battery/…) dispatched on the first byte (parse_api_debug_data).
@@ -95,6 +95,11 @@ fn decode_body(tag: u8, body: &[u8]) -> Option<serde_json::Value> {
         0x72 => decode_sleep_acm_period(body),
         // spo2_r_pi_event (Ring 5 tag 0x8b): SpO2 R-ratio + perfusion index.
         0x8b => decode_spo2_r_pi(body),
+        // cva_raw_ppg_data (tag 0x81): raw PPG for cardiovascular age, emitted when
+        // cva_ppg (CAP_CVA_PPG_SAMPLER) is on. Body = int8 deltas; cumulative-sum
+        // reconstructs the PPG ADC samples (per-event here; a full measurement
+        // concatenates events <2 s apart — see tools/run_cva_model.py).
+        0x81 => decode_cva_raw_ppg(body),
         // ibi_and_amplitude_event: 14-byte packed 6× (IBI delta ms, amplitude).
         0x60 => decode_ibi_amplitude(body),
         // alert_event: single alert-type byte.
@@ -226,6 +231,26 @@ fn decode_u16_samples(body: &[u8], key: &str) -> Option<serde_json::Value> {
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
         .collect();
     Some(serde_json::json!({ key: v }))
+}
+
+/// `cva_raw_ppg_data` (tag 0x81): raw PPG ADC samples, delta-encoded as signed
+/// int8. Cumulative-sum reconstructs the waveform (per-event, relative to this
+/// event's start). A full CVA measurement concatenates the events of one burst
+/// (<2 s apart, ~1503 samples ≈ 10 s @ ~140 Hz) before the model segments them
+/// into 1500-sample windows — see `tools/run_cva_model.py`.
+fn decode_cva_raw_ppg(body: &[u8]) -> Option<serde_json::Value> {
+    if body.is_empty() {
+        return None;
+    }
+    let mut acc: i32 = 0;
+    let samples: Vec<i32> = body
+        .iter()
+        .map(|&b| {
+            acc += i32::from(b as i8);
+            acc
+        })
+        .collect();
+    Some(serde_json::json!({ "ppg_samples": samples, "n": samples.len() }))
 }
 
 /// `activity_information`: a state byte followed by per-bin MET levels. The native
@@ -999,5 +1024,16 @@ mod tests {
         let v = decode_state_text(&hex::decode("016368672e2073746f70706564").unwrap()).unwrap();
         assert_eq!(v["state"].as_u64().unwrap(), 1);
         assert_eq!(v["text"].as_str().unwrap(), "chg. stopped");
+    }
+
+    #[test]
+    fn decodes_cva_raw_ppg() {
+        // Captured cva_raw_ppg_data body (int8 deltas) → cumulative-sum PPG samples.
+        let v = decode_cva_raw_ppg(&hex::decode("8029c50702fefefefdfafbf7fd03").unwrap()).unwrap();
+        assert_eq!(v["n"].as_u64().unwrap(), 14);
+        let s: Vec<i64> = v["ppg_samples"].as_array().unwrap().iter().map(|x| x.as_i64().unwrap()).collect();
+        // -128, -128+41, -87-59, -146+7, ...
+        assert_eq!(&s[..4], &[-128, -87, -146, -139]);
+        assert_eq!(*s.last().unwrap(), -166);
     }
 }

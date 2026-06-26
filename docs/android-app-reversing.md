@@ -148,7 +148,7 @@ decompiled Android app and the Ringverse Ring 4 notes.
 
 During scanning, another nearby Oura device also appeared:
 
-- Name: `Oura 2H3A2347004369`
+- Name: `Oura XXXXXXXXXXXXXX`
 - It rejected notification/write attempts with CoreBluetooth
   `Encryption is insufficient`.
 

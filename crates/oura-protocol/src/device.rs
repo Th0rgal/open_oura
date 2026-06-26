@@ -106,12 +106,12 @@ mod tests {
 
     #[test]
     fn parses_ring3_firmware() {
-        let frame = hex::decode("091202000003040301000105000ca56c2af838a0").unwrap();
+        let frame = hex::decode("091202000003040301000105000cffeeddccbbaa").unwrap();
         let p = Packet::parse(&frame).unwrap();
         let info = DeviceInfo::parse(&p).unwrap();
         assert_eq!(info.api_version, "2.0.0");
         assert_eq!(info.firmware_version, "3.4.3");
-        assert_eq!(info.mac, "a0:38:f8:2a:6c:a5");
+        assert_eq!(info.mac, "aa:bb:cc:dd:ee:ff");
     }
 
     #[test]
@@ -123,8 +123,8 @@ mod tests {
 
     #[test]
     fn parses_serial() {
-        let p = Packet::parse(&hex::decode("191100324833413233343730303433").unwrap()).unwrap();
-        // status 0x00 then ASCII "2H3A23470043"
-        assert_eq!(parse_product_ascii(&p).as_deref(), Some("2H3A23470043"));
+        let p = Packet::parse(&hex::decode("191100585858585858585858585858").unwrap()).unwrap();
+        // status 0x00 then ASCII "XXXXXXXXXXXX" (real serial scrubbed; see local/device-identifiers.md)
+        assert_eq!(parse_product_ascii(&p).as_deref(), Some("XXXXXXXXXXXX"));
     }
 }

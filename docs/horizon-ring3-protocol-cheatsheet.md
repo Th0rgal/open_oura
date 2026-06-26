@@ -1,7 +1,7 @@
 # Oura Ring 3 Horizon BLE Protocol Cheatsheet
 
 Baseline reference: ringverse `oura/BLE.md` for Oura Ring 4 protocol notes.
-Live target: Oura Ring 3 Horizon, BLE MAC `a0:38:f8:2a:6c:a5`, firmware
+Live target: Oura Ring 3 Horizon, BLE MAC `aa:bb:cc:dd:ee:ff`, firmware
 `3.4.3`, API `2.0.0`, BT stack `5.0.12`.
 
 Captured on 2026-06-21 in Lisbon from macOS/CoreBluetooth. Raw JSONL captures
@@ -17,7 +17,7 @@ are under ignored `captures/`.
   subscription or writes. Before the pairing prompt is approved, CoreBluetooth
   returns `Encryption is insufficient`.
 - macOS peripheral UUID remained stable during this capture, but the advertised
-  name changed from `Oura 2H3A2347004369`/`Oura 2H3A23470043` to
+  name changed from `Oura XXXXXXXXXXXXXX`/`Oura XXXXXXXXXXXX` to
   `Oura Ring Gen3` after app auth key setup.
 
 Packet format matches ringverse:
@@ -58,7 +58,7 @@ All rows below were tested on the Horizon unless noted otherwise.
 
 | Name | Request | Response | Notes |
 | --- | --- | --- | --- |
-| Firmware | `0803000000` | `091202000003040301000105000ca56c2af838a0` | API `2.0.0`, FW `3.4.3`, bootloader `1.0.1`, BT `5.0.12`, MAC `a0:38:f8:2a:6c:a5`. |
+| Firmware | `0803000000` | `091202000003040301000105000cffeeddccbbaa` | API `2.0.0`, FW `3.4.3`, bootloader `1.0.1`, BT `5.0.12`, MAC `aa:bb:cc:dd:ee:ff`. |
 | Battery before app auth | `0c00` | `2f022f01` | Once an auth key is installed, new connections require app auth for battery. |
 | Battery after app auth | `0c00` | `0d06...` | Battery moved from `27%` to `90%` during testing. Payload shape: percent, charging progress, recommended flag, three unknown bytes. |
 | Auth nonce | `2f012b` | `2f102c <15-byte nonce>` | Matches ringverse and Android app. |
@@ -71,8 +71,8 @@ All rows below were tested on the Horizon unless noted otherwise.
 | Product hardware | `1803180010` | `191100424c425f303300000000000000000000` | Hardware ID `BLB_03`. |
 | Product code | `1803280009` | `190a00060000000a00000006` | Gen2X/BLE product fields; app parser reads design/size/color from this. |
 | Product code Frodo offset | `1803340004` | `19050001000199` | Legacy product-code slot still returns bytes. |
-| Serial old offset | `1803040010` | `19110007000000324833413233343730303433` | Prefix bytes then `2H3A23470043`. |
-| Serial | `1803080010` | `19110032483341323334373030343336390000` | Serial `2H3A2347004369`. |
+| Serial old offset | `1803040010` | `19110007000000585858585858585858585858` | Prefix bytes then `XXXXXXXXXXXX`. |
+| Serial | `1803080010` | `19110058585858585858585858585858580000` | Serial `XXXXXXXXXXXXXX`. |
 | Get events unauthenticated | `10090000000008ffffffff` | `2f022f01` | Protocol auth required. |
 | Get events after auth | same | event packets then `110808009e0e00000300` | Returned 8 packets, summary says 8 events and 3742 bytes left. |
 | Sync time | `1209 <u64 timestamp> 00` | `13053d36000000` | Success-shaped response; payload not fully decoded. |
@@ -181,7 +181,7 @@ On-finger realtime/listener follow-up:
 - After `SetAuthKey`, the advertised name changed to generic `Oura Ring Gen3`.
 - Capabilities response reports two pages; both page 0 and page 1 were captured.
 - Product info uses both legacy and newer offsets. The primary hardware ID is
-  `BLB_03`; serial is `2H3A2347004369`.
+  `BLB_03`; serial is `XXXXXXXXXXXXXX` (real serial scrubbed; see `local/device-identifiers.md`).
 - `0x01` and `0x02` still produce no response, matching ringverse.
 - The local runner decodes upstream enum names for auth results, feature
   mode/state/subscription, feature set/latest results, DFU status, firmware
@@ -211,14 +211,14 @@ Authenticated event fetch returned event tags `0x41` and `0x43` before the
 | Tag | Meaning | Horizon payload notes |
 | --- | --- | --- |
 | `0x41` | Ring start | Included firmware/API bytes and boot metadata. |
-| `0x43` | Debug event | ASCII debug strings were observed, including `git;ca22327`, `SNH;4369`, and `SNL;2H3A234700`. |
+| `0x43` | Debug event | ASCII debug strings were observed, including `git;ca22327`, `SNH;XXXX`, and `SNL;XXXXXXXXXX` (serial fragments scrubbed). |
 
 ## Coverage Matrix
 
 | Packet family | Horizon status |
 | --- | --- |
 | `0x01`, `0x02` unknown | Tested after auth; no response. |
-| `0x03` RData | State, page 0, start-none-zero, and stop tested after auth. Clear shape is in the runner but was not run. |
+| `0x03` RData | State, page 0, start-none-zero, and stop tested after auth. Clear shape is in the runner but was not run. **Start is blocked:** Ring 5 returns status `3` (idle) to every `configure` variant tried — with/without `sync_time`, start=now/0, ACM 2g/8g, ±Metadata channel — and never records (see `docs/rdata-capacity-probe.md`). Needs a precondition we haven't replicated. |
 | `0x06` realtime measurements | Off and six enable/guess payloads tested. `01000000` ACKed success but did not stream samples; other guesses returned status `2`. |
 | `0x08` firmware | Tested, success. |
 | `0x0a` self test | Written after auth; no notification observed in 1.5s. |

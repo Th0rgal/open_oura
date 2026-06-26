@@ -11,7 +11,7 @@ characteristics and a larger MTU.
 
 Device details (from the Oura app):
 
-- Model: Oura Ring 5 · Serial `50380B2617647259` · BLE MAC `c9:bc:a2:5d:ac:56`
+- Model: Oura Ring 5 · Serial `YYYYYYYYYYYYYYYY` · BLE MAC `11:22:33:44:55:66`
 
 ## Advertisements
 
@@ -39,9 +39,9 @@ the extra Ring 5 characteristics are handled automatically.
 
 ## First active probes (ring on charger, not worn)
 
-- **Firmware** `0803000000` → `091202010002010301000109032956ac5da2bcc9`:
+- **Firmware** `0803000000` → `0912020100020103010001090329665544332211`:
   API `2.1.0`, firmware `2.1.3`, bootloader `1.0.1`, BT stack `9.3.41`, MAC
-  `c9:bc:a2:5d:ac:56`. Readable **without** app authentication.
+  `11:22:33:44:55:66`. Readable **without** app authentication.
 - **Battery** `0c00` → `2f022f01` (`auth_state=0x01`): auth-gated, as on Ring 3.
 - **Auth nonce** `2f012b` → `2f102c490a55be3b8169e3f24aa279f1e55a`: same nonce
   challenge shape as the Ring 4 notes and the decompiled app

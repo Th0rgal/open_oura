@@ -33,6 +33,21 @@ reverse/android/jadx-main/
 *.csv
 notes/
 
+# Proprietary Oura ML model artifacts — local only, not for publication without
+# permission. (notes/ already covers notes/models/; this also blocks any model
+# artifact placed elsewhere, in any on-device runtime format.)
+*.pt
+*.pth
+*.ptl
+*.pte
+*.onnx
+*.mlmodel
+*.mlpackage
+
+# Local-only working material kept off the repo (research tooling, scratch
+# scripts, working docs). Single home for anything not meant for publication.
+/local/
+
 # Playwright MCP artifacts
 .playwright-mcp/
 

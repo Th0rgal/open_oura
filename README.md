@@ -14,9 +14,15 @@ Straight from the ring, with no Oura account: device info, battery, live heart r
 carries raw PPG/IBI/temperature/motion/SpO2 samples plus the ring's **on-device**
 sleep stages, activity MET levels, and HRV.
 
-What you **cannot** get from the ring: the 0-100 Readiness / Sleep / Activity /
-Stress scores and workout auto-classification. Those are computed in Oura's cloud,
-not on the ring. See [`docs/data-recovery-map.md`](docs/data-recovery-map.md).
+The ring itself does **not** emit the 0-100 Readiness / Sleep / Activity / Stress
+scores. But those are **not** computed in
+Oura's cloud either: they're computed **on the phone** by the native `ecore`
+engine and a set of on-device PyTorch models (the same `.pt` we run here), then
+uploaded; the cloud only stores and syncs them back. So they're reproducible
+offline. The one genuine cloud-only step is **workout auto-classification**
+(`POST /api/activity-tagging/v2`). See
+[`docs/data-recovery-map.md`](docs/data-recovery-map.md) and
+[`docs/algorithms/README.md`](docs/algorithms/README.md).
 
 ## Repository map
 
@@ -67,8 +73,21 @@ State-changing and destructive commands are hidden behind `--include-state` and
   pulls each data channel, and the minimal client sync recipe.
 - [`docs/ring-5-observations.md`](docs/ring-5-observations.md): Ring 5 BLE surface
   and first-contact findings.
-- [`docs/firmware-update.md`](docs/firmware-update.md): the DFU/OTA opcodes and why
-  a custom image cannot be flashed (encrypted, device-resident key).
+- [`docs/ring-features.md`](docs/ring-features.md): the feature capabilities, runtime
+  modes, what's on by default, and which event each enabled feature produces (incl.
+  what `experimental` does — and doesn't).
+- [`docs/model-runners.md`](docs/model-runners.md): running Oura's decrypted on-device
+  models on your synced data — what runs (activity, sleep, CVA, SpO2) vs what's blocked.
+- [`docs/cva-cardiovascular-age.md`](docs/cva-cardiovascular-age.md): decoding the raw
+  PPG (`cva_raw_ppg_data` 0x81) and running the cardiovascular-age model.
+- [`docs/spo2-calibration.md`](docs/spo2-calibration.md): turning the SpO2 R-ratio into
+  a percentage with Oura's own calibration.
+- [`docs/firmware-update.md`](docs/firmware-update.md): the DFU/OTA opcodes, the
+  working cloud download pipeline + codename map, per-device encryption status, and
+  why the firmware key is unreachable (device-resident; not brute-forceable).
+- [`docs/security-observations.md`](docs/security-observations.md): findings-only
+  notes on the model/firmware encryption (the "what", not the "how" — no keys,
+  endpoints, or procedures).
 - [`docs/architecture.md`](docs/architecture.md): the fetch/interpret/apply crate
   layering and where to add things.
 - [`docs/algorithms/README.md`](docs/algorithms/README.md): the on-device ecore

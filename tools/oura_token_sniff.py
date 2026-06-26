@@ -68,3 +68,10 @@ def response(flow: http.HTTPFlow) -> None:
     for sc in flow.response.headers.get_all("Set-Cookie"):
         if TOKEN_KEYS.search(sc):
             _emit("Set-Cookie", sc, host)
+    # Diagnostics: dump error bodies and oauth-token responses so we can see why
+    # a request was rejected and what the final token exchange returns.
+    path = flow.request.path
+    code = flow.response.status_code
+    if code >= 400 or "oauth-token" in path or "/authn/" in path:
+        body = (flow.response.get_text() or "")[:1500]
+        ctx.log.alert(f"[OURA {code}] {flow.request.method} {host}{path.split('?')[0]}\n{body}\n---")
