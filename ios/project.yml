@@ -1,0 +1,33 @@
+name: OpenOura
+options:
+  bundleIdPrefix: com.openoura
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.0"
+    DEVELOPMENT_TEAM: ""           # set to your Apple Developer Team ID (a free Personal Team works)
+    CODE_SIGN_STYLE: Automatic
+
+targets:
+  OpenOura:
+    type: application
+    platform: iOS
+    sources:
+      - path: OpenOura
+    dependencies:
+      - framework: OuraFFI/OuraFFI.xcframework
+        embed: false              # static library — linked, not embedded
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.openoura.app
+        INFOPLIST_FILE: OpenOura/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1"
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        OTHER_LDFLAGS: ["-lc++"]

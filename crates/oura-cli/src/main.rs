@@ -9,12 +9,14 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 
 use oura_link::ble::{self, BleTransport};
+use oura_link::transport::Transport;
 use oura_store::storage::Store;
 use oura_link::OuraClient;
 
 #[cfg(feature = "torch")]
 mod activity_model;
 mod game;
+mod live;
 mod motion_server;
 mod viz;
 
@@ -72,6 +74,13 @@ enum Command {
         #[arg(long)]
         raw: bool,
     },
+    /// Diagnostic: actively probe the on-demand "measure pulse" path. Arms the
+    /// realtime ON_DEMAND bit (and exercise HR) and dumps raw frames so we can see
+    /// what the ring emits during an active measurement. Wear the ring, hold still.
+    Measure {
+        #[arg(long, default_value_t = 20)]
+        seconds: u64,
+    },
     /// Show stored event counts from the database (offline).
     Events,
     /// Re-run decoders over already-stored raw event bodies (offline).
@@ -96,6 +105,16 @@ enum Command {
         #[arg(long, default_value_t = 8088)]
         port: u16,
         /// Minutes the ring streams per "Start" (it auto-stops after this).
+        #[arg(long, default_value_t = 5)]
+        minutes: u16,
+    },
+    /// Real-time health dashboard (web UI): HR, motion, SpO2 and battery streamed
+    /// live while worn. "Start" arms live mode; "Stop" returns the ring to normal.
+    Live {
+        /// Local HTTP port to serve the dashboard on.
+        #[arg(long, default_value_t = 8090)]
+        port: u16,
+        /// Minutes the ring streams per arming (auto re-armed while live).
         #[arg(long, default_value_t = 5)]
         minutes: u16,
     },
@@ -257,12 +276,18 @@ async fn main() -> Result<()> {
         Command::Sync { sync_time } => cmd_sync(&cli, &key, *sync_time).await,
         Command::Latest => cmd_latest(&cli, &key).await,
         Command::LiveHr { seconds, raw } => cmd_live_hr(&cli, &key, *seconds, *raw).await,
+        Command::Measure { seconds } => cmd_measure(&cli, &key, *seconds).await,
         Command::Accel { seconds } => cmd_accel(&cli, &key, *seconds).await,
         Command::SleepAnalyze { force } => cmd_sleep_analyze(&cli, &key, *force).await,
         Command::Viz { port, minutes } => {
             let client = connect(&cli).await?;
             maybe_auth(&client, &key).await?;
             viz::run(client, *port, *minutes).await
+        }
+        Command::Live { port, minutes } => {
+            let client = connect(&cli).await?;
+            maybe_auth(&client, &key).await?;
+            live::run(client, *port, *minutes).await
         }
         Command::Game { port, minutes } => {
             let client = connect(&cli).await?;
@@ -749,22 +774,185 @@ async fn cmd_live_hr(cli: &Cli, key: &Option<[u8; 16]>, seconds: u64, raw: bool)
     let store = Store::open(&cli.db).ok();
 
     println!("Streaming live heart rate for {seconds}s (Ctrl-C to stop early)...");
+
+    // This firmware never pushes an IBI stream. The path that works (and that the
+    // app uses): enable notifications, force daytime HR into CONNECTED_LIVE so the
+    // ring measures via the green LED and *records* `0x80` green_ibi_quality events,
+    // then incrementally drain those events. Each carries hr_bpm + per-beat IBI.
+    use oura_protocol::protocol::{feature, feature_mode, req_set_feature_mode, req_set_notification};
+    let _ = client.transport().write(&req_set_notification(0x3f)).await;
+    let _ = client
+        .transport()
+        .write(&req_set_feature_mode(feature::DAYTIME_HR, feature_mode::CONNECTED_LIVE))
+        .await;
+    // Position the cursor at the newest existing event so we only show fresh beats.
+    let mut cursor = client
+        .drain_events_live(0, Duration::from_millis(2500), |_| {})
+        .await
+        .map(|o| o.next_cursor)
+        .unwrap_or(0);
+
     let mut count = 0u32;
-    client
-        .live_heart_rate(Duration::from_secs(seconds), raw, |s| {
-            count += 1;
-            println!("  {} bpm (IBI {} ms)", s.bpm, s.ibi_ms);
-            if let Some(store) = &store {
-                let _ = store.insert_reading(&serial, "heart_rate_live", s.bpm as f64, "bpm");
-            }
-        })
-        .await?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(seconds);
+    while std::time::Instant::now() < deadline {
+        if let Ok(out) = client
+            .drain_events_live(cursor, Duration::from_millis(1500), |ev| {
+                if ev.tag == 0x80 {
+                    if let Some(d) = &ev.decoded {
+                        if raw {
+                            println!("  0x80: {d}");
+                        }
+                        if let Some(bpm) = d
+                            .get("hr_bpm")
+                            .and_then(|a| a.as_array())
+                            .and_then(|a| a.iter().rev().find_map(|x| x.as_u64()))
+                        {
+                            count += 1;
+                            println!("  {bpm} bpm");
+                            if let Some(store) = &store {
+                                let _ = store.insert_reading(&serial, "heart_rate_live", bpm as f64, "bpm");
+                            }
+                        }
+                    }
+                }
+            })
+            .await
+        {
+            cursor = out.next_cursor;
+        }
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+    }
+    let _ = client
+        .transport()
+        .write(&req_set_feature_mode(feature::DAYTIME_HR, feature_mode::AUTOMATIC))
+        .await;
 
     if count == 0 {
-        println!("No beats captured. Make sure the ring is worn.");
+        println!(
+            "No HR captured. Keep the ring snug + still + within ~2 m of the Mac, and give\n\
+             it 10–20 s to lock a beat (the green-LED measurement is contact-sensitive)."
+        );
     }
     let _ = client.transport().disconnect().await;
     Ok(())
+}
+
+/// Probe the active "measure pulse" path. Tests the strongest hypotheses first
+/// (exercise HR returns a direct bpm), dumping full payloads so we can read the
+/// firmware's actual field layout. Every write is timeout-guarded so a BLE range
+/// drop can't wedge the process. Keep the ring snug + close to the Mac + still.
+async fn cmd_measure(cli: &Cli, key: &Option<[u8; 16]>, seconds: u64) -> Result<()> {
+    use oura_protocol::protocol::{
+        feature, feature_mode, realtime, req_feature_latest, req_realtime_off, req_set_feature_mode,
+        req_set_realtime,
+    };
+    let _ = (realtime::ON_DEMAND, feature::EXERCISE_HR, req_set_realtime, req_realtime_off, req_feature_latest);
+    let client = connect(cli).await?;
+    maybe_auth(&client, key).await?;
+
+    // HR-bearing event tags: if a forced measurement records data, these appear.
+    // 0x80 = green_ibi_quality_event (the Ring 4/5 green-LED HR; decodes to hr_bpm).
+    let is_hr_tag = |t: u8| matches!(t, 0x44 | 0x55 | 0x5d | 0x60 | 0x62 | 0x63 | 0x71 | 0x80);
+
+    println!("Keep the ring snug, close to the Mac, and still.\n");
+
+    // 1) Baseline: what events already exist (so we can spot the fresh ones).
+    println!("── baseline drain (recording existing events) ...");
+    let mut before: std::collections::HashSet<(u8, u32)> = std::collections::HashSet::new();
+    let mut max_before: u32 = 0;
+    client
+        .drain_events(0, |ev| {
+            before.insert((ev.tag, ev.timestamp));
+            max_before = max_before.max(ev.timestamp);
+        })
+        .await?;
+    println!("   baseline: {} events, newest ring_ts={max_before}", before.len());
+
+    // 2) Force a measurement: enable async notifications + daytime HR live mode.
+    println!("\n── enabling notifications + daytime HR CONNECTED_LIVE; measuring {}s ...", seconds * 2);
+    guarded_write(&client, &oura_protocol::protocol::req_set_notification(0x3f)).await;
+    guarded_write(&client, &req_set_feature_mode(feature::DAYTIME_HR, feature_mode::CONNECTED_LIVE)).await;
+    tokio::time::sleep(Duration::from_secs(seconds * 2)).await;
+    guarded_write(&client, &req_set_feature_mode(feature::DAYTIME_HR, feature_mode::AUTOMATIC)).await;
+
+    // 3) Drain again from the previous high-water mark; report only fresh events.
+    println!("\n── post-measurement drain (looking for fresh HR data) ...");
+    let mut fresh: Vec<(u8, u32, Option<serde_json::Value>)> = Vec::new();
+    let mut fresh_other: std::collections::BTreeMap<u8, u32> = std::collections::BTreeMap::new();
+    client
+        .drain_events(max_before.saturating_sub(1), |ev| {
+            if before.contains(&(ev.tag, ev.timestamp)) {
+                return;
+            }
+            if is_hr_tag(ev.tag) {
+                fresh.push((ev.tag, ev.timestamp, ev.decoded.clone()));
+            } else {
+                *fresh_other.entry(ev.tag).or_default() += 1;
+            }
+        })
+        .await?;
+    guarded_write(&client, &oura_protocol::protocol::req_set_notification(0x00)).await;
+
+    println!("\n── RESULT");
+    if fresh.is_empty() {
+        println!("   No fresh HR-bearing events recorded during the measurement window.");
+    } else {
+        println!("   {} fresh HR-bearing events:", fresh.len());
+        for (tag, ts, dec) in fresh.iter().take(20) {
+            let j = dec.as_ref().map(|v| v.to_string()).unwrap_or_else(|| "<undecoded>".into());
+            println!("   {:#04x} {} ts={ts}: {j}", tag, oura_protocol::events::event_name(*tag));
+        }
+    }
+    if !fresh_other.is_empty() {
+        println!("   other fresh events:");
+        for (tag, n) in &fresh_other {
+            println!("     {:#04x} {} ×{n}", tag, oura_protocol::events::event_name(*tag));
+        }
+    }
+    let _ = poll_feature; // (poll path still available; not used in this test)
+    let _ = client.transport().disconnect().await;
+    Ok(())
+}
+
+/// Timeout-guarded write: a wedged BLE link (e.g. out of range) fails fast instead
+/// of hanging the process forever.
+async fn guarded_write(client: &OuraClient<BleTransport>, bytes: &[u8]) {
+    let _ = tokio::time::timeout(Duration::from_secs(2), client.transport().write(bytes)).await;
+}
+
+/// Poll one feature's latest values for `seconds`, dumping the full payload and the
+/// parsed bpm/SpO2 each tick. Increments `got` for every reading that yields a bpm.
+async fn poll_feature(
+    client: &OuraClient<BleTransport>,
+    feature_id: u8,
+    seconds: u64,
+    got: &mut u32,
+) {
+    use oura_protocol::protocol::req_feature_latest;
+    let deadline = std::time::Instant::now() + Duration::from_secs(seconds);
+    while std::time::Instant::now() < deadline {
+        if let Ok(Some(p)) = client
+            .request_until(&req_feature_latest(feature_id), 0x2f, Some(0x25), Duration::from_millis(900))
+            .await
+        {
+            let result = p.payload.get(2).copied().unwrap_or(255);
+            let status = p.payload.get(3).copied().unwrap_or(255);
+            let state = p.payload.get(4).copied().unwrap_or(255);
+            let v = oura_link::client::parse_latest_values(feature_id, p.payload.get(7..).unwrap_or(&[]));
+            println!(
+                "   [{}] result={result} status={status} state={state} bpm={:?} spo2={:?}",
+                hex::encode(&p.payload),
+                v.bpm,
+                v.spo2_percent
+            );
+            if v.bpm.is_some() {
+                *got += 1;
+            }
+        } else {
+            println!("   (no response — link slow or out of range)");
+        }
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+    }
 }
 
 async fn cmd_sleep_analyze(cli: &Cli, key: &Option<[u8; 16]>, force: bool) -> Result<()> {
