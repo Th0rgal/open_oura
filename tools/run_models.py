@@ -16,6 +16,8 @@ from pathlib import Path
 
 import torch
 
+from _common import resolve_db
+
 REPO = Path(__file__).resolve().parent.parent
 MODELS = REPO / "notes" / "models"
 
@@ -166,7 +168,8 @@ def main():
         tz = int(argv[i + 1])
         del argv[i:i + 2]
     model = argv[0] if argv else "bdi"
-    db = next((a for a in argv[1:] if not a.startswith("-")), str(REPO / "oura.db"))
+    db_arg = next((a for a in argv[1:] if not a.startswith("-")), None)
+    db = str(resolve_db(db_arg, REPO))
     if model == "all":
         for k, fn in RUNNERS.items():
             print("=" * 70, k)

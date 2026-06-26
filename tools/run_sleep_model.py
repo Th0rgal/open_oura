@@ -13,20 +13,12 @@ import sys, json, sqlite3, datetime
 from pathlib import Path
 import torch
 
+from _common import resolve_db
+
 REPO = Path(__file__).resolve().parent.parent
 TZ = 1
 MODEL = str(REPO / "notes" / "models" / "sleepnet_moonstone_1_2_0.pt")
 STAGE = {1: "DEEP", 2: "LIGHT", 3: "REM", 4: "WAKE"}
-
-
-def resolve_db(arg):  # default search mirrors run_activity_model.py / run_models.py
-    if arg:
-        return Path(arg)
-    for cand in (Path.cwd() / "oura.db", REPO / "oura.db", REPO / "captures" / "ring5.db"):
-        if cand.exists():
-            return cand
-    return REPO / "oura.db"
-
 
 args = [a for a in sys.argv[1:]]
 start_ds = end_ds = None
@@ -38,9 +30,7 @@ else:
 db_arg = rest[0] if rest else None
 if len(rest) > 1:
     TZ = int(rest[1])
-DB = resolve_db(db_arg)
-if not DB.exists():
-    sys.exit(f"error: database not found: {DB} (run `oura sync` first)")
+DB = resolve_db(db_arg, REPO)
 
 con = sqlite3.connect(str(DB))
 rows = con.execute("SELECT ring_timestamp, tag, decoded_json, captured_unix FROM events "

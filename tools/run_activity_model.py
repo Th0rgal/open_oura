@@ -31,6 +31,8 @@ import warnings
 
 import torch
 
+from _common import resolve_db
+
 # The model triggers a benign non-contiguous torch.searchsorted perf warning.
 warnings.filterwarnings("ignore", message=".*searchsorted.*")
 
@@ -73,20 +75,9 @@ def parse_args():
     return args
 
 
-def resolve_db(arg):
-    if arg:
-        return Path(arg)
-    for cand in (Path.cwd() / "oura.db", REPO / "oura.db", REPO / "captures" / "ring5.db"):
-        if cand.exists():
-            return cand
-    return REPO / "oura.db"
-
-
 def main():
     args = parse_args()
-    db = resolve_db(args.db)
-    if not db.exists():
-        sys.exit(f"error: database not found: {db} (run `oura sync` first)")
+    db = resolve_db(args.db, REPO)
     if not MODEL.exists():
         sys.exit(f"error: model not found: {MODEL}")
 
