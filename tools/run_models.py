@@ -80,7 +80,8 @@ def run_bdi(db, tz):
         for k, ms in enumerate(ibis):
             if ms and ms > 0:
                 amp = amps[k] if k < len(amps) else 0
-                ibi_rows.append([float(ms), float(amp), 1.0])
+                valid = 1.0 if 300 <= ms <= 2000 else 0.0  # quality flag (matches run_sleep_model.py)
+                ibi_rows.append([float(ms), float(amp), valid])
                 acc += ms  # a beat occurs at the END of its interval
                 ibi_t.append((t0 * 1000.0) + acc)  # ms
     print(f"bedtime {bstart:.0f}..{bend:.0f} ({(bend-bstart)/3600:.2f} h), {len(ibi_rows)} IBIs")

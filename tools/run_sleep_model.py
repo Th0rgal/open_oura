@@ -94,6 +94,8 @@ with torch.no_grad():
 
 stages = [int(s) for s in staging[:, 0].tolist()]
 n = len(stages)
+if n == 0:
+    sys.exit("SleepNet-moonstone returned zero epochs for this window")
 mins = {k: stages.count(c) * 0.5 for c, k in STAGE.items()}
 asleep = n * 0.5 - mins["WAKE"]
 print(f"\nHypnogram: {n} epochs = {n*0.5:.0f} min in bed")
