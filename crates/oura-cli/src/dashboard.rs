@@ -322,11 +322,21 @@ pub fn build_summary(db: &Path, tz: i64) -> Result<Value> {
         }
     }
 
+    // device identity (serial / firmware / mac …) + the true last-sync time
+    let dev = store.device_info().ok().flatten();
+    let last_sync = dev.as_ref().map(|d| d.6).filter(|&t| t > 0);
+    let synced_unix = last_sync.map(|t| t as f64).unwrap_or(anchor_unix as f64);
+
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as f64).unwrap_or(anchor_unix as f64);
     let device = json!({
-        "synced": date_label(anchor_unix as f64, tz),
-        "synced_hm": hm(anchor_unix as f64, tz),
-        "fresh_hours": ((now - anchor_unix as f64) / 3600.0 * 10.0).round() / 10.0,
+        "serial": dev.as_ref().map(|d| d.0.clone()),
+        "hardware_id": dev.as_ref().map(|d| d.1.clone()).filter(|s| !s.is_empty()),
+        "firmware": dev.as_ref().map(|d| d.2.clone()).filter(|s| !s.is_empty()),
+        "api_version": dev.as_ref().map(|d| d.3.clone()).filter(|s| !s.is_empty()),
+        "mac": dev.as_ref().map(|d| d.4.clone()).filter(|s| !s.is_empty()),
+        "synced": date_label(synced_unix, tz),
+        "synced_hm": hm(synced_unix, tz),
+        "fresh_hours": ((now - synced_unix) / 3600.0 * 10.0).round() / 10.0,
         "days_of_data": ((max_ds - min_ds) as f64 / 10.0 / 86400.0 * 10.0).round() / 10.0,
         "total_events": events.len(),
         "nights": nights.len(),

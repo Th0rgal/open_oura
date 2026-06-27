@@ -199,6 +199,16 @@ function renderDevice(d) {
   stats.append(stat("Events", (dev.total_events || 0).toLocaleString()));
   box.append(stats);
 
+  // identity (serial / firmware / mac) — read offline from the device table
+  const idItem = (k, v) => (v ? `<span><i>${k}</i>${v}</span>` : "");
+  const idHtml =
+    idItem("Ring ID", dev.serial) +
+    idItem("Firmware", dev.firmware) +
+    idItem("API", dev.api_version) +
+    idItem("Hardware", dev.hardware_id) +
+    idItem("MAC", dev.mac);
+  if (idHtml) box.append(el("div", "dh-ident", idHtml));
+
   const left = el("div");
   left.append(el("p", "subhead", "What your ring is measuring"));
   const chips = el("div", "chips");
@@ -269,6 +279,28 @@ async function saveProfile(e) {
 }
 
 // ── sync ────────────────────────────────────────────────────
+function toast(msg, kind = "info") {
+  let t = $("toast");
+  if (!t) { t = el("div", "toast"); t.id = "toast"; document.body.append(t); }
+  t.className = "toast " + kind;
+  t.textContent = msg;
+  requestAnimationFrame(() => t.classList.add("show"));
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => t.classList.remove("show"), kind === "error" ? 8000 : 3800);
+}
+
+// turn a backend sync error into something actionable
+function syncHint(msg) {
+  msg = msg || "";
+  if (/no matching|not found|no device|no ring/i.test(msg))
+    return "Couldn't find your ring. Take it off the charger, keep it nearby, and try again.";
+  if (/key|auth|unauthor/i.test(msg))
+    return "The ring needs its auth key. Start the dashboard with --key-file.";
+  if (/timed out|timeout/i.test(msg))
+    return "Bluetooth timed out. Make sure the ring is awake and close, then retry.";
+  return "Sync failed: " + msg;
+}
+
 async function doSync() {
   const btn = $("sync-btn");
   if (btn.classList.contains("syncing")) return;
@@ -276,22 +308,21 @@ async function doSync() {
   $("sync-label").textContent = "Syncing";
   btn.title = "Connecting to the ring over Bluetooth…";
   try {
-    const r = await fetch("/api/sync", { method: "POST", headers: { "X-Oura-Dash": "1" } });
-    const j = await r.json();
+    const j = await (await fetch("/api/sync", { method: "POST", headers: { "X-Oura-Dash": "1" } })).json();
     if (j.ok) {
       $("sync-label").textContent = "Synced";
-      btn.title = j.message || "Synced";
+      toast(j.message && !/^synced$/i.test(j.message) ? j.message : "Ring synced.", "ok");
       await load();
     } else {
       $("sync-label").textContent = "Failed";
-      btn.title = j.message || "Sync failed";
+      toast(syncHint(j.message), "error");
     }
   } catch (e) {
     $("sync-label").textContent = "Failed";
-    btn.title = "Sync failed";
+    toast("Couldn't reach the local dashboard server.", "error");
   }
   btn.classList.remove("syncing");
-  setTimeout(() => { $("sync-label").textContent = "Sync"; }, 3000);
+  setTimeout(() => { $("sync-label").textContent = "Sync"; btn.title = "Sync the ring over Bluetooth"; }, 3000);
 }
 
 // ── load ────────────────────────────────────────────────────
