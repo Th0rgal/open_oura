@@ -14,8 +14,19 @@ oura dashboard --tz-offset 1 --age 30 --sex M --height 1.78 --weight 75
 # → open http://127.0.0.1:8090
 ```
 
-`--age/--sex/--height/--weight` feed only the cardiovascular-age model; every other
-metric is signal-derived. Default port `8090`; loopback-only.
+Default port `8090`; loopback-only.
+
+## In the dashboard
+
+- **Sync button** (header): drains the ring over Bluetooth without leaving the page
+  (runs `oura sync` for you, then refreshes). Pass `--name`/`--key-file` so it can
+  reach your ring, e.g. `--name "Oura Ring 5" --key-file captures/ring5.key`.
+- **Battery**: read offline from the ring's stored `battery_level_changed` debug
+  events; shown in the header and the Device panel.
+- **Your details** (the person icon): edit age / sex / height / weight / ring size.
+  The ring can't measure these, so they live in an editable, gitignored
+  `profile.json` next to `oura.db` and feed the cardiovascular-age model (the runners
+  read it too). `--age/--sex/--height/--weight` only seed it on first run.
 
 ## How it's built
 
@@ -46,3 +57,6 @@ dashboard/
 
 Models are Oura's proprietary IP and are **not** committed; the runners reference
 your own locally-decrypted copies under `notes/models/`.
+
+Icons are from [Phosphor](https://phosphoricons.com) (MIT), vendored under
+`dashboard/web/icons/` so the dashboard stays fully offline.

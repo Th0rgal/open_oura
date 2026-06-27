@@ -9,45 +9,49 @@ const el = (tag, cls, html) => {
   return n;
 };
 const num = (v, d = "—") => (v == null || Number.isNaN(v) ? d : v);
+const icon = (name, cls = "") => `<span class="ic ${cls}" style="--i:url(/icons/${name}.svg)"></span>`;
 
-function sparkline(series, { good = "up" } = {}) {
+let CURRENT_PROFILE = null;
+
+// monochrome, thin, with a faint area fill — subtle and elegant
+function sparkline(series) {
   const s = (series || []).filter((x) => x != null);
   if (s.length < 2) return "";
   const w = 100, h = 26, min = Math.min(...s), max = Math.max(...s);
   const rng = max - min || 1;
-  const pts = s.map((v, i) => {
-    const x = (i / (s.length - 1)) * w;
-    const y = h - ((v - min) / rng) * (h - 4) - 2;
-    return [x, y];
-  });
+  const pts = s.map((v, i) => [(i / (s.length - 1)) * w, h - ((v - min) / rng) * (h - 5) - 3]);
   const d = pts.map((p, i) => (i ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join(" ");
-  const up = s[s.length - 1] >= s[0];
-  const ok = good === "up" ? up : !up;
-  const col = ok ? "var(--good)" : "var(--warn)";
+  const area = `M0 ${h} L${d.slice(1)} L${w} ${h} Z`;
   const last = pts[pts.length - 1];
   return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
-    <path d="${d}" fill="none" stroke="${col}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>
-    <circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="2.4" fill="${col}"/>
+    <path d="${area}" fill="var(--spark-fill)" stroke="none"/>
+    <path d="${d}" fill="none" stroke="var(--spark)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>
+    <circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="1.9" fill="var(--spark)"/>
   </svg>`;
 }
 
 function deltaTag(pct, { good = "up" } = {}) {
   if (pct == null) return el("span", "delta flat", "");
-  const up = pct > 0, flat = pct === 0;
-  const cls = flat ? "flat" : (good === "up" ? up : !up) ? "up" : "down";
-  const sign = pct > 0 ? "+" : "";
-  return el("span", "delta " + cls, `${sign}${pct}% vs baseline`);
+  const flat = pct === 0;
+  const cls = flat ? "flat" : (good === "up" ? pct > 0 : pct < 0) ? "up" : "down";
+  return el("span", "delta " + cls, `${pct > 0 ? "+" : ""}${pct}% vs baseline`);
 }
 
 function tile(label, value, unit, deltaPct, series, opts = {}) {
   const t = el("article", "tile");
   t.append(el("div", "label", label));
-  const v = el("div", "value", `${num(value)}<span class="unit">${unit || ""}</span>`);
-  t.append(v);
+  t.append(el("div", "value", `${num(value)}<span class="unit">${unit || ""}</span>`));
   if (deltaPct !== undefined) t.append(deltaTag(deltaPct, opts));
-  if (series) t.append(el("div", "spark", sparkline(series, opts)));
+  if (series) t.append(el("div", "spark", sparkline(series)));
   return t;
 }
+
+const relAge = (diff) => {
+  const a = Math.abs(Math.round(diff * 10) / 10);
+  if (diff < -0.05) return { short: `${a} yr younger`, long: `${a} ${a === 1 ? "year" : "years"} younger than` };
+  if (diff > 0.05) return { short: `${a} yr older`, long: `${a} ${a === 1 ? "year" : "years"} older than` };
+  return { short: "in line", long: "in line with" };
+};
 
 function renderTiles(d) {
   const box = $("tiles");
@@ -58,15 +62,14 @@ function renderTiles(d) {
   const effSeries = [...(d.nights || [])].reverse().map((n) => n.efficiency).filter((x) => x != null);
   box.append(tile("HRV (rmssd)", hv.latest, " ms", hv.delta_pct, hv.series, { good: "up" }));
   box.append(tile("Resting HR", rh.latest, " bpm", rh.delta_pct, rh.series, { good: "down" }));
-  box.append(tile("Sleep efficiency", n0.efficiency, "%", undefined, effSeries, { good: "up" }));
+  box.append(tile("Sleep efficiency", n0.efficiency, "%", undefined, effSeries));
   const cv = d.cardio;
   if (cv && cv.vascular_age != null) {
     const t = tile("Vascular age", cv.vascular_age, " yr");
-    const diff = Math.round((cv.vascular_age - cv.chronological_age) * 10) / 10;
-    t.append(el("div", "sub", `${diff <= 0 ? diff : "+" + diff} yr vs your age`));
+    t.append(el("div", "sub", relAge(cv.vascular_age - cv.chronological_age).short));
     box.append(t);
   } else {
-    box.append(tile("Vascular age", "—", "", undefined, null));
+    box.append(tile("Vascular age", "—", ""));
   }
 }
 
@@ -95,14 +98,11 @@ function renderNights(d) {
     if (n.stages && n.stages.length) right.append(hypnogram(n.stages));
     else right.append(el("div", "hyp"));
 
-    // row 1: sleep composition
     const comp = el("div", "breakdown");
-    const seg = (lbl, v) => `<span>${lbl} <b>${num(v)}%</b></span>`;
-    comp.innerHTML =
-      seg("Deep", n.deep_pct) + seg("Light", n.light_pct) + seg("REM", n.rem_pct) + seg("Awake", n.wake_pct);
+    const seg = (l, v) => `<span>${l} <b>${num(v)}%</b></span>`;
+    comp.innerHTML = seg("Deep", n.deep_pct) + seg("Light", n.light_pct) + seg("REM", n.rem_pct) + seg("Awake", n.wake_pct);
     right.append(comp);
 
-    // row 2: recovery vitals
     const vit = el("div", "breakdown vitals-row");
     const bits = [`Efficiency <b>${num(n.efficiency)}%</b>`];
     if (n.hrv_ms != null) bits.push(`HRV <b>${n.hrv_ms}</b> ms`);
@@ -125,8 +125,7 @@ function renderCardio(d) {
     return;
   }
   box.append(el("div", "big-metric", `<span class="n">${cv.vascular_age}</span><span class="u">years vascular age</span>`));
-  const diff = Math.round((cv.vascular_age - cv.chronological_age) * 10) / 10;
-  box.append(el("div", "sub", `${diff <= 0 ? Math.abs(diff) + " years younger than" : diff + " years above"} your chronological age (${cv.chronological_age})`));
+  box.append(el("div", "sub", `${relAge(cv.vascular_age - cv.chronological_age).long} your age (${cv.chronological_age})`));
   const kvs = el("div", "kvs");
   kvs.append(el("div", "kv", `<div class="k">Pulse-wave velocity</div><div class="v">${cv.pwv_ms} m/s</div>`));
   kvs.append(el("div", "kv", `<div class="k">Segments analysed</div><div class="v">${cv.segments}</div>`));
@@ -142,7 +141,7 @@ function renderSpo2(d) {
     return;
   }
   box.append(el("div", "big-metric", `<span class="n">${n0.spo2_mean}</span><span class="u">% avg, last night</span>`));
-  box.append(el("div", "sub", `Calibrated from the ring's R-ratio (Oura's own curve).`));
+  box.append(el("div", "sub", "Calibrated from the ring's R-ratio (Oura's own curve)."));
   const pct = Math.max(0, Math.min(100, ((n0.spo2_mean - 85) / 15) * 100));
   const g = el("div", "gauge");
   const fill = el("i");
@@ -193,17 +192,18 @@ function renderDevice(d) {
 
   const stats = el("div", "dh-stats");
   const stat = (k, v, u) => el("div", "dh-stat", `<div class="k">${k}</div><div class="v">${v}<span class="u">${u || ""}</span></div>`);
+  stats.append(stat("Battery", dev.battery_pct != null ? dev.battery_pct : "—", "%"));
   const fresh = dev.fresh_hours != null ? (dev.fresh_hours < 1 ? "<1" : Math.round(dev.fresh_hours)) : "—";
   stats.append(stat("Last sync", fresh, " h ago"));
   stats.append(stat("History", num(dev.days_of_data), " days"));
-  stats.append(stat("Events stored", (dev.total_events || 0).toLocaleString()));
+  stats.append(stat("Events", (dev.total_events || 0).toLocaleString()));
   box.append(stats);
 
   const left = el("div");
   left.append(el("p", "subhead", "What your ring is measuring"));
   const chips = el("div", "chips");
   (dev.measuring || []).forEach((m) => {
-    const c = el("span", "measure", `<span class="dot"></span>${m.name}`);
+    const c = el("span", "measure", `${m.on ? icon("heartbeat") : ""}${m.name}`);
     c.setAttribute("data-on", String(!!m.on));
     chips.append(c);
   });
@@ -215,31 +215,90 @@ function renderDevice(d) {
   const ins = el("div", "insights");
   (dev.insights || []).forEach((i) => {
     const row = el("div", "insight");
-    const l = el("div", null, `${i.name}${i.status === "gated" && i.why ? `<span class="why"> · ${i.why}</span>` : ""}`);
-    row.append(l);
-    row.append(el("span", "status " + i.status, i.status));
+    row.append(el("div", null, `${i.name}${i.status === "gated" && i.why ? `<span class="why"> · ${i.why}</span>` : ""}`));
+    const st = el("span", "status " + i.status);
+    st.innerHTML = `<i></i>${i.status}`;
+    row.append(st);
     ins.append(row);
   });
   right.append(ins);
   box.append(right);
 }
 
-function renderSync(d) {
+function renderActions(d) {
   const dev = d.device || {};
-  const fresh = dev.fresh_hours;
-  const dot = document.querySelector("#sync-chip .dot");
-  let state = "idle";
-  if (fresh != null) state = fresh < 18 ? "fresh" : "stale";
-  dot.setAttribute("data-state", state);
-  $("sync-text").textContent = dev.synced ? `synced ${dev.synced} ${dev.synced_hm}` : "no data";
+  const b = $("batt");
+  if (dev.battery_pct != null) {
+    b.innerHTML = icon("battery-high") + `<span>${dev.battery_pct}%</span>`;
+    b.classList.toggle("low", dev.battery_pct < 20);
+    b.hidden = false;
+    b.title = `Ring battery ${dev.battery_pct}%${dev.battery_v ? " · " + dev.battery_v + " V" : ""}`;
+  } else {
+    b.hidden = true;
+  }
   $("foot-meta").textContent = `${dev.nights || 0} nights · ${(dev.total_events || 0).toLocaleString()} events`;
 }
 
+// ── profile dialog ──────────────────────────────────────────
+function openProfile() {
+  const p = CURRENT_PROFILE || {};
+  $("f-sex").value = p.sex || "M";
+  $("f-age").value = p.age ?? 30;
+  $("f-height").value = p.height_m ?? 1.78;
+  $("f-weight").value = p.weight_kg ?? 75;
+  $("f-ring").value = p.ring_size ?? 10;
+  $("profile-dialog").showModal();
+}
+async function saveProfile(e) {
+  e.preventDefault();
+  const body = {
+    sex: $("f-sex").value,
+    age: +$("f-age").value,
+    height_m: +$("f-height").value,
+    weight_kg: +$("f-weight").value,
+    ring_size: +$("f-ring").value,
+  };
+  $("profile-save").disabled = true;
+  try {
+    await fetch("/api/profile", { method: "POST", headers: { "X-Oura-Dash": "1", "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    $("profile-dialog").close();
+    await load(); // re-runs CVA with the new demographics
+  } finally {
+    $("profile-save").disabled = false;
+  }
+}
+
+// ── sync ────────────────────────────────────────────────────
+async function doSync() {
+  const btn = $("sync-btn");
+  if (btn.classList.contains("syncing")) return;
+  btn.classList.add("syncing");
+  $("sync-label").textContent = "Syncing";
+  btn.title = "Connecting to the ring over Bluetooth…";
+  try {
+    const r = await fetch("/api/sync", { method: "POST", headers: { "X-Oura-Dash": "1" } });
+    const j = await r.json();
+    if (j.ok) {
+      $("sync-label").textContent = "Synced";
+      btn.title = j.message || "Synced";
+      await load();
+    } else {
+      $("sync-label").textContent = "Failed";
+      btn.title = j.message || "Sync failed";
+    }
+  } catch (e) {
+    $("sync-label").textContent = "Failed";
+    btn.title = "Sync failed";
+  }
+  btn.classList.remove("syncing");
+  setTimeout(() => { $("sync-label").textContent = "Sync"; }, 3000);
+}
+
+// ── load ────────────────────────────────────────────────────
 async function load() {
   let d;
   try {
-    const res = await fetch("/api/summary");
-    d = await res.json();
+    d = await (await fetch("/api/summary")).json();
   } catch (e) {
     $("digest").classList.remove("skeleton", "skeleton-text");
     $("digest").textContent = "Could not reach the local server.";
@@ -250,25 +309,25 @@ async function load() {
     $("digest").textContent = d.error;
     return;
   }
+  CURRENT_PROFILE = d.profile || null;
   $("digest").classList.remove("skeleton", "skeleton-text");
   $("digest").classList.add("reveal");
-  // emphasize the numeric tokens (digest comes from our own Rust, so safe)
-  $("digest").innerHTML = (d.digest || "").replace(
-    /([+-]?\d[\d.]*\s?(?:%|bpm|ms|m\/s))/g,
-    '<span class="metric">$1</span>'
-  );
-  renderSync(d);
+  $("digest").innerHTML = (d.digest || "").replace(/([+-]?\d[\d.]*\s?(?:%|bpm|ms|m\/s))/g, '<span class="metric">$1</span>');
+  renderActions(d);
   renderTiles(d);
   renderNights(d);
   renderCardio(d);
   renderSpo2(d);
   renderActivity(d);
   renderDevice(d);
-  // gentle stagger on panels
   document.querySelectorAll(".panel").forEach((p, i) => {
     p.classList.add("reveal");
     p.style.setProperty("--d", i * 60 + "ms");
   });
 }
 
+$("sync-btn").addEventListener("click", doSync);
+$("profile-btn").addEventListener("click", openProfile);
+$("profile-form").addEventListener("submit", saveProfile);
+$("profile-cancel").addEventListener("click", () => $("profile-dialog").close());
 load();

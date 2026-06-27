@@ -66,21 +66,40 @@ def build_segments(db, since_ds):
     return segs, len(runs)
 
 
+def load_profile(db):
+    # profile.json (editable, gitignored) sits next to the DB; CLI args override it.
+    import json
+    try:
+        return json.loads((Path(db).parent / "profile.json").read_text())
+    except Exception:
+        return {}
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("db", nargs="?", default=None)
-    p.add_argument("--sex", default="M", choices=["M", "F", "O"])
-    p.add_argument("--age", type=float, default=30.0)
-    p.add_argument("--height", type=float, default=1.78, help="meters")
-    p.add_argument("--weight", type=float, default=75.0, help="kg")
-    p.add_argument("--ring", type=float, default=10.0, help="ring size")
+    # default None → fall back to profile.json, then to a built-in default
+    p.add_argument("--sex", default=None, choices=["M", "F", "O"])
+    p.add_argument("--age", type=float, default=None)
+    p.add_argument("--height", type=float, default=None, help="meters")
+    p.add_argument("--weight", type=float, default=None, help="kg")
+    p.add_argument("--ring", type=float, default=None, help="ring size")
     p.add_argument("--since-cursor", type=int, default=0, help="only events with ring_timestamp > this")
     p.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     args = p.parse_args()
     if not MODEL.exists():
         sys.exit(f"model not found: {MODEL}")
 
-    segs, n_runs = build_segments(resolve_db(args.db, REPO), args.since_cursor)
+    db = resolve_db(args.db, REPO)
+    prof = load_profile(db)
+    pick = lambda cli, key, dflt: cli if cli is not None else prof.get(key, dflt)
+    args.sex = pick(args.sex, "sex", "M")
+    args.age = float(pick(args.age, "age", 30.0))
+    args.height = float(pick(args.height, "height_m", 1.78))
+    args.weight = float(pick(args.weight, "weight_kg", 75.0))
+    args.ring = float(pick(args.ring, "ring_size", 10.0))
+
+    segs, n_runs = build_segments(db, args.since_cursor)
     if not segs:
         sys.exit(f"no full {SEG_LEN}-sample PPG segment available ({n_runs} measurement runs, all too short)")
     ppg = torch.tensor(np.stack(segs), dtype=torch.float32)

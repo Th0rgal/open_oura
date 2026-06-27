@@ -56,3 +56,6 @@ tools/oura_tokens.txt
 
 # Local screenshot artifacts (Playwright, dashboard previews)
 /*.png
+
+# Personal profile (age/weight/etc) — not from the ring, local only
+profile.json

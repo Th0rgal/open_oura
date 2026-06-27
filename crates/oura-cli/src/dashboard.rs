@@ -23,13 +23,55 @@ const STYLES_CSS: &str = include_str!("../../../dashboard/web/styles.css");
 const APP_JS: &str = include_str!("../../../dashboard/web/app.js");
 
 /// User anthropometrics — only the CVA model needs them; everything else is
-/// signal-derived. Passed from the CLI.
+/// signal-derived. Stored in an editable, gitignored `profile.json` next to the DB
+/// (the ring can't report these), used by the CVA model and the runners.
 #[derive(Clone, Copy)]
 pub struct Demographics {
     pub sex: char, // 'M' | 'F' | 'O'
     pub age: f64,
     pub height_m: f64,
     pub weight_kg: f64,
+    pub ring_size: f64,
+}
+
+impl Demographics {
+    fn to_json(self) -> Value {
+        json!({ "sex": self.sex.to_string(), "age": self.age, "height_m": self.height_m,
+                "weight_kg": self.weight_kg, "ring_size": self.ring_size })
+    }
+    fn from_json(v: &Value) -> Self {
+        let d = Demographics::default();
+        Demographics {
+            sex: v["sex"].as_str().and_then(|s| s.chars().next()).unwrap_or(d.sex).to_ascii_uppercase(),
+            age: v["age"].as_f64().unwrap_or(d.age),
+            height_m: v["height_m"].as_f64().unwrap_or(d.height_m),
+            weight_kg: v["weight_kg"].as_f64().unwrap_or(d.weight_kg),
+            ring_size: v["ring_size"].as_f64().unwrap_or(d.ring_size),
+        }
+    }
+}
+impl Default for Demographics {
+    fn default() -> Self {
+        Demographics { sex: 'M', age: 30.0, height_m: 1.78, weight_kg: 75.0, ring_size: 10.0 }
+    }
+}
+
+fn profile_path(db: &Path) -> PathBuf {
+    db.parent().unwrap_or(Path::new(".")).join("profile.json")
+}
+/// Read the user profile (defaults if absent or malformed).
+fn read_profile(db: &Path) -> Demographics {
+    std::fs::read_to_string(profile_path(db))
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .map(|v| Demographics::from_json(&v))
+        .unwrap_or_default()
+}
+fn write_profile(db: &Path, v: &Value) -> Result<Demographics> {
+    let demo = Demographics::from_json(v);
+    std::fs::write(profile_path(db), serde_json::to_vec_pretty(&demo.to_json())?)
+        .context("writing profile.json")?;
+    Ok(demo)
 }
 
 // ── small date helpers (no chrono dep) ────────────────────────────────────────
@@ -104,7 +146,8 @@ fn mean(v: &[f64]) -> Option<f64> {
 }
 
 /// Assemble the full dashboard summary as a JSON value.
-pub fn build_summary(db: &Path, tz: i64, demo: Demographics) -> Result<Value> {
+pub fn build_summary(db: &Path, tz: i64) -> Result<Value> {
+    let demo = read_profile(db);
     let store = Store::open(db).context("opening DB")?;
     let events = store.decoded_events().context("reading events")?;
     if events.is_empty() {
@@ -217,6 +260,7 @@ pub fn build_summary(db: &Path, tz: i64, demo: Demographics) -> Result<Value> {
             "--age".into(), demo.age.to_string(),
             "--height".into(), demo.height_m.to_string(),
             "--weight".into(), demo.weight_kg.to_string(),
+            "--ring".into(), demo.ring_size.to_string(),
         ],
     );
 
@@ -265,6 +309,19 @@ pub fn build_summary(db: &Path, tz: i64, demo: Demographics) -> Result<Value> {
         insight("Steps", false, "RData entitlement (firmware-locked)"),
         insight("Stress / resilience", false, "needs cloud scores"),
     ]);
+    // latest battery reading (offline, from debug_data 'battery_level_changed').
+    // events are sorted by ds ascending, so the last match is the most recent.
+    let mut battery: Option<(i64, i64)> = None;
+    for (_ds, tag, jstr, _) in &events {
+        if name_of(*tag) == "debug_data" && jstr.contains("battery_pct") {
+            if let Ok(v) = serde_json::from_str::<Value>(jstr) {
+                if let Some(p) = v["battery_pct"].as_i64() {
+                    battery = Some((p, v["voltage_mv"].as_i64().unwrap_or(0)));
+                }
+            }
+        }
+    }
+
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as f64).unwrap_or(anchor_unix as f64);
     let device = json!({
         "synced": date_label(anchor_unix as f64, tz),
@@ -273,6 +330,8 @@ pub fn build_summary(db: &Path, tz: i64, demo: Demographics) -> Result<Value> {
         "days_of_data": ((max_ds - min_ds) as f64 / 10.0 / 86400.0 * 10.0).round() / 10.0,
         "total_events": events.len(),
         "nights": nights.len(),
+        "battery_pct": battery.map(|b| b.0),
+        "battery_v": battery.map(|b| (b.1 as f64 / 1000.0 * 100.0).round() / 100.0),
         "measuring": measuring,
         "insights": insights,
     });
@@ -285,6 +344,7 @@ pub fn build_summary(db: &Path, tz: i64, demo: Demographics) -> Result<Value> {
         "tz": tz,
         "digest": digest,
         "device": device,
+        "profile": demo.to_json(),
         "nights": nights_json,
         "cardio": cva,
         "activity": activity,
@@ -343,14 +403,26 @@ fn make_digest(hrv: &[f64], rhr: &[f64], nights: &[Night], cva: &Option<Value>) 
 }
 
 // ── HTTP server ───────────────────────────────────────────────────────────────
-pub async fn serve(port: u16, db: PathBuf, tz: i64, demo: Demographics) -> Result<()> {
+pub async fn serve(
+    port: u16,
+    db: PathBuf,
+    tz: i64,
+    name: String,
+    key_file: Option<PathBuf>,
+    seed: Demographics,
+) -> Result<()> {
+    // seed profile.json from the CLI demographics on first run; afterwards the
+    // file is the editable source of truth.
+    if !profile_path(&db).exists() {
+        let _ = write_profile(&db, &seed.to_json());
+    }
     let listener = TcpListener::bind(("127.0.0.1", port)).await.context("binding port")?;
     println!("open_oura dashboard → http://127.0.0.1:{port}");
     loop {
         let (sock, _) = listener.accept().await?;
-        let db = db.clone();
+        let (db, name, key_file) = (db.clone(), name.clone(), key_file.clone());
         tokio::spawn(async move {
-            let _ = handle(sock, port, db, tz, demo).await;
+            let _ = handle(sock, port, db, tz, name, key_file).await;
         });
     }
 }
@@ -384,37 +456,99 @@ async fn write_resp(sock: &mut TcpStream, status: &str, ctype: &str, body: &[u8]
     Ok(())
 }
 
-async fn handle(mut sock: TcpStream, port: u16, db: PathBuf, tz: i64, demo: Demographics) -> Result<()> {
-    let mut buf = [0u8; 2048];
+async fn json_resp(sock: &mut TcpStream, v: &Value) -> Result<()> {
+    write_resp(sock, "200 OK", "application/json", serde_json::to_vec(v)?.as_slice()).await
+}
+
+async fn handle(
+    mut sock: TcpStream,
+    port: u16,
+    db: PathBuf,
+    tz: i64,
+    name: String,
+    key_file: Option<PathBuf>,
+) -> Result<()> {
+    let mut buf = [0u8; 8192];
     let n = sock.read(&mut buf).await?;
     let req = String::from_utf8_lossy(&buf[..n]);
+    let method = req.split_whitespace().next().unwrap_or("GET");
     let path = req.split_whitespace().nth(1).unwrap_or("/");
+    let body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
 
-    // Loopback-only: reject anything not addressed to localhost (DNS-rebind guard).
+    // Loopback-only (DNS-rebind guard).
     let host_ok = header(&req, "host")
         .is_some_and(|h| h == format!("127.0.0.1:{port}") || h == format!("localhost:{port}"));
     if !host_ok {
         return write_resp(&mut sock, "403 Forbidden", "text/plain", b"forbidden").await;
     }
-
-    match path {
-        "/" | "/index.html" => write_resp(&mut sock, "200 OK", "text/html; charset=utf-8", &asset("index.html", INDEX_HTML)).await,
-        "/styles.css" => write_resp(&mut sock, "200 OK", "text/css; charset=utf-8", &asset("styles.css", STYLES_CSS)).await,
-        "/app.js" => write_resp(&mut sock, "200 OK", "text/javascript; charset=utf-8", &asset("app.js", APP_JS)).await,
-        "/api/summary" => {
-            // building the summary shells out to torch models → run off the async
-            // executor so we don't stall other connections.
-            let body = tokio::task::spawn_blocking(move || build_summary(&db, tz, demo))
-                .await
-                .map_err(|e| anyhow!(e))?;
-            match body {
-                Ok(v) => write_resp(&mut sock, "200 OK", "application/json", serde_json::to_vec(&v)?.as_slice()).await,
-                Err(e) => {
-                    let err = json!({ "error": e.to_string() });
-                    write_resp(&mut sock, "200 OK", "application/json", serde_json::to_vec(&err)?.as_slice()).await
-                }
+    // vendored SVG icons (Phosphor), served from disk
+    if path.starts_with("/icons/") && path.ends_with(".svg") && !path.contains("..") {
+        if let Some(root) = repo_root() {
+            if let Ok(bytes) = std::fs::read(root.join("dashboard/web").join(path.trim_start_matches('/'))) {
+                return write_resp(&mut sock, "200 OK", "image/svg+xml", &bytes).await;
             }
         }
+        return write_resp(&mut sock, "404 Not Found", "text/plain", b"not found").await;
+    }
+
+    // CSRF guard for mutating/action endpoints: a same-origin fetch can set this
+    // header; an <img>/<form> or cross-origin fetch cannot (CORS preflight we never approve).
+    let csrf_ok = header(&req, "x-oura-dash").is_some();
+    let forbid = matches!((method, path), ("POST", "/api/profile") | ("POST", "/api/sync")) && !csrf_ok;
+    if forbid {
+        return write_resp(&mut sock, "403 Forbidden", "text/plain", b"forbidden").await;
+    }
+
+    match (method, path) {
+        (_, "/") | (_, "/index.html") => write_resp(&mut sock, "200 OK", "text/html; charset=utf-8", &asset("index.html", INDEX_HTML)).await,
+        (_, "/styles.css") => write_resp(&mut sock, "200 OK", "text/css; charset=utf-8", &asset("styles.css", STYLES_CSS)).await,
+        (_, "/app.js") => write_resp(&mut sock, "200 OK", "text/javascript; charset=utf-8", &asset("app.js", APP_JS)).await,
+        ("GET", "/api/summary") => {
+            // building the summary shells out to torch models → off the async executor.
+            let body = tokio::task::spawn_blocking(move || build_summary(&db, tz)).await.map_err(|e| anyhow!(e))?;
+            match body {
+                Ok(v) => json_resp(&mut sock, &v).await,
+                Err(e) => json_resp(&mut sock, &json!({ "error": e.to_string() })).await,
+            }
+        }
+        ("GET", "/api/profile") => json_resp(&mut sock, &read_profile(&db).to_json()).await,
+        ("POST", "/api/profile") => match serde_json::from_str::<Value>(body.trim_end_matches('\0')) {
+            Ok(v) => match write_profile(&db, &v) {
+                Ok(d) => json_resp(&mut sock, &d.to_json()).await,
+                Err(e) => json_resp(&mut sock, &json!({ "error": e.to_string() })).await,
+            },
+            Err(e) => json_resp(&mut sock, &json!({ "error": e.to_string() })).await,
+        },
+        ("POST", "/api/sync") => {
+            let res = tokio::task::spawn_blocking(move || run_sync(&db, &name, key_file.as_deref()))
+                .await
+                .map_err(|e| anyhow!(e))?;
+            let v = match res {
+                Ok(msg) => json!({ "ok": true, "message": msg }),
+                Err(e) => json!({ "ok": false, "message": e.to_string() }),
+            };
+            json_resp(&mut sock, &v).await
+        }
         _ => write_resp(&mut sock, "404 Not Found", "text/plain", b"not found").await,
+    }
+}
+
+/// Drain the ring by invoking our own binary's `sync` subcommand (reuses all the
+/// BLE + cursor logic). Returns the last stdout line on success.
+fn run_sync(db: &Path, name: &str, key_file: Option<&Path>) -> Result<String> {
+    let exe = std::env::current_exe().context("locating oura binary")?;
+    let mut c = Command::new(exe);
+    c.arg("--db").arg(db).arg("--name").arg(name);
+    if let Some(k) = key_file {
+        c.arg("--key-file").arg(k);
+    }
+    c.arg("sync");
+    let out = c.output().context("running `oura sync`")?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if out.status.success() {
+        Ok(stdout.lines().last().unwrap_or("synced").trim().to_string())
+    } else {
+        Err(anyhow!("{}", stderr.lines().last().unwrap_or("sync failed").trim()))
     }
 }

@@ -15,9 +15,15 @@
         <span class="mark" aria-hidden="true"></span>
         <span class="word">open_oura</span>
       </div>
-      <div id="sync-chip" class="chip" title="Last sync">
-        <span class="dot" data-state="idle"></span>
-        <span id="sync-text">syncing</span>
+      <div class="actions">
+        <span id="batt" class="batt" title="Ring battery"></span>
+        <button id="sync-btn" class="action" title="Sync the ring over Bluetooth">
+          <span class="ic" style="--i:url(/icons/arrows-clockwise.svg)"></span>
+          <span id="sync-label">Sync</span>
+        </button>
+        <button id="profile-btn" class="action icon-only" title="Edit your details" aria-label="Edit profile">
+          <span class="ic" style="--i:url(/icons/user.svg)"></span>
+        </button>
       </div>
     </header>
 
@@ -32,7 +38,7 @@
 
     <section class="panel" id="sleep-panel">
       <div class="panel-head">
-        <h2>Sleep &amp; recovery</h2>
+        <h2><span class="ic" style="--i:url(/icons/moon.svg)"></span>Sleep &amp; recovery</h2>
         <div class="legend" id="sleep-legend" hidden>
           <span><i class="sw deep"></i>Deep</span>
           <span><i class="sw light"></i>Light</span>
@@ -49,23 +55,23 @@
 
     <div class="cols-2">
       <section class="panel" id="cardio-panel">
-        <div class="panel-head"><h2>Cardiovascular</h2></div>
+        <div class="panel-head"><h2><span class="ic" style="--i:url(/icons/heartbeat.svg)"></span>Cardiovascular</h2></div>
         <div id="cardio" class="cardio-body"><div class="skeleton skeleton-block"></div></div>
       </section>
 
       <section class="panel" id="spo2-panel">
-        <div class="panel-head"><h2>Blood oxygen</h2></div>
+        <div class="panel-head"><h2><span class="ic" style="--i:url(/icons/wind.svg)"></span>Blood oxygen</h2></div>
         <div id="spo2" class="spo2-body"><div class="skeleton skeleton-block"></div></div>
       </section>
     </div>
 
     <section class="panel" id="activity-panel">
-      <div class="panel-head"><h2>Activity</h2></div>
+      <div class="panel-head"><h2><span class="ic" style="--i:url(/icons/person-simple-run.svg)"></span>Activity</h2></div>
       <div id="activity" class="activity"><div class="skeleton skeleton-block"></div></div>
     </section>
 
     <section class="panel" id="device-panel">
-      <div class="panel-head"><h2>Device &amp; data health</h2></div>
+      <div class="panel-head"><h2><span class="ic" style="--i:url(/icons/cpu.svg)"></span>Device &amp; data health</h2></div>
       <div id="device" class="device"><div class="skeleton skeleton-block"></div></div>
     </section>
 
@@ -74,6 +80,34 @@
       <span id="foot-meta"></span>
     </footer>
   </div>
+
+  <!-- profile editor -->
+  <dialog id="profile-dialog" class="dialog">
+    <form id="profile-form" method="dialog">
+      <h3>Your details</h3>
+      <p class="dialog-sub">The ring can't measure these. They tune the cardiovascular-age model and stay on this machine.</p>
+      <div class="field">
+        <label for="f-sex">Sex at birth</label>
+        <select id="f-sex" name="sex">
+          <option value="M">Male</option>
+          <option value="F">Female</option>
+          <option value="O">Other</option>
+        </select>
+      </div>
+      <div class="field-row">
+        <div class="field"><label for="f-age">Age</label><input id="f-age" name="age" type="number" min="0" max="120" step="1" /></div>
+        <div class="field"><label for="f-ring">Ring size</label><input id="f-ring" name="ring_size" type="number" min="4" max="16" step="1" /></div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label for="f-height">Height (m)</label><input id="f-height" name="height_m" type="number" min="1" max="2.3" step="0.01" /></div>
+        <div class="field"><label for="f-weight">Weight (kg)</label><input id="f-weight" name="weight_kg" type="number" min="20" max="250" step="1" /></div>
+      </div>
+      <div class="dialog-actions">
+        <button type="button" id="profile-cancel" class="btn-text">Cancel</button>
+        <button type="submit" id="profile-save" class="btn-primary">Save</button>
+      </div>
+    </form>
+  </dialog>
 
   <script src="/app.js"></script>
 </body>

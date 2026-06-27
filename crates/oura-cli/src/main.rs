@@ -312,13 +312,14 @@ async fn main() -> Result<()> {
         Command::FeatureMode { feature, mode } => cmd_feature_mode(&cli, &key, feature, mode).await,
         Command::FeatureStatus => cmd_feature_status(&cli, &key).await,
         Command::Dashboard { port, tz_offset, sex, age, height, weight } => {
-            let demo = dashboard::Demographics {
+            let seed = dashboard::Demographics {
                 sex: sex.chars().next().unwrap_or('M').to_ascii_uppercase(),
                 age: *age,
                 height_m: *height,
                 weight_kg: *weight,
+                ring_size: 10.0,
             };
-            dashboard::serve(*port, cli.db.clone(), *tz_offset, demo).await
+            dashboard::serve(*port, cli.db.clone(), *tz_offset, cli.name.clone(), cli.key_file.clone(), seed).await
         }
     }
 }
