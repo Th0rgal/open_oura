@@ -205,12 +205,27 @@ fn generate_key() -> Result<[u8; 16]> {
 
 /// Persist a key as hex with owner-only permissions.
 fn save_key(path: &Path, key: &[u8; 16]) -> Result<()> {
-    std::fs::write(path, format!("{}\n", hex::encode(key)))
-        .with_context(|| format!("writing key file {}", path.display()))?;
+    let contents = format!("{}\n", hex::encode(key));
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        // Create with 0600 from the start so the key is never briefly world-readable.
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("writing key file {}", path.display()))?;
+        f.write_all(contents.as_bytes())?;
+        // mode() above only applies on create; tighten an already-existing file too.
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, contents)
+            .with_context(|| format!("writing key file {}", path.display()))?;
     }
     Ok(())
 }

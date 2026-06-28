@@ -41,8 +41,24 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from urllib.parse import urlparse
 
 API_BASE = "https://api.ouraring.com"
+API_HOST = "api.ouraring.com"
+
+
+def _is_api_url(url: str) -> bool:
+    """True only for https://api.ouraring.com (exact host) -- not lookalikes."""
+    p = urlparse(url)
+    return p.scheme == "https" and p.hostname == API_HOST
+
+
+def _safe_filename(manifest: dict) -> str:
+    """Basename-only output filename so a hostile manifest can't escape out_dir."""
+    fname = os.path.basename(manifest.get("filename") or "")
+    if fname in ("", ".", ".."):
+        fname = f"{manifest.get('type','fw')}_{manifest.get('version','0')}.bin"
+    return fname
 # A plausible app UA; the real one comes from EndpointKt.getUserAgent(appConfig).
 USER_AGENT = "okhttp/4.12.0"
 
@@ -85,14 +101,13 @@ def download_image(manifest: dict, out_dir: str, token: str | None) -> str:
     url = manifest["url"]
     # The manifest URL is usually a presigned CDN link (no auth). Send the
     # bearer only if it's back on api.ouraring.com.
-    use_token = token if url.startswith(API_BASE) else None
+    use_token = token if _is_api_url(url) else None
     status, _, data = _req(url, token=use_token, accept="application/octet-stream")
     if status != 200:
         raise SystemExit(f"download {url} -> HTTP {status}")
 
     os.makedirs(out_dir, exist_ok=True)
-    fname = manifest.get("filename") or f"{manifest.get('type','fw')}_{manifest.get('version','0')}.bin"
-    path = os.path.join(out_dir, fname)
+    path = os.path.join(out_dir, _safe_filename(manifest))
 
     # Integrity checks against the manifest.
     problems = []
