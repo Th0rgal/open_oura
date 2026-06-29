@@ -80,3 +80,12 @@ CSV rather than porting the unreadable `.rodata`; the decompiled structure
 (contributor set, the piecewise shape, the weighted-sum-/100 combination) guides
 the model. Bit-exact reproduction would need a cleaner build's `.rodata` or
 device-side calibration data.
+
+**Done (combiner weights recovered):** `tools/fit_scores.py` regresses each final
+score on its contributor sub-scores from a 336-day trends export — Sleep at
+R²=0.9987 (weights 35/15/10/10/10/10/10, essentially exact), Readiness R²=0.969,
+Activity R²=0.904. `tools/fit_sleep_score.py` then adds the contributor curves
+(sub-score = f(raw metric)) to reconstruct the **Sleep Score end-to-end from raw
+metrics at R²=0.964** (84% within ±1 pt; 5/7 contributors near-exact, residual in
+Restfulness + Timing). See [`score-weights.md`](score-weights.md). Still pending:
+Readiness/Activity end-to-end (baseline-relative contributors + rest-mode cap).

@@ -137,6 +137,21 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Compute a Sleep Score for the latest night, live from ring data: Oura's
+    /// SleepNet hypnogram → durations/efficiency/latency, bedtime regularity, then
+    /// the contributor curves + combiner weights calibrated from a trends export.
+    /// Runs via tools/score_sleep.py (needs the Python venv with torch).
+    SleepScore {
+        /// Timezone offset (hours from UTC) for the bedtime clock.
+        #[arg(long, default_value_t = 0)]
+        tz_offset: i64,
+        /// Trends CSV for calibration (default: auto-find ~/Desktop/oura_*trends.csv).
+        #[arg(long)]
+        csv: Option<PathBuf>,
+        /// Emit machine-readable JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
     /// Subscribe a feature capability (real_steps | atlas | ambient | raw_data |
     /// research_data) via SetFeatureSubscription, to make the ring emit its events.
     Subscribe {
@@ -307,6 +322,9 @@ async fn main() -> Result<()> {
         } => cmd_features(&cli, &key, *enable_hr, *enable_spo2).await,
         Command::Sessions { tz_offset, threshold, json } => {
             cmd_sessions(&cli, *tz_offset, *threshold, *json)
+        }
+        Command::SleepScore { tz_offset, csv, json } => {
+            cmd_sleep_score(&cli, *tz_offset, csv.clone(), *json)
         }
         Command::Subscribe { feature, mode } => cmd_subscribe(&cli, &key, feature, mode).await,
         Command::FeatureMode { feature, mode } => cmd_feature_mode(&cli, &key, feature, mode).await,
@@ -517,6 +535,58 @@ fn cmd_sessions(cli: &Cli, tz_offset: i64, threshold: f64, json: bool) -> Result
         }
         Ok(())
     }
+}
+
+/// Sleep Score for the latest night, computed live from ring data via
+/// tools/score_sleep.py (SleepNet hypnogram + calibrated contributor curves +
+/// combiner weights). Always shells out to Python, which already owns the torch
+/// model path; there is no native LibTorch backend for the scorer.
+fn cmd_sleep_score(cli: &Cli, tz_offset: i64, csv: Option<PathBuf>, json: bool) -> Result<()> {
+    let marker = Path::new("tools/score_sleep.py");
+    let find_root = |start: &Path| -> Option<PathBuf> {
+        start.ancestors().find(|d| d.join(marker).is_file()).map(Path::to_path_buf)
+    };
+    let root = std::env::current_dir()
+        .ok()
+        .and_then(|d| find_root(&d))
+        .or_else(|| find_root(Path::new(env!("CARGO_MANIFEST_DIR"))))
+        .ok_or_else(|| {
+            anyhow!("could not locate tools/score_sleep.py — run from inside the open_oura checkout")
+        })?;
+
+    let db = cli
+        .db
+        .canonicalize()
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(&cli.db));
+    if !db.exists() {
+        return Err(anyhow!("database not found: {} (run `oura sync` first)", db.display()));
+    }
+
+    use std::process::Command as Proc;
+    let venv_py = root.join(".venv/bin/python");
+    let python = if venv_py.is_file() { venv_py } else { PathBuf::from("python3") };
+    let mut cmd = Proc::new(&python);
+    cmd.current_dir(&root)
+        .arg(root.join("tools/score_sleep.py"))
+        .arg(&db)
+        .arg("--tz")
+        .arg(tz_offset.to_string());
+    if let Some(c) = csv {
+        cmd.arg("--csv").arg(c);
+    }
+    if json {
+        cmd.arg("--json");
+    }
+    let status = cmd.status().with_context(|| {
+        format!(
+            "running the sleep scorer via {} (is the Python venv with torch set up?)",
+            python.display()
+        )
+    })?;
+    if !status.success() {
+        return Err(anyhow!("sleep scorer exited with {status}"));
+    }
+    Ok(())
 }
 
 async fn cmd_features(

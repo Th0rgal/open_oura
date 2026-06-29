@@ -10,15 +10,21 @@ Ring 3 Horizon and a Ring 5.
 Oura is a **ring -> app -> cloud** pipeline:
 
 - **Ring**: sensors + on-device summarization (including sleep staging and MET).
-- **App**: transport + renderer. Almost no analytics; it uploads ring events and
-  downloads finished daily documents.
+- **App**: the real analytics tier. The native `ecore` engine (`libappecore.so`)
+  computes the 0-100 Sleep/Readiness/Activity scores + contributors, and the
+  encrypted PyTorch models (`*.pt.enc`) compute staging, stress, CVA, etc. — all
+  **on the phone**. The app writes the results to its local Realm DB and uploads
+  them.
 - **Cloud** (`api.ouraring.com`, `cloud.ouraring.com`, `assa.ouraring.com`,
-  `mlops.ouraring.com`): all 0-100 scores and ML classification.
+  `mlops.ouraring.com`): storage/sync + model delivery. It round-trips the
+  app's locally-produced documents and serves the model asset packs. The one
+  genuine cloud-ML step is workout auto-classification (`activity-tagging/v2`).
 
-The decisive tell: every daily document the app stores carries an
-`*_algorithm_version` field (e.g. `JsonDbDailyReadiness.sleep_algorithm_version`),
-proving the value was produced by a versioned server-side algorithm and synced
-down as immutable JSON.
+The `*_algorithm_version` field on every daily document (e.g.
+`JsonDbDailyReadiness.sleep_algorithm_version`) names the **local** algorithm
+that produced it (`v1/v2/nssa/sleepnet`) — not a server version. We originally
+misread this field as proof of cloud computation; see the corrected attribution
+below and [`algorithms/README.md`](algorithms/README.md).
 
 ## What the ring emits over BLE
 
@@ -78,37 +84,46 @@ sensor data; `RDataRequestDataType` enumerates: PPG 50/125/250 Hz, ACM 2/4/8 G a
 temperature 10 Hz / 10 s / 1 min. Gated behind the `r_data_autosync` pref
 (default false) -- a normal user never triggers it.
 
-## What only the cloud produces
+## Where each derived metric is computed (corrected)
 
-| Metric | Where | Evidence |
+Everything below is computed **on the phone**, not in the cloud. The "Producer"
+column names the on-device engine; the cloud only stores and round-trips the
+result.
+
+| Metric | Producer (on-device) | Evidence |
 | --- | --- | --- |
-| Readiness score (0-100) + contributors | Cloud | `JsonDbDailyReadiness` DTO, `sleep_algorithm_version` |
-| Sleep score | Cloud | `JsonDbDailySleep` (`score`, `sleep_debt`) |
-| Activity score, calories, MET-minutes | Cloud | `JsonDbDailyActivity` (`score`, `active_calories`, `met` vs `ring_met`) |
-| Daytime / cumulative stress | Cloud | `JsonDbDailyStress`, `DbDailyCumulativeStress` |
-| Workout auto-detection ("confirm activity") | Cloud ML | `POST /api/activity-tagging/v2` -> `activity_id` + `confidence` |
+| Sleep score + contributors | `ecore` (`ecore_sleep_score_calculate @ 0x1f5c20`) | `JsonDbDailySleep` (`score`, `sleep_debt`, `sleep_algorithm_version`) |
+| Readiness score + contributors | `ecore` (`readiness_calculate @ 0x20897c`) | `JsonDbDailyReadiness` (`score`, `contributors`, `sleep_algorithm_version`) |
+| Activity score, calories, MET-minutes | `ecore` (`get_activity_score_raw @ 0x1d5788`) | `JsonDbDailyActivity` (`score`, `active_calories`, `met` vs `ring_met`) |
+| Sleep hypnogram (staging) | SleepNet PyTorch (`sleepnet_*`, `sleepstaging_*`, BDI) | `*.pt.enc` asset packs; ring also stages in firmware |
+| Daytime / cumulative stress | PyTorch (`stress_daytime_sensing_1_1_0`, `cumulative_stress_1_2_2`) | `*.pt.enc`, not `isCloudOnly`; `TimeseriesDbDaytimeStress` |
+| Resilience level | PyTorch (`stress_resilience_2_2_1`) | `*.pt.enc`; `DbDailyLongTermResilience` |
+| Cardiovascular age / PWV | PyTorch (`cva_2_1_0`, `cva_calibrator`) | `*.pt.enc`; see [`cva-cardiovascular-age.md`](cva-cardiovascular-age.md) |
+| **Workout auto-detection** ("confirm activity") | **Cloud ML** (the one real exception) | `POST /api/activity-tagging/v2` -> `activity_id` + `confidence` |
 
-The ring supplies raw MET + accelerometer segments; the cloud classifies and
-scores. Calories are cloud-derived from ring MET + the user profile.
+So the only genuinely cloud-originated value is **workout auto-classification**.
+Note "on-device" still has practical gates for an *independent* client (below).
 
 ## Bottom line for an independent client
 
 Recoverable from the ring without Oura's cloud: raw PPG/accel/gyro/temp, live HR
 (IBI->BPM), SpO2, IBI/HRV, on-device sleep stages, MET levels + steps, battery,
-device info. NOT recoverable: the 0-100 scores and workout classification --
-those are Oura-cloud-only and would have to be reimplemented locally.
+device info. The 0-100 scores and stress/resilience/CVA are **not cloud-only** —
+they are produced by `ecore` + the decrypted PyTorch models, which we have. What
+still blocks a bit-exact reproduction is **inputs and constants**, not network:
 
-## Correction: scores/sleep are computed on-device, not in the cloud
-
-Later reverse-engineering of the on-phone `ecore` native engine (`libappecore.so`)
-revised the picture above: the Sleep / Readiness / Activity **scores**, sleep
-durations/efficiency, temperature baseline, HRV, breathing rate, simple SpO2, and
-cycle prediction are all computed **on the phone** by ecore, written to the local
-database, and *then uploaded* - the cloud stores and round-trips them, it does not
-originate them. The `*_algorithm_version` stamps (`v1/v2/nssa/sleepnet`) identify
-*local* algorithms. See [`algorithms/README.md`](algorithms/README.md).
-
-The genuine exceptions still requiring more than ecore: the **sleep hypnogram**
-(the on-device SleepNet PyTorch model / ring staging), **SpO2 OVI/BDI** scoring,
-and **workout auto-classification** (the one true cloud ML call,
-`POST /api/activity-tagging/v2`).
+- **Score constants**: ecore's `.rodata` weight/limit tables don't read back
+  cleanly from this APK build, so scores are reproduced by *calibration* against
+  an account trends export rather than ported bit-for-bit (Sleep R²=0.999). See
+  [`algorithms/README.md`](algorithms/README.md).
+- **Stress inputs**: `stress_daytime_sensing` needs **awake, sedentary daytime
+  HRV** (validator rejects in-bedtime samples with code 6 "Sleep detected", and
+  `ring_met > 1.8` with code 3). Our captures are mostly nocturnal; enable the
+  `daytime_hr` feature to collect awake HRV. `tools/run_stress_model.py` runs the
+  model on whatever awake samples exist.
+- **Resilience inputs**: `stress_resilience` additionally needs a ~14-day history
+  (`daily_stress_list` / `daily_restorative_time_list` / `daily_sleep_recovery_list`)
+  plus the daily scores (`sleep_score`/`hrv_balance`/`recovery_index`) — so it
+  needs weeks of accumulated local data, not a single night.
+- **SpO2 OVI/BDI** scoring is delegated/NaN-stubbed; the hypnogram needs the
+  SleepNet model (which we have) or the ring's own staging.

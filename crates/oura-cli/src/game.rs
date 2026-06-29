@@ -122,6 +122,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
  <div class="row"><span>sensitivity</span><input id="sens" type="range" min="40" max="260" value="120"></div>
  <div class="row"><span>dead-zone</span><input id="dz" type="range" min="0" max="100" value="25"></div>
  <div class="row"><span>smoothing</span><input id="alpha" type="range" min="1" max="40" value="10"></div>
+ <div class="row"><span>invert horizontal ↔</span><input id="flipx" type="checkbox" checked></div>
  <div class="row"><span>invert vertical ↕</span><input id="flipy" type="checkbox" checked></div>
  <div class="mini"><button id="recal">Recalibrate</button></div>
  <div class="lbl" style="margin-top:8px">tilt = steer · arrows = test</div>
@@ -155,8 +156,14 @@ const set={
  get alpha(){return $('alpha').value/100;},
  get sens(){return +$('sens').value/100;},
  get dz(){return +$('dz').value/10;},
+ get flipx(){return $('flipx').checked;},
  get flipy(){return $('flipy').checked;},
 };
+// invert flags persist across game restarts so a once-correct mapping stays correct
+$('flipx').checked=(localStorage.ringRunnerFlipX??(set.flipx?'1':''))==='1';
+$('flipy').checked=(localStorage.ringRunnerFlipY??(set.flipy?'1':''))==='1';
+$('flipx').onchange=()=>localStorage.ringRunnerFlipX=set.flipx?'1':'';
+$('flipy').onchange=()=>localStorage.ringRunnerFlipY=set.flipy?'1':'';
 
 // ---- vec helpers ---------------------------------------------------------
 const add=(a,b)=>[a[0]+b[0],a[1]+b[1],a[2]+b[2]];
@@ -346,7 +353,13 @@ function beginCalibration(){state='calibrating';calibG=[0,0,0];calibN=0;calibSta
  showCenter('HOLD STILL','','keep your hand in a neutral, comfortable steering pose');}
 function startGame(){
  u0=norm(calibN?calibG:(G||[0,1,0]));
- const seed=Math.abs(dot([1,0,0],u0))<0.9?[1,0,0]:[0,0,1];
+ // In-plane seed = the body axis LEAST aligned with gravity (|dot| <= 0.58, so the
+ // projection is always well-conditioned). The old code seeded from body-x and only
+ // switched near |dot|>=0.9 — exactly where a finger-worn ring's neutral pose tends to
+ // sit, so tiny pose differences between calibrations flipped the whole basis (and thus
+ // inverted the controls). Picking the least-aligned axis keeps the basis stable.
+ const a0=Math.abs(u0[0]),a1=Math.abs(u0[1]),a2=Math.abs(u0[2]);
+ const seed=(a0<=a1&&a0<=a2)?[1,0,0]:(a1<=a2)?[0,1,0]:[0,0,1];
  bR=norm(sub(seed,sc(u0,dot(seed,u0))));
  bF=cross(u0,bR);
  ship={x:0,y:0};rocks=[];ex=[];score=0;spawnAcc=0;sx=sy=psx=psy=0;paused=false;tStart=performance.now();state='playing';
@@ -381,7 +394,7 @@ function tilt(){if(!u0||!G)return [0,0];const u=norm(G);
 function stickTarget(){
  if(keys.ArrowLeft||keys.ArrowRight||keys.ArrowUp||keys.ArrowDown)
   return [(keys.ArrowRight?1:0)-(keys.ArrowLeft?1:0),(keys.ArrowDown?1:0)-(keys.ArrowUp?1:0)];
- const [h,v]=tilt();return [axis(h),(set.flipy?1:-1)*axis(v)];}
+ const [h,v]=tilt();return [(set.flipx?-1:1)*axis(h),(set.flipy?-1:1)*axis(v)];}
 
 // ---- update --------------------------------------------------------------
 function update(dt,now){

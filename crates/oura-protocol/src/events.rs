@@ -559,10 +559,13 @@ fn decode_sleep_summary_4(body: &[u8]) -> Option<serde_json::Value> {
     }))
 }
 
-/// `real_steps_features_1/2` (tags `0x7e`/`0x7f`): a 14-byte bit-packed feature
-/// record (the firmware packs 9-bit counts as `byte*2 + carry_bit`). The parser
-/// combines parts 1 and 2 statefully; here we surface part-1's unpacked fields so
-/// the step-count field can be identified once real data is captured.
+/// `real_steps_features_1/2` (tags `0x7e`/`0x7f`): 14-byte bit-packed gait-feature
+/// halves. The byte layout below is confirmed against the native parser
+/// (`EventParser::parse_api_real_steps_features_1` in libringeventparser.so). A full
+/// gait window needs BOTH events combined into 27 quantized columns (feature_2's last
+/// byte supplies the 9th/carry bits of the `<<1` fields), then run through
+/// `steps_motion_decoder`. That pairing + decode lives in `tools/run_activity_model.py`
+/// (`unpack27`); here we just surface part-1's raw fields.
 fn decode_real_steps(body: &[u8]) -> Option<serde_json::Value> {
     if body.len() != 14 {
         return None;
@@ -584,7 +587,7 @@ fn decode_real_steps(body: &[u8]) -> Option<serde_json::Value> {
         p[12] as u16,
         p[13] as u16,
     ];
-    Some(serde_json::json!({ "fields": fields, "_status": "unvalidated" }))
+    Some(serde_json::json!({ "fields": fields, "_status": "part1_raw" }))
 }
 
 /// `aohr_event` (tag `0x86`): always-on HR. Header flag, a base offset, then a
