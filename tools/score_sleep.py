@@ -89,7 +89,7 @@ def clock_midpoint(start_local, end_local):
     return mid + 24 if mid < 12 else mid
 
 
-def timing_features(db, start_ds, mid_hour):
+def timing_features(db, start_ds, end_ds, mid_hour):
     """mid_hour/mid_opt from the real clock; 7-day regularity from bedtime_period
     deciseconds (a day-to-day delta, so the unknown ds→clock phase offset cancels)."""
     import sqlite3
@@ -108,7 +108,9 @@ def timing_features(db, start_ds, mid_hour):
         elif abs(s - start_ds) < 1:
             cur_mid_ds = m
     if cur_mid_ds is None:
-        cur_mid_ds = (start_ds + bts[-1][1]) / 2.0
+        # fall back to the scored night's own midpoint — independent of whether any
+        # bedtime_period rows exist (with --start/--end, `bts` can be empty).
+        cur_mid_ds = (start_ds + end_ds) / 2.0
     prev_h = [(p % 864000) / 36000.0 for p in prev_mid_ds[-7:]]   # deltas only
     cur_h = (cur_mid_ds % 864000) / 36000.0
     reg = abs(cur_h - np.mean(prev_h)) if prev_h else 0.0
@@ -137,7 +139,7 @@ def metrics_from_night(db, start_ds, end_ds, tz=1):
         "Sleep Latency": onset * 30.0,
         "awake_frac": o["wake_min"] / o["in_bed_min"] if o["in_bed_min"] else 0.0,
     }
-    m.update(timing_features(db, start_ds, clock_midpoint(o["start_local"], o["end_local"])))
+    m.update(timing_features(db, start_ds, end_ds, clock_midpoint(o["start_local"], o["end_local"])))
     return m, o
 
 
