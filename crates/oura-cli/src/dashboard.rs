@@ -75,6 +75,16 @@ fn write_profile(db: &Path, v: &Value) -> Result<Demographics> {
     Ok(demo)
 }
 
+/// Real on-ring feature modes snapshotted at the last sync (`feature_modes.json` next
+/// to the DB), as `{ feature_name: mode_int }`. `Value::Null` if not captured yet.
+fn read_feature_modes(db: &Path) -> Value {
+    db.parent()
+        .map(|p| p.join("feature_modes.json"))
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .unwrap_or(Value::Null)
+}
+
 // ── small date helpers (no chrono dep) ────────────────────────────────────────
 /// Howard Hinnant's civil_from_days: days since 1970-01-01 → (year, month, day).
 fn civil(days: i64) -> (i64, u32, u32) {
@@ -436,12 +446,18 @@ pub fn build_summary(db: &Path, tz: i64) -> Result<Value> {
 
     // device & data-health
     let has = |evname: &str| present_recent.contains(evname);
+    // Prefer the real on-ring feature mode (captured into feature_modes.json on the
+    // last sync); fall back to "events seen recently" when we don't have a mode yet.
+    let modes = read_feature_modes(db);
+    let cap_on = |feature: &str, present: bool| -> bool {
+        modes.get(feature).and_then(Value::as_i64).map(|m| m != 0).unwrap_or(present)
+    };
     let measuring = json!([
-        feat("Daytime HR", has("ibi_and_amplitude_event") || has("green_ibi_quality_event"), "daytime_hr"),
-        feat("SpO2", has("spo2_r_pi_event"), "spo2"),
-        feat("Exercise HR", has("ehr_trace_event"), "exercise_hr"),
-        feat("Real steps", has("real_step_event_feature_1") || has("real_step_event_feature_2"), "real_steps"),
-        feat("Cardio PPG (CVA)", has("cva_raw_ppg_data"), "cva_ppg"),
+        feat("Daytime HR", cap_on("daytime_hr", has("ibi_and_amplitude_event") || has("green_ibi_quality_event")), "daytime_hr"),
+        feat("SpO2", cap_on("spo2", has("spo2_r_pi_event")), "spo2"),
+        feat("Exercise HR", cap_on("exercise_hr", has("ehr_trace_event")), "exercise_hr"),
+        feat("Real steps", cap_on("real_steps", has("real_step_event_feature_1") || has("real_step_event_feature_2")), "real_steps"),
+        feat("Cardio PPG (CVA)", cap_on("cva_ppg", has("cva_raw_ppg_data")), "cva_ppg"),
     ]);
 
     // data streams: how much of each biometric the ring is actually recording
@@ -642,12 +658,19 @@ fn cached_summary(db: &Path, tz: i64) -> Result<Arc<Value>> {
     }
     // build outside the lock so concurrent first-loads don't serialise on it
     let value = Arc::new(build_summary(db, tz)?);
-    *summary_cache().lock().unwrap() = Some(SummaryCache {
-        db: db.to_path_buf(),
-        tz,
-        token,
-        value: value.clone(),
-    });
+    // re-stat the inputs: if oura.db / profile.json changed while we were building
+    // (e.g. a sync landed), the result may predate that change — don't cache it, so
+    // the next request rebuilds against the new state instead of serving stale data.
+    let token_after = (mtime(db), mtime(&profile_path(db)));
+    if token_after == token {
+        let mut guard = summary_cache().lock().unwrap();
+        // don't clobber a fresher entry a concurrent build already stored (compare
+        // the DB mtime, which a sync advances)
+        let newer_exists = guard.as_ref().is_some_and(|c| c.db == db && c.tz == tz && c.token.0 > token.0);
+        if !newer_exists {
+            *guard = Some(SummaryCache { db: db.to_path_buf(), tz, token, value: value.clone() });
+        }
+    }
     Ok(value)
 }
 
@@ -665,7 +688,7 @@ pub async fn serve(
         let _ = write_profile(&db, &seed.to_json());
     }
     let listener = TcpListener::bind(("127.0.0.1", port)).await.context("binding port")?;
-    println!("open_oura dashboard → http://127.0.0.1:{port}");
+    println!("open_oura dashboard running — open http://127.0.0.1:{port} in your browser");
     loop {
         let (sock, _) = listener.accept().await?;
         let (db, name, key_file) = (db.clone(), name.clone(), key_file.clone());
