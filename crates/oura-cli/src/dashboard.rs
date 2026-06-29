@@ -189,6 +189,27 @@ fn mean(v: &[f64]) -> Option<f64> {
     (!v.is_empty()).then(|| v.iter().sum::<f64>() / v.len() as f64)
 }
 
+/// A per-night vital (oldest→newest, `None` where a night had no sample) reduced to
+/// `(sparkline series, latest, baseline)`. `latest` is the *most recent night's*
+/// value — `None` if that night had no sample, so a stale older night is never shown
+/// as current. `baseline` is the mean of the prior nights' available values. The
+/// tiles and the digest both read from this, so their numbers can't disagree.
+type VitalStat = (Vec<f64>, Option<f64>, Option<f64>);
+fn vital_stat(per_night: &[Option<f64>]) -> VitalStat {
+    let series: Vec<f64> = per_night.iter().filter_map(|x| *x).collect();
+    let latest = per_night.last().copied().flatten();
+    let priors: Vec<f64> = per_night[..per_night.len().saturating_sub(1)].iter().filter_map(|x| *x).collect();
+    (series, latest, mean(&priors))
+}
+
+/// Percent change of `latest` vs `baseline`, guarding a zero/absent baseline.
+fn vital_delta_pct(stat: &VitalStat) -> Option<f64> {
+    match (stat.1, stat.2) {
+        (Some(l), Some(b)) if b != 0.0 => Some(((l - b) / b * 100.0).round()),
+        _ => None,
+    }
+}
+
 /// Assemble the full dashboard summary as a JSON value.
 pub fn build_summary(db: &Path, tz: i64) -> Result<Value> {
     // Resolve the DB to an absolute path up front. The Python model runners execute
@@ -425,22 +446,20 @@ pub fn build_summary(db: &Path, tz: i64) -> Result<Value> {
         .collect::<serde_json::Map<_, _>>()
         .into();
 
-    // vitals trend (from nights, oldest→newest)
-    let hrv_series: Vec<f64> = nights.iter().filter_map(|n| mean(&n.rmssd)).collect();
-    let rhr_series: Vec<f64> = nights.iter().filter_map(|n| n.hr.iter().cloned().reduce(f64::min)).collect();
-    let trend = |s: &[f64]| -> Value {
-        if s.len() < 2 {
-            return json!({ "series": s, "latest": s.last(), "baseline": s.last(), "delta_pct": 0 });
-        }
-        let latest = *s.last().unwrap();
-        let base = s[..s.len() - 1].iter().sum::<f64>() / (s.len() - 1) as f64;
-        // guard a zero baseline → no Inf/NaN leaking into the JSON the UI reads
-        let delta_pct = if base != 0.0 { ((latest - base) / base * 100.0).round() } else { 0.0 };
+    // vitals trend, per night oldest→newest (None where a night had no sample, so
+    // the "latest" stays tied to the most recent night rather than silently sliding
+    // to an older one).
+    let hrv_by_night: Vec<Option<f64>> = nights.iter().map(|n| mean(&n.rmssd)).collect();
+    let rhr_by_night: Vec<Option<f64>> = nights.iter().map(|n| n.hr.iter().cloned().reduce(f64::min)).collect();
+    let hrv_stat = vital_stat(&hrv_by_night);
+    let rhr_stat = vital_stat(&rhr_by_night);
+    let trend = |stat: &VitalStat| -> Value {
+        let (series, latest, base) = stat;
         json!({
-            "series": s.iter().map(|x| x.round()).collect::<Vec<_>>(),
-            "latest": latest.round(),
-            "baseline": (base * 10.0).round() / 10.0,
-            "delta_pct": delta_pct,
+            "series": series.iter().map(|x| x.round()).collect::<Vec<_>>(),
+            "latest": latest.map(|x| x.round()),
+            "baseline": base.map(|b| (b * 10.0).round() / 10.0),
+            "delta_pct": vital_delta_pct(stat),
         })
     };
 
@@ -544,7 +563,7 @@ pub fn build_summary(db: &Path, tz: i64) -> Result<Value> {
     });
 
     // one-line digest
-    let digest = make_digest(&hrv_series, &rhr_series, &nights, &cva);
+    let digest = make_digest(&hrv_stat, &rhr_stat, &nights, &cva);
 
     Ok(json!({
         "generated_at": now,
@@ -557,7 +576,7 @@ pub fn build_summary(db: &Path, tz: i64) -> Result<Value> {
         "activity": activity,
         "activity_profile": activity_profile,
         "activity_daily": activity_daily,
-        "vitals": { "hrv": trend(&hrv_series), "rhr": trend(&rhr_series) },
+        "vitals": { "hrv": trend(&hrv_stat), "rhr": trend(&rhr_stat) },
     }))
 }
 
@@ -589,29 +608,27 @@ fn downsample(arr: &[Value], n: usize) -> Vec<i64> {
         .collect()
 }
 
-fn make_digest(hrv: &[f64], rhr: &[f64], nights: &[Night], cva: &Option<Value>) -> String {
+fn make_digest(hrv: &VitalStat, rhr: &VitalStat, nights: &[Night], cva: &Option<Value>) -> String {
     let mut parts: Vec<String> = Vec::new();
-    // delta vs the mean of all prior nights — the same baseline the vitals tiles
-    // use, so the headline percentage matches the tile math.
-    let delta = |s: &[f64]| -> Option<(f64, f64)> {
-        (s.len() >= 2).then(|| {
-            let base = s[..s.len() - 1].iter().sum::<f64>() / (s.len() - 1) as f64;
-            (s.last().unwrap() - base, base)
-        })
+    // exact same (latest, baseline) the vitals tiles read, so the headline can't
+    // disagree with them: HRV reuses the tile's % (zero-baseline → no fragment),
+    // resting HR shows the bpm delta.
+    let hrv_pct = vital_delta_pct(hrv);
+    let rhr_delta = match (rhr.1, rhr.2) {
+        (Some(l), Some(b)) => Some(l - b),
+        _ => None,
     };
-    let hrv_d = delta(hrv);
-    let rhr_d = delta(rhr);
-    if let Some((d, base)) = hrv_d {
-        parts.push(format!("HRV {}{:.0}%", if d >= 0.0 { "+" } else { "" }, d / base.max(1.0) * 100.0));
+    if let Some(p) = hrv_pct {
+        parts.push(format!("HRV {}{:.0}%", if p >= 0.0 { "+" } else { "" }, p));
     }
-    if let Some((d, _)) = rhr_d {
+    if let Some(d) = rhr_delta {
         parts.push(format!("resting HR {}{:.0} bpm", if d >= 0.0 { "+" } else { "" }, d));
     }
     // recovery reads the actual signals: rising HRV is good; if HRV is unavailable,
     // fall back to resting HR *falling* being good (never the raw sign of an HR rise).
-    let recovering = match (hrv_d, rhr_d) {
-        (Some((d, _)), _) => d >= 0.0,
-        (None, Some((d, _))) => d <= 0.0,
+    let recovering = match (hrv_pct, rhr_delta) {
+        (Some(p), _) => p >= 0.0,
+        (None, Some(d)) => d <= 0.0,
         (None, None) => false,
     };
     let mut s = parts.join(", ");
