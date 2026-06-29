@@ -150,11 +150,90 @@ def main():
 
     met_t, motion_t = f32(met, 2), f32(sorted(motion), 9)
     temp_t, hr_t = f32(sorted(temp), 2), f32(sorted(hr), 2)
-    # stepmotion stub: NaN features spanning the FULL range, else its last
-    # timestamp caps the model's last_valid_time and truncates every series.
-    step_t = torch.full((2, 12), float("nan"), dtype=torch.float32)
-    step_t[0, 0] = met_t[0, 0]
-    step_t[1, 0] = met_t[-1, 0]
+
+    # ── stepmotion (gait) input ───────────────────────────────────────────────
+    # The app feeds AAD a `stepmotion` channel decoded from the ring's real_step
+    # events (tags 0x7e/0x7f): the two 14-byte halves are bit-unpacked into a
+    # 27-column quantized record → `steps_motion_decoder` → 11 gait features per
+    # 10 s sub-window, which is exactly the AAD `stepmotion` input. With real gait,
+    # walk/run vs cycle/swim is no longer a blind guess.
+    #
+    # The exact packing is from libringeventparser.so's native parser
+    # (EventParser::parse_api_real_steps_features_1/2): feature_1 fills 14 columns,
+    # feature_2 fills 13 more AND patches the 9th (carry) bit of the four `<<1`
+    # fields from its last byte p2[13]. Verified physically: this makes a continuous
+    # run decode to a stable ~2.7 Hz cadence (vs uniform noise for a naive unpack).
+    # Set STEPMOTION=0 to fall back to the NaN stub.
+    import os
+
+    def unpack27(p1, p2):
+        c = p2[13]  # packed carry byte: bits 7..0 feed the <<1 / 10-bit fields
+        return [
+            (p2[10] << 2) | (c & 0x3),        (p2[11]),                 (p2[12]),                  # globals
+            (p1[0] << 1) | (p1[3] >> 7),      (p1[1] << 1) | ((c >> 7) & 1), (p1[2] << 1) | ((c >> 6) & 1),
+            p1[3] & 0x7F, p1[4], p1[5], p1[6], p1[7],                                              # block 1
+            (p1[8] << 1) | (p1[11] >> 7),     (p1[9] << 1) | ((c >> 5) & 1), (p1[10] << 1) | ((c >> 4) & 1),
+            p1[11] & 0x7F, p1[12], p1[13], p2[0], p2[1],                                           # block 2
+            (p2[2] << 1) | (p2[5] >> 7),      (p2[3] << 1) | ((c >> 3) & 1), (p2[4] << 1) | ((c >> 2) & 1),
+            p2[5] & 0x7F, p2[6], p2[7], p2[8], p2[9],                                              # block 3
+        ]
+
+    def build_stepmotion():
+        dec_path = MODEL.parent / "steps_motion_decoder_2_0_0.pt"
+        if not dec_path.exists():
+            return None
+        srows = con.execute(
+            "SELECT ring_timestamp, tag, body FROM events WHERE tag IN (126, 127) ORDER BY ring_timestamp"
+        ).fetchall()
+        f1 = [(ts, b) for ts, tag, b in srows if tag == 0x7E and b and len(b) == 14]
+        f2 = {ts: b for ts, tag, b in srows if tag == 0x7F and b and len(b) == 14}
+        data, tsms = [], []
+        for ts, b1 in f1:
+            b2 = f2.get(ts + 1)  # feature_2 is emitted right after feature_1
+            if b2 is None:
+                continue
+            data.append(unpack27(b1, b2))
+            tsms.append(int((anchor_unix - (max_ds - ts) / 10.0) * 1000))  # unix ms
+        if not data:
+            return None
+        dec = torch.jit.load(str(dec_path), map_location="cpu").eval()
+        with torch.no_grad():
+            out_ts, out_data = dec(torch.tensor(tsms, dtype=torch.int64),
+                                   torch.tensor(data, dtype=torch.float32))
+        out_ts = out_ts.flatten().tolist()
+        od = out_data.tolist()
+        # the decoder expands each event to 3 sub-windows (t-20s/-10s/0); keep only
+        # the t=0 row per event (every 3rd) unless STEP_SUB=0 → keep all 3.
+        idx = range(len(od)) if os.environ.get("STEP_SUB") == "0" else range(2, len(od), 3)
+        rows = [[out_ts[i] / 60000.0 - OFFSET] + od[i] for i in idx]
+        rows.sort(key=lambda r: r[0])
+        return rows
+
+    step_rows = None
+    # The gait decode is correct (verified: a continuous run → stable ~2.7 Hz cadence),
+    # but feeding it alone into this partial pipeline changes segmentation in unhelpful
+    # ways (on a high-step day the model stops flagging an embedded run as a discrete
+    # workout; the app compensates with GPS + pastActivity + tuned post-processing we
+    # don't have). So real gait is opt-in (STEPMOTION=1); default keeps the stub.
+    if os.environ.get("STEPMOTION") == "1":
+        try:
+            step_rows = build_stepmotion()
+        except Exception as e:
+            if args.verbose:
+                print(f"stepmotion build failed ({e}); using stub", file=sys.stderr)
+    if step_rows:
+        # NaN boundary rows so the model's valid-time still spans the full met range
+        lo = min(step_rows[0][0], float(met_t[0, 0]))
+        hi = max(step_rows[-1][0], float(met_t[-1, 0]))
+        step_t = torch.tensor([[lo] + [float("nan")] * 11] + step_rows + [[hi] + [float("nan")] * 11],
+                              dtype=torch.float32)
+    else:
+        # stub: NaN features spanning the FULL range (its last timestamp caps the
+        # model's last_valid_time and would otherwise truncate every series).
+        step_t = torch.full((2, 12), float("nan"), dtype=torch.float32)
+        step_t[0, 0] = met_t[0, 0]
+        step_t[1, 0] = met_t[-1, 0]
+    STEP_N = len(step_rows) if step_rows else 0
 
     if args.verbose:
         print("series time ranges (unix minutes):", file=sys.stderr)
@@ -209,9 +288,10 @@ def main():
         print(f"  {date:<10} {span:<13} {s['duration_min']:>3}m  {wk:>7}  {s['label']} {s['label_confidence']:.2f}   ·   {alt}")
     print("\n  Labels are Oura's model, not a heuristic. ✓ = is_workout ≥ "
           f"{args.threshold:.2f}.")
-    print("  Type accuracy is limited: the gait ('stepmotion') input needs raw IMU we")
-    print("  can't sync, so it's stubbed — timing/detection is solid, the sport label is")
-    print("  the model's best guess from MET/motion/HR/temp.")
+    note = "with real gait" if os.environ.get("STEPMOTION") == "1" else "stubbed"
+    print(f"  Type accuracy is limited: the gait ('stepmotion') channel is {note}. We can")
+    print("  decode real gait from real_step events (STEPMOTION=1), but it doesn't improve")
+    print("  detection here without the app's GPS/history; default is the MET/motion/HR/temp guess.")
 
 
 if __name__ == "__main__":

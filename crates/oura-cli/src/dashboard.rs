@@ -8,7 +8,8 @@
 //! data stays on this machine.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
@@ -89,6 +90,17 @@ fn civil(days: i64) -> (i64, u32, u32) {
     (y + i64::from(m <= 2), m, d)
 }
 
+/// Inverse of `civil`: (year, month, day) → days since 1970-01-01.
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = y - era * 400;
+    let m = m as i64;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
 const WD: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 fn date_label(unix_s: f64, tz: i64) -> String {
@@ -130,6 +142,28 @@ fn run_py_json(root: &Path, py: &Path, script: &str, args: &[String]) -> Option<
     serde_json::from_slice(&out.stdout).ok()
 }
 
+/// Like `run_py_json` but feeds `stdin` to the process — used for the batched sleep
+/// runner, which reads its list of night ranges from stdin. The payload is small
+/// (a few night pairs), so writing it before draining stdout can't deadlock.
+fn run_py_json_stdin(root: &Path, py: &Path, script: &str, args: &[String], stdin: &[u8]) -> Option<Value> {
+    use std::io::Write;
+    let mut child = Command::new(py)
+        .current_dir(root)
+        .arg(root.join(script))
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    child.stdin.take()?.write_all(stdin).ok()?; // dropped here → EOF
+    let out = child.wait_with_output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    serde_json::from_slice(&out.stdout).ok()
+}
+
 // ── per-night signal accumulation (one pass over events) ──────────────────────
 #[derive(Default)]
 struct Night {
@@ -147,6 +181,15 @@ fn mean(v: &[f64]) -> Option<f64> {
 
 /// Assemble the full dashboard summary as a JSON value.
 pub fn build_summary(db: &Path, tz: i64) -> Result<Value> {
+    // Resolve the DB to an absolute path up front. The Python model runners execute
+    // with `current_dir` set to the repo root, so a relative `--db` would resolve
+    // against a different directory than Rust (which uses the process cwd) — mixing
+    // vitals from one file with sleep/activity/CVA from another. An absolute path
+    // makes both sides open the same DB.
+    let db_abs = std::fs::canonicalize(db).unwrap_or_else(|_| {
+        std::env::current_dir().map(|d| d.join(db)).unwrap_or_else(|_| db.to_path_buf())
+    });
+    let db = db_abs.as_path();
     let demo = read_profile(db);
     let store = Store::open(db).context("opening DB")?;
     let events = store.decoded_events().context("reading events")?;
@@ -214,23 +257,50 @@ pub fn build_summary(db: &Path, tz: i64) -> Result<Value> {
         }
     }
 
-    // shell out to the models
+    // shell out to the models. Sleep (all nights in one batched process), cardio,
+    // and activity are independent torch runs, so launch them concurrently instead
+    // of paying ~1 s of torch import + a full DB scan once per call, serially.
     let root = repo_root();
     let py = root.as_deref().map(python_bin);
-    let model_json = |script: &str, args: Vec<String>| -> Option<Value> {
-        let (r, p) = (root.as_deref()?, py.as_deref()?);
-        run_py_json(r, p, script, &args)
+
+    let sleep_ranges: Vec<[i64; 2]> = nights.iter().map(|nt| [nt.start_ds, nt.end_ds]).collect();
+    let sleep_stdin = serde_json::to_vec(&sleep_ranges).unwrap_or_default();
+    let sleep_args = vec![db.display().to_string(), tz.to_string(), "--json".into(), "--batch".into()];
+    let cva_args = vec![
+        db.display().to_string(),
+        "--json".into(),
+        "--sex".into(), demo.sex.to_string(),
+        "--age".into(), demo.age.to_string(),
+        "--height".into(), demo.height_m.to_string(),
+        "--weight".into(), demo.weight_kg.to_string(),
+        "--ring".into(), demo.ring_size.to_string(),
+    ];
+    let act_args = vec![db.display().to_string(), "--tz".into(), tz.to_string(), "--json".into()];
+
+    let (sleep_batch, cva, activity_raw) = match (root.as_deref(), py.as_deref()) {
+        (Some(r), Some(p)) => std::thread::scope(|s| {
+            let sh = s.spawn(|| run_py_json_stdin(r, p, "tools/run_sleep_model.py", &sleep_args, &sleep_stdin));
+            let ch = s.spawn(|| run_py_json(r, p, "tools/run_cva_model.py", &cva_args));
+            let ah = s.spawn(|| run_py_json(r, p, "tools/run_activity_model.py", &act_args));
+            (sh.join().ok().flatten(), ch.join().ok().flatten(), ah.join().ok().flatten())
+        }),
+        _ => (None, None, None),
     };
+
+    // index the batched sleep results by start_ds so each night picks up its own
+    // hypnogram (the runner preserves order, but match by key to be safe).
+    let hyps: std::collections::HashMap<i64, Value> = sleep_batch
+        .as_ref()
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|h| Some((h["start_ds"].as_i64()?, h.clone()))).collect())
+        .unwrap_or_default();
 
     // nights JSON (newest first), each enriched with the hypnogram from the model
     let mut nights_json = Vec::new();
     for nt in &nights {
-        let hyp = model_json(
-            "tools/run_sleep_model.py",
-            vec![nt.start_ds.to_string(), nt.end_ds.to_string(), db.display().to_string(), "--json".into()],
-        );
+        let hyp = hyps.get(&nt.start_ds);
         // downsample the per-30s stage array to ~120 cells for the bar
-        let stage_cells = hyp.as_ref().and_then(|h| h["stages"].as_array()).map(|s| downsample(s, 120));
+        let stage_cells = hyp.and_then(|h| h["stages"].as_array()).map(|s| downsample(s, 120));
         nights_json.push(json!({
             "date": date_label(unix_s(nt.start_ds), tz),
             "start": hm(unix_s(nt.start_ds), tz),
@@ -240,37 +310,110 @@ pub fn build_summary(db: &Path, tz: i64) -> Result<Value> {
             "rhr": nt.hr.iter().cloned().fold(f64::INFINITY, f64::min).is_finite().then(|| nt.hr.iter().cloned().fold(f64::INFINITY, f64::min).round()),
             "skin_temp": mean(&nt.temp).map(|x| (x * 10.0).round() / 10.0),
             "spo2_mean": mean(&nt.spo2).map(|x| x.round()),
-            "deep_pct": hyp.as_ref().map(|h| h["deep_pct"].clone()),
-            "light_pct": hyp.as_ref().map(|h| h["light_pct"].clone()),
-            "rem_pct": hyp.as_ref().map(|h| h["rem_pct"].clone()),
-            "wake_pct": hyp.as_ref().map(|h| h["wake_pct"].clone()),
-            "efficiency": hyp.as_ref().map(|h| h["efficiency_pct"].clone()),
+            "deep_pct": hyp.map(|h| h["deep_pct"].clone()),
+            "light_pct": hyp.map(|h| h["light_pct"].clone()),
+            "rem_pct": hyp.map(|h| h["rem_pct"].clone()),
+            "wake_pct": hyp.map(|h| h["wake_pct"].clone()),
+            "efficiency": hyp.map(|h| h["efficiency_pct"].clone()),
             "stages": stage_cells,
         }));
     }
     nights_json.reverse();
 
-    // cardio (CVA)
-    let cva = model_json(
-        "tools/run_cva_model.py",
-        vec![
-            db.display().to_string(),
-            "--json".into(),
-            "--sex".into(), demo.sex.to_string(),
-            "--age".into(), demo.age.to_string(),
-            "--height".into(), demo.height_m.to_string(),
-            "--weight".into(), demo.weight_kg.to_string(),
-            "--ring".into(), demo.ring_size.to_string(),
-        ],
-    );
+    // activity sessions
+    let mut activity = activity_raw
+        .as_ref()
+        .and_then(|v| v["sessions"].as_array().cloned())
+        .unwrap_or_default();
 
-    // activity
-    let activity = model_json(
-        "tools/run_activity_model.py",
-        vec![db.display().to_string(), "--tz".into(), tz.to_string(), "--json".into()],
-    )
-    .and_then(|v| v["sessions"].as_array().cloned())
-    .unwrap_or_default();
+    // per-day movement profile: 96 buckets/day (15 min) of mean MET above rest,
+    // so the actogram can show a continuous activity ridge, not just sparse blocks.
+    let mut prof_sum: std::collections::BTreeMap<String, [f64; 96]> = Default::default();
+    let mut prof_cnt: std::collections::BTreeMap<String, [u32; 96]> = Default::default();
+    // per-day energy + steps: active kcal = Σ(MET-1)·weight/60; steps estimated from
+    // MET cadence (the exact count needs the on-ring step-counter model).
+    let mut daily: std::collections::BTreeMap<String, (f64, f64)> = Default::default(); // (active_kcal, steps)
+    // per-local-minute MET above rest, so we can sum active kcal over a session's window.
+    let mut met_min: std::collections::BTreeMap<i64, f64> = Default::default();
+    let weight = demo.weight_kg;
+    for (ds, tag, jstr, _) in &events {
+        if name_of(*tag) != "activity_information" || !jstr.contains("\"met\"") {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str::<Value>(jstr) {
+            if let Some(met) = v["met"].as_array() {
+                for (i, m) in met.iter().enumerate() {
+                    let mv = m.as_f64().unwrap_or(1.0);
+                    let unix = anchor_unix as f64 - (max_ds - ds) as f64 / 10.0 + i as f64 * 60.0;
+                    let local = unix + tz as f64 * 3600.0;
+                    let day_idx = (local / 86400.0).floor() as i64;
+                    let (y, mo, dd) = civil(day_idx);
+                    let key = format!("{y:04}-{mo:02}-{dd:02}");
+                    let bucket = (((local - day_idx as f64 * 86400.0) / 86400.0) * 96.0)
+                        .floor()
+                        .clamp(0.0, 95.0) as usize;
+                    prof_sum.entry(key.clone()).or_insert([0.0; 96])[bucket] += (mv - 1.0).max(0.0);
+                    prof_cnt.entry(key.clone()).or_insert([0; 96])[bucket] += 1;
+                    let step_rate = if mv >= 7.0 { 150.0 } else if mv >= 2.5 { 105.0 } else { 0.0 };
+                    let e = daily.entry(key).or_insert((0.0, 0.0));
+                    e.0 += (mv - 1.0).max(0.0) * weight / 60.0; // active kcal this minute
+                    e.1 += step_rate; // steps this minute
+                    *met_min.entry((local / 60.0).floor() as i64).or_insert(0.0) += (mv - 1.0).max(0.0);
+                }
+            }
+        }
+    }
+    // estimated active kcal per detected session: Σ(MET-1)·weight/60 over its minutes,
+    // matched by local time. start is "YYYY-MM-DD HH:MM" (local); duration_min is its length.
+    for sess in activity.iter_mut() {
+        let (Some(start), Some(dur)) = (sess["start"].as_str(), sess["duration_min"].as_f64()) else {
+            continue;
+        };
+        let parse = || -> Option<i64> {
+            let (date, time) = start.split_once(' ')?;
+            let mut dp = date.split('-');
+            let y: i64 = dp.next()?.parse().ok()?;
+            let mo: u32 = dp.next()?.parse().ok()?;
+            let dd: u32 = dp.next()?.parse().ok()?;
+            let mut tp = time.split(':');
+            let hh: i64 = tp.next()?.parse().ok()?;
+            let mm: i64 = tp.next()?.parse().ok()?;
+            Some(days_from_civil(y, mo, dd) * 1440 + hh * 60 + mm)
+        };
+        if let Some(m0) = parse() {
+            let kcal: f64 = (m0..m0 + dur as i64)
+                .filter_map(|m| met_min.get(&m))
+                .map(|met| met * weight / 60.0)
+                .sum();
+            sess["active_kcal"] = json!(kcal.round());
+        }
+    }
+
+    // total daily kcal ≈ 24h basal (weight kcal/kg/h) + active
+    let activity_daily: Value = daily
+        .iter()
+        .map(|(k, (act, steps))| {
+            (k.clone(), json!({
+                "active_kcal": act.round(),
+                "total_kcal": (weight * 24.0 + act).round(),
+                "steps": (steps / 100.0).round() * 100.0,
+            }))
+        })
+        .collect::<serde_json::Map<_, _>>()
+        .into();
+    let activity_profile: Value = prof_sum
+        .iter()
+        .map(|(k, sums)| {
+            let cnt = &prof_cnt[k];
+            let arr: Vec<f64> = sums
+                .iter()
+                .zip(cnt.iter())
+                .map(|(s, c)| if *c > 0 { (s / *c as f64 * 100.0).round() / 100.0 } else { 0.0 })
+                .collect();
+            (k.clone(), json!(arr))
+        })
+        .collect::<serde_json::Map<_, _>>()
+        .into();
 
     // vitals trend (from nights, oldest→newest)
     let hrv_series: Vec<f64> = nights.iter().filter_map(|n| mean(&n.rmssd)).collect();
@@ -292,12 +435,42 @@ pub fn build_summary(db: &Path, tz: i64) -> Result<Value> {
     // device & data-health
     let has = |evname: &str| present_recent.contains(evname);
     let measuring = json!([
-        feat("Daytime HR", has("ibi_and_amplitude_event") || has("green_ibi_quality_event")),
-        feat("SpO2", has("spo2_r_pi_event")),
-        feat("Exercise HR", has("ehr_trace_event")),
-        feat("Real steps", has("real_step_event_feature_2")),
-        feat("Cardio PPG (CVA)", has("cva_raw_ppg_data")),
+        feat("Daytime HR", has("ibi_and_amplitude_event") || has("green_ibi_quality_event"), "daytime_hr"),
+        feat("SpO2", has("spo2_r_pi_event"), "spo2"),
+        feat("Exercise HR", has("ehr_trace_event"), "exercise_hr"),
+        feat("Real steps", has("real_step_event_feature_2"), "real_steps"),
+        feat("Cardio PPG (CVA)", has("cva_raw_ppg_data"), "cva_ppg"),
     ]);
+
+    // data streams: how much of each biometric the ring is actually recording
+    let mut sc: std::collections::BTreeMap<&str, i64> = Default::default();
+    for (_ds, tag, _j, _) in &events {
+        let cat = match name_of(*tag) {
+            "spo2_r_pi_event" => Some("Blood oxygen"),
+            "ibi_and_amplitude_event" | "green_ibi_quality_event" => Some("Heart beats"),
+            "ehr_trace_event" | "ehr_acm_intensity_event" => Some("Exercise HR"),
+            "motion_event" | "sleep_acm_period" => Some("Motion"),
+            "temp_event" => Some("Skin temp"),
+            "real_step_event_feature_1" => Some("Steps"),
+            "cva_raw_ppg_data" => Some("Cardio PPG"),
+            _ => None,
+        };
+        if let Some(c) = cat {
+            *sc.entry(c).or_insert(0) += 1;
+        }
+    }
+    let mut sv: Vec<(&str, i64)> = sc.into_iter().collect();
+    sv.sort_by(|a, b| b.1.cmp(&a.1));
+    let streams = json!(sv.iter().map(|(n, c)| json!({ "name": n, "count": c })).collect::<Vec<_>>());
+
+    // full per-type event breakdown (for the advanced/debug section)
+    let mut allc: std::collections::BTreeMap<&str, i64> = Default::default();
+    for (_ds, tag, _j, _) in &events {
+        *allc.entry(name_of(*tag)).or_insert(0) += 1;
+    }
+    let mut allv: Vec<(&str, i64)> = allc.into_iter().collect();
+    allv.sort_by(|a, b| b.1.cmp(&a.1));
+    let event_counts = json!(allv.iter().map(|(n, c)| json!({ "name": n, "count": c })).collect::<Vec<_>>());
     let insight = |name: &str, live: bool, why: &str| json!({"name": name, "status": if live {"live"} else {"gated"}, "why": why});
     let insights = json!([
         insight("Sleep stages", true, ""),
@@ -343,6 +516,9 @@ pub fn build_summary(db: &Path, tz: i64) -> Result<Value> {
         "battery_pct": battery.map(|b| b.0),
         "battery_v": battery.map(|b| (b.1 as f64 / 1000.0 * 100.0).round() / 100.0),
         "measuring": measuring,
+        "streams": streams,
+        "event_counts": event_counts,
+        "next_cursor": dev.as_ref().map(|d| d.7),
         "insights": insights,
     });
 
@@ -358,12 +534,14 @@ pub fn build_summary(db: &Path, tz: i64) -> Result<Value> {
         "nights": nights_json,
         "cardio": cva,
         "activity": activity,
+        "activity_profile": activity_profile,
+        "activity_daily": activity_daily,
         "vitals": { "hrv": trend(&hrv_series), "rhr": trend(&rhr_series) },
     }))
 }
 
-fn feat(name: &str, on: bool) -> Value {
-    json!({ "name": name, "on": on })
+fn feat(name: &str, on: bool, feature: &str) -> Value {
+    json!({ "name": name, "on": on, "feature": feature })
 }
 
 /// Downsample an int array to at most `n` cells (majority per bucket).
@@ -392,15 +570,29 @@ fn downsample(arr: &[Value], n: usize) -> Vec<i64> {
 
 fn make_digest(hrv: &[f64], rhr: &[f64], nights: &[Night], cva: &Option<Value>) -> String {
     let mut parts: Vec<String> = Vec::new();
-    if hrv.len() >= 2 {
-        let d = hrv.last().unwrap() - hrv[..hrv.len() - 1].iter().sum::<f64>() / (hrv.len() - 1) as f64;
-        parts.push(format!("HRV {}{:.0}%", if d >= 0.0 { "+" } else { "" }, d / hrv[0].max(1.0) * 100.0));
+    // delta vs the mean of all prior nights — the same baseline the vitals tiles
+    // use, so the headline percentage matches the tile math.
+    let delta = |s: &[f64]| -> Option<(f64, f64)> {
+        (s.len() >= 2).then(|| {
+            let base = s[..s.len() - 1].iter().sum::<f64>() / (s.len() - 1) as f64;
+            (s.last().unwrap() - base, base)
+        })
+    };
+    let hrv_d = delta(hrv);
+    let rhr_d = delta(rhr);
+    if let Some((d, base)) = hrv_d {
+        parts.push(format!("HRV {}{:.0}%", if d >= 0.0 { "+" } else { "" }, d / base.max(1.0) * 100.0));
     }
-    if rhr.len() >= 2 {
-        let d = rhr.last().unwrap() - rhr[..rhr.len() - 1].iter().sum::<f64>() / (rhr.len() - 1) as f64;
+    if let Some((d, _)) = rhr_d {
         parts.push(format!("resting HR {}{:.0} bpm", if d >= 0.0 { "+" } else { "" }, d));
     }
-    let recovering = parts.first().map(|p| p.contains('+')).unwrap_or(false);
+    // recovery reads the actual signals: rising HRV is good; if HRV is unavailable,
+    // fall back to resting HR *falling* being good (never the raw sign of an HR rise).
+    let recovering = match (hrv_d, rhr_d) {
+        (Some((d, _)), _) => d >= 0.0,
+        (None, Some((d, _))) => d <= 0.0,
+        (None, None) => false,
+    };
     let mut s = parts.join(", ");
     if !s.is_empty() {
         s.push_str(if recovering { ". Recovering well." } else { ". Recovery dipping, take it easy." });
@@ -413,6 +605,47 @@ fn make_digest(hrv: &[f64], rhr: &[f64], nights: &[Night], cva: &Option<Value>) 
 }
 
 // ── HTTP server ───────────────────────────────────────────────────────────────
+// ── summary cache ─────────────────────────────────────────────────────────────
+// build_summary spawns torch subprocesses (~seconds); without a cache every page
+// load re-pays that. We memoise the last result and reuse it until the inputs
+// change — the DB (a sync appends events) or profile.json (an edit changes the CVA
+// inputs / weight-based kcal). Both are cheap mtime stats, so a sync or profile
+// edit transparently invalidates the cache with no explicit wiring.
+struct SummaryCache {
+    db: PathBuf,
+    tz: i64,
+    token: (Option<SystemTime>, Option<SystemTime>), // (db mtime, profile mtime)
+    value: Arc<Value>,
+}
+
+fn summary_cache() -> &'static Mutex<Option<SummaryCache>> {
+    static C: OnceLock<Mutex<Option<SummaryCache>>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(None))
+}
+
+fn mtime(p: &Path) -> Option<SystemTime> {
+    std::fs::metadata(p).and_then(|m| m.modified()).ok()
+}
+
+/// Cached `build_summary`: recompute only when oura.db or profile.json changes.
+fn cached_summary(db: &Path, tz: i64) -> Result<Arc<Value>> {
+    let token = (mtime(db), mtime(&profile_path(db)));
+    if let Some(c) = summary_cache().lock().unwrap().as_ref() {
+        if c.db == db && c.tz == tz && c.token == token {
+            return Ok(c.value.clone());
+        }
+    }
+    // build outside the lock so concurrent first-loads don't serialise on it
+    let value = Arc::new(build_summary(db, tz)?);
+    *summary_cache().lock().unwrap() = Some(SummaryCache {
+        db: db.to_path_buf(),
+        tz,
+        token,
+        value: value.clone(),
+    });
+    Ok(value)
+}
+
 pub async fn serve(
     port: u16,
     db: PathBuf,
@@ -504,7 +737,7 @@ async fn handle(
     // CSRF guard for mutating/action endpoints: a same-origin fetch can set this
     // header; an <img>/<form> or cross-origin fetch cannot (CORS preflight we never approve).
     let csrf_ok = header(&req, "x-oura-dash").is_some();
-    let forbid = matches!((method, path), ("POST", "/api/profile") | ("POST", "/api/sync")) && !csrf_ok;
+    let forbid = matches!((method, path), ("POST", "/api/profile") | ("POST", "/api/sync") | ("POST", "/api/feature")) && !csrf_ok;
     if forbid {
         return write_resp(&mut sock, "403 Forbidden", "text/plain", b"forbidden").await;
     }
@@ -514,8 +747,9 @@ async fn handle(
         (_, "/styles.css") => write_resp(&mut sock, "200 OK", "text/css; charset=utf-8", &asset("styles.css", STYLES_CSS)).await,
         (_, "/app.js") => write_resp(&mut sock, "200 OK", "text/javascript; charset=utf-8", &asset("app.js", APP_JS)).await,
         ("GET", "/api/summary") => {
-            // building the summary shells out to torch models → off the async executor.
-            let body = tokio::task::spawn_blocking(move || build_summary(&db, tz)).await.map_err(|e| anyhow!(e))?;
+            // building the summary shells out to torch models → off the async
+            // executor; cached so only the first load (or post-sync/edit) pays for it.
+            let body = tokio::task::spawn_blocking(move || cached_summary(&db, tz)).await.map_err(|e| anyhow!(e))?;
             match body {
                 Ok(v) => json_resp(&mut sock, &v).await,
                 Err(e) => json_resp(&mut sock, &json!({ "error": e.to_string() })).await,
@@ -539,26 +773,107 @@ async fn handle(
             };
             json_resp(&mut sock, &v).await
         }
+        ("POST", "/api/feature") => {
+            let req = serde_json::from_str::<Value>(body.trim_end_matches('\0')).unwrap_or(Value::Null);
+            let feature = req["feature"].as_str().unwrap_or("").to_string();
+            let mode = req["mode"].as_str().unwrap_or("").to_string();
+            let res = tokio::task::spawn_blocking(move || run_feature(&db, &name, key_file.as_deref(), &feature, &mode))
+                .await
+                .map_err(|e| anyhow!(e))?;
+            let v = match res {
+                Ok(msg) => json!({ "ok": true, "message": msg }),
+                Err(e) => json!({ "ok": false, "message": e.to_string() }),
+            };
+            json_resp(&mut sock, &v).await
+        }
         _ => write_resp(&mut sock, "404 Not Found", "text/plain", b"not found").await,
     }
 }
 
 /// Drain the ring by invoking our own binary's `sync` subcommand (reuses all the
 /// BLE + cursor logic). Returns the last stdout line on success.
+///
+/// BLE scanning on macOS is flaky: the ring advertises only periodically (and not at
+/// all for a few seconds after a disconnect), so a single short scan often misses a
+/// ring that is right there. We use a longer scan window and retry the transient
+/// "no matching ring" miss a couple of times before giving up.
 fn run_sync(db: &Path, name: &str, key_file: Option<&Path>) -> Result<String> {
     let exe = std::env::current_exe().context("locating oura binary")?;
-    let mut c = Command::new(exe);
-    c.arg("--db").arg(db).arg("--name").arg(name);
-    if let Some(k) = key_file {
-        c.arg("--key-file").arg(k);
+    let mut last = String::from("sync failed");
+    for attempt in 0..3 {
+        let mut c = Command::new(&exe);
+        c.arg("--db").arg(db).arg("--name").arg(name)
+            .arg("--scan-timeout").arg("40"); // global flag; wider than the 25 s default
+        if let Some(k) = key_file {
+            c.arg("--key-file").arg(k);
+        }
+        c.arg("sync");
+        let out = c.output().context("running `oura sync`")?;
+        if out.status.success() {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            return Ok(stdout.lines().last().unwrap_or("synced").trim().to_string());
+        }
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        last = stderr.lines().last().unwrap_or("sync failed").trim().to_string();
+        // only a scan miss is worth retrying; a real error (auth, etc.) is not
+        let transient = {
+            let l = last.to_lowercase();
+            l.contains("no matching") || l.contains("not found") || l.contains("no device")
+                || l.contains("timed out") || l.contains("timeout")
+        };
+        if !transient || attempt == 2 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
     }
-    c.arg("sync");
-    let out = c.output().context("running `oura sync`")?;
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    if out.status.success() {
-        Ok(stdout.lines().last().unwrap_or("synced").trim().to_string())
-    } else {
-        Err(anyhow!("{}", stderr.lines().last().unwrap_or("sync failed").trim()))
+    Err(anyhow!("{last}"))
+}
+
+/// Toggle an on-ring feature via our `feature-mode` subcommand (BLE, auth-gated).
+/// `feature` is whitelisted; `mode` is off|automatic. Writing a feature mode REQUIRES
+/// the auth key, so we fail early (with a clear message) if the dashboard was launched
+/// without `--key-file`. Scan misses retry; the ring's "already in that mode" rejection
+/// (result `0x20`) is reported as a no-op success rather than an error.
+fn run_feature(db: &Path, name: &str, key_file: Option<&Path>, feature: &str, mode: &str) -> Result<String> {
+    const FEATS: &[&str] = &["daytime_hr", "spo2", "exercise_hr", "real_steps", "cva_ppg", "ambient", "resting_hr"];
+    if !FEATS.contains(&feature) {
+        return Err(anyhow!("unknown feature"));
     }
+    if mode != "off" && mode != "automatic" {
+        return Err(anyhow!("invalid mode"));
+    }
+    let key_file = key_file.ok_or_else(|| {
+        anyhow!("can't change ring features: the dashboard was started without --key-file (auth key needed to write feature modes)")
+    })?;
+    let exe = std::env::current_exe().context("locating oura binary")?;
+    let on = if mode == "off" { "off" } else { "on" };
+    let mut last = String::from("toggle failed");
+    for attempt in 0..3 {
+        let mut c = Command::new(&exe);
+        c.arg("--db").arg(db).arg("--name").arg(name)
+            .arg("--scan-timeout").arg("40").arg("--key-file").arg(key_file)
+            .arg("feature-mode").arg(feature).arg("--mode").arg(mode);
+        let out = c.output().context("running `oura feature-mode`")?;
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if stdout.contains("SUCCESS") {
+            return Ok(format!("{feature} turned {on}"));
+        }
+        if stdout.contains("result 0x20") {
+            // ring refuses to set a mode it's already in → it's already in that state
+            return Ok(format!("{feature} is already {on} (no change needed)"));
+        }
+        last = stdout.lines().chain(stderr.lines()).filter(|l| !l.trim().is_empty()).last()
+            .unwrap_or("toggle failed").trim().to_string();
+        let transient = {
+            let l = last.to_lowercase();
+            l.contains("no matching") || l.contains("not found") || l.contains("no device")
+                || l.contains("timed out") || l.contains("timeout")
+        };
+        if !transient || attempt == 2 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+    Err(anyhow!("{last}"))
 }

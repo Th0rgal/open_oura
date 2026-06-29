@@ -10,8 +10,40 @@ const el = (tag, cls, html) => {
 };
 const num = (v, d = "—") => (v == null || Number.isNaN(v) ? d : v);
 const icon = (name, cls = "") => `<span class="ic ${cls}" style="--i:url(/icons/${name}.svg)"></span>`;
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const cap = (s) => esc(s).replace(/^./, (c) => c.toUpperCase());
+const kfmt = (n) => (n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k" : String(Math.round(n)));
 
 let CURRENT_PROFILE = null;
+
+// Smooth curve THROUGH the points using a monotone cubic Hermite spline
+// (Fritsch–Carlson). Monotone = the curve never overshoots past a data point, so it
+// won't invent peaks/valleys the data doesn't have — the right call for real metrics.
+function smoothPath(pts) {
+  const n = pts.length;
+  if (n < 2) return "";
+  const x = pts.map((p) => p[0]), y = pts.map((p) => p[1]);
+  if (n === 2) return `M${x[0].toFixed(1)} ${y[0].toFixed(1)} L${x[1].toFixed(1)} ${y[1].toFixed(1)}`;
+  const dx = [], dy = [], dd = []; // secant slopes
+  for (let i = 0; i < n - 1; i++) { dx[i] = x[i + 1] - x[i]; dy[i] = y[i + 1] - y[i]; dd[i] = dy[i] / dx[i]; }
+  const m = new Array(n);
+  m[0] = dd[0];
+  m[n - 1] = dd[n - 2];
+  for (let i = 1; i < n - 1; i++) m[i] = dd[i - 1] * dd[i] <= 0 ? 0 : (dd[i - 1] + dd[i]) / 2;
+  for (let i = 0; i < n - 1; i++) {
+    if (dd[i] === 0) { m[i] = 0; m[i + 1] = 0; continue; }
+    const a = m[i] / dd[i], b = m[i + 1] / dd[i], s2 = a * a + b * b;
+    if (s2 > 9) { const t = 3 / Math.sqrt(s2); m[i] = t * a * dd[i]; m[i + 1] = t * b * dd[i]; }
+  }
+  let d = `M${x[0].toFixed(1)} ${y[0].toFixed(1)}`;
+  for (let i = 0; i < n - 1; i++) {
+    const h = dx[i] / 3;
+    d += ` C${(x[i] + h).toFixed(1)} ${(y[i] + m[i] * h).toFixed(1)} ` +
+         `${(x[i + 1] - h).toFixed(1)} ${(y[i + 1] - m[i + 1] * h).toFixed(1)} ` +
+         `${x[i + 1].toFixed(1)} ${y[i + 1].toFixed(1)}`;
+  }
+  return d;
+}
 
 // monochrome, thin, with a faint area fill — subtle and elegant
 function sparkline(series) {
@@ -20,14 +52,16 @@ function sparkline(series) {
   const w = 100, h = 26, min = Math.min(...s), max = Math.max(...s);
   const rng = max - min || 1;
   const pts = s.map((v, i) => [(i / (s.length - 1)) * w, h - ((v - min) / rng) * (h - 5) - 3]);
-  const d = pts.map((p, i) => (i ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join(" ");
-  const area = `M0 ${h} L${d.slice(1)} L${w} ${h} Z`;
+  const d = smoothPath(pts);
+  const area = `${d} L${w.toFixed(1)} ${h} L0 ${h} Z`;
   const last = pts[pts.length - 1];
+  // the SVG is stretched non-uniformly (preserveAspectRatio=none), which would
+  // squash an in-SVG <circle> into an ellipse — so the end dot is a separate,
+  // unstretched element positioned at the last point (vertical axis is 1:1 with px).
   return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
     <path d="${area}" fill="var(--spark-fill)" stroke="none"/>
     <path d="${d}" fill="none" stroke="var(--spark)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>
-    <circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="1.9" fill="var(--spark)"/>
-  </svg>`;
+  </svg><i class="spark-dot" style="top:${last[1].toFixed(1)}px"></i>`;
 }
 
 function deltaTag(pct, { good = "up" } = {}) {
@@ -157,32 +191,200 @@ const fmtDay = (ymd) => {
   return p.length === 3 ? `${MONTHS[+p[1] - 1]} ${+p[2]}` : ymd;
 };
 
+const WD = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const hhmm = (min) => `${String((min / 60) | 0).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
+
+// activity type → vendored hugeicons glyph (defaults to a generic activity icon)
+const ACT_ICON = {
+  cycling: "act-cycling", running: "act-running", walking: "act-walking", hiking: "act-walking",
+  swimming: "act-swimming", strengthtraining: "act-strength", coreexercise: "act-strength",
+  crosstraining: "act-strength", yoga: "act-yoga", pilates: "act-yoga",
+};
+const actIcon = (label) => ACT_ICON[(label || "").toLowerCase()] || "act-default";
+
+// session detail popover (opened by clicking an actogram mark)
+function openActDetail(s) {
+  let dlg = $("act-dialog");
+  if (!dlg) {
+    dlg = el("dialog", "dialog act-dialog");
+    dlg.id = "act-dialog";
+    document.body.append(dlg);
+    dlg.addEventListener("click", (e) => { if (e.target === dlg) dlg.close(); });
+  }
+  const work = s.is_workout >= 0.5;
+  const conf = s.label_confidence != null ? Math.round(s.label_confidence * 100) + "%" : "—";
+  const kv = (k, v) => `<div class="kv"><div class="k">${k}</div><div class="v">${v}</div></div>`;
+  const top3 = (s.top3 || [])
+    .map(([n, p]) => `<div class="t3"><span class="t3n">${cap(n)}</span><span class="t3bar"><i style="width:${Math.round(p * 100)}%"></i></span><span class="t3p">${Math.round(p * 100)}%</span></div>`)
+    .join("");
+  dlg.innerHTML =
+    `<form method="dialog">
+      <div class="ad-head">
+        <span class="ic" style="--i:url(/icons/${actIcon(s.label)}.svg)"></span>
+        <h3>${cap(s.label || "activity")}</h3>
+        ${work ? '<span class="ad-tag">workout</span>' : ""}
+      </div>
+      <div class="ad-grid">
+        ${kv("Time", `${hhmm(s.start)}–${hhmm(s.end)}`)}
+        ${kv("Duration", `${s.duration_min} min`)}
+        ${s.active_kcal != null ? kv("Active calories", `${Math.round(s.active_kcal).toLocaleString()} kcal`) : ""}
+        ${kv("Confidence", conf)}
+        ${kv("Workout", work ? "yes" : "no")}
+      </div>
+      <p class="subhead">Model's guesses</p>
+      <div class="t3list">${top3 || '<div class="ad-muted">no alternates</div>'}</div>
+      <p class="ad-foot">Oura automatic_activity_detection — best guess from MET / motion / HR / temp.</p>
+      <div class="dialog-actions"><button class="btn-primary">Close</button></div>
+    </form>`;
+  dlg.showModal();
+}
+
+// Actogram: each day is a 24h time axis, sessions plotted as marks — you read the
+// circadian rhythm at a glance. Monochrome; accent reserved for workouts.
 function renderActivity(d) {
   const box = $("activity");
   box.innerHTML = "";
-  const a = (d.activity || []).slice().reverse().slice(0, 12);
-  if (!a.length) {
+  const all = d.activity || [];
+  if (!all.length) {
     box.append(el("div", "error", "No activity sessions detected."));
     return;
   }
-  const list = el("div", "sessions");
-  let lastDay = null;
-  a.forEach((s) => {
-    const ymd = (s.start || "").split(" ")[0];
-    if (ymd !== lastDay) {
-      list.append(el("div", "day-head", fmtDay(ymd)));
-      lastDay = ymd;
+  const toMin = (s) => { const [h, m] = (s || "0:0").split(":").map(Number); return (h || 0) * 60 + (m || 0); };
+  const byDay = new Map();
+  let minStart = 1440, maxEnd = 0;
+  for (const s of all) {
+    const [ymd, hm] = (s.start || "").split(" ");
+    if (!ymd) continue;
+    const start = toMin(hm), end = Math.min(1440, start + (s.duration_min || 0));
+    minStart = Math.min(minStart, start); maxEnd = Math.max(maxEnd, end);
+    if (!byDay.has(ymd)) byDay.set(ymd, []);
+    byDay.get(ymd).push({ ...s, start, end });
+  }
+  const days = [...byDay.keys()].sort().reverse().slice(0, 8);
+
+  // shared whole-hour window (≥ 9h span) so days are comparable
+  let h0 = Math.floor(minStart / 60), h1 = Math.ceil(maxEnd / 60);
+  if (h1 - h0 < 9) { h0 = Math.max(0, h0 - Math.ceil((9 - (h1 - h0)) / 2)); h1 = Math.min(24, h0 + 9); }
+  const winStart = h0 * 60, span = (h1 - h0) * 60;
+  const pct = (min) => ((min - winStart) / span) * 100;
+  const step = h1 - h0 <= 12 ? 2 : 3;
+  const ticks = [];
+  for (let h = h0; h <= h1; h += step) ticks.push(h);
+
+  // continuous movement ridge (15-min MET buckets), shared scale across days
+  const profiles = d.activity_profile || {};
+  const RH = 28; // ridge SVG height units
+  let maxMet = 2;
+  days.forEach((y) => (profiles[y] || []).forEach((v, b) => {
+    const c = b * 15 + 7.5;
+    if (c >= winStart && c <= winStart + span) maxMet = Math.max(maxMet, v);
+  }));
+  const ridgeArea = (prof) => {
+    const pts = [];
+    (prof || []).forEach((v, b) => {
+      const c = b * 15 + 7.5;
+      if (c < winStart || c > winStart + span) return;
+      pts.push([((c - winStart) / span) * 100, RH - Math.min(1, (v || 0) / maxMet) * RH]);
+    });
+    if (pts.length < 2) return "";
+    return `${smoothPath(pts)} L${pts[pts.length - 1][0].toFixed(1)} ${RH} L${pts[0][0].toFixed(1)} ${RH} Z`;
+  };
+
+  const acto = el("div", "acto");
+  const lanes = el("div", "acto-lanes");
+  const grid = el("div", "acto-grid");
+  ticks.forEach((h) => { const i = el("i"); i.style.left = pct(h * 60) + "%"; grid.append(i); });
+  lanes.append(grid);
+
+  const dailyStats = d.activity_daily || {};
+  const dVals = days.map((y) => dailyStats[y]).filter(Boolean);
+  const maxSteps = Math.max(1, ...dVals.map((v) => v.steps || 0));
+  const maxKcal = Math.max(1, ...dVals.map((v) => v.active_kcal || 0));
+  days.forEach((ymd) => {
+    const p = ymd.split("-");
+    const dt = new Date(+p[0], +p[1] - 1, +p[2]);
+    const day = el("div", "acto-day");
+    day.append(el("div", "acto-label", `${WD[dt.getDay()]} ${fmtDay(ymd)}`));
+    const track = el("div", "acto-track");
+    const area = ridgeArea(profiles[ymd]);
+    track.innerHTML =
+      (area ? `<svg class="acto-ridge" viewBox="0 0 100 ${RH}" preserveAspectRatio="none"><path d="${area}"/></svg>` : "") +
+      `<i class="acto-base"></i>`;
+    byDay.get(ymd).sort((a, b) => a.start - b.start).forEach((s) => {
+      const work = s.is_workout >= 0.5;
+      const bar = el("div", "acto-bar" + (work ? " workout" : ""));
+      bar.style.left = pct(s.start) + "%";
+      bar.style.width = Math.max(0.5, (s.duration_min / span) * 100) + "%";
+      bar.title = `${s.label || "activity"} · ${s.duration_min} min · ${hhmm(s.start)}–${hhmm(s.end)} · tap for details`;
+      // build via DOM (textContent) so the label can't inject markup; actIcon()
+      // only ever returns a fixed basename, so the icon URL is safe.
+      const ico = el("span", "ic");
+      ico.style.setProperty("--i", `url(/icons/${actIcon(s.label)}.svg)`);
+      const name = el("span", "acto-name");
+      name.textContent = s.label || "";
+      bar.append(ico, name);
+      bar.addEventListener("click", () => openActDetail(s));
+      track.append(bar);
+    });
+    day.append(track);
+
+    // subtle per-day totals: steps (est.) + active calories
+    const ds = dailyStats[ymd];
+    const stat = el("div", "acto-stats");
+    if (ds) {
+      const sp = Math.max(4, (ds.steps / maxSteps) * 100);
+      const kc = Math.max(4, (ds.active_kcal / maxKcal) * 100);
+      const mini = (iconf, w, val, tip) =>
+        `<span class="astat" title="${tip}"><span class="ic" style="--i:url(/icons/${iconf}.svg)"></span><span class="ab"><i style="width:${w}%"></i></span><b>${val}</b></span>`;
+      stat.innerHTML =
+        mini("act-walking", sp, kfmt(ds.steps), `${Math.round(ds.steps).toLocaleString()} estimated steps`) +
+        mini("act-kcal", kc, Math.round(ds.active_kcal), `${Math.round(ds.active_kcal)} active · ${Math.round(ds.total_kcal)} total kcal`);
     }
-    const row = el("div", "session");
-    row.append(el("div", "when", `${(s.start || "").split(" ")[1] || ""}-${s.end || ""}`));
-    const what = el("div", "what");
-    what.append(el("span", "name", s.label || "activity"));
-    if (s.is_workout >= 0.5) what.append(el("span", "tag", "workout"));
-    row.append(what);
-    row.append(el("div", "dur", `${s.duration_min} min`));
-    list.append(row);
+    day.append(stat);
+    lanes.append(day);
   });
-  box.append(list);
+  acto.append(lanes);
+
+  const axis = el("div", "acto-axis");
+  axis.append(el("div", "acto-label", ""));
+  const ticksEl = el("div", "acto-ticks");
+  ticks.forEach((h) => { const t = el("span", null, String(h).padStart(2, "0")); t.style.left = pct(h * 60) + "%"; ticksEl.append(t); });
+  axis.append(ticksEl);
+  axis.append(el("div", "acto-stats-head", "steps · kcal"));
+  acto.append(axis);
+
+  box.append(acto);
+}
+
+// capability → glyph (mix of vendored phosphor + hugeicons)
+const CAP_ICON = {
+  "Daytime HR": "heartbeat", "SpO2": "wind", "Exercise HR": "person-simple-run",
+  "Real steps": "act-walking", "Cardio PPG (CVA)": "heartbeat",
+};
+const capIcon = (name) => CAP_ICON[name] || "cpu";
+
+async function doFeature(feature, name, currentOn, row) {
+  if (row.classList.contains("busy")) return;
+  const turnOn = !currentOn;
+  row.classList.add("busy");
+  row.classList.toggle("on", turnOn); // optimistic
+  try {
+    const j = await (await fetch("/api/feature", {
+      method: "POST",
+      headers: { "X-Oura-Dash": "1", "Content-Type": "application/json" },
+      body: JSON.stringify({ feature, mode: turnOn ? "automatic" : "off" }),
+    })).json();
+    if (j.ok) {
+      toast(`${name} turned ${turnOn ? "on" : "off"}. Wear the ring; data appears on the next sync.`, "ok");
+    } else {
+      toast(syncHint(j.message), "error");
+      row.classList.toggle("on", currentOn); // revert
+    }
+  } catch (e) {
+    toast("Couldn't reach the local server.", "error");
+    row.classList.toggle("on", currentOn);
+  }
+  row.classList.remove("busy");
 }
 
 function renderDevice(d) {
@@ -192,34 +394,41 @@ function renderDevice(d) {
 
   const stats = el("div", "dh-stats");
   const stat = (k, v, u) => el("div", "dh-stat", `<div class="k">${k}</div><div class="v">${v}<span class="u">${u || ""}</span></div>`);
-  stats.append(stat("Battery", dev.battery_pct != null ? dev.battery_pct : "—", "%"));
+  const bpct = dev.battery_pct;
+  const bstat = stat("Battery", bpct != null ? bpct : "—", "%");
+  if (bpct != null && bpct < 20) bstat.classList.add("low");
+  stats.append(bstat);
   const fresh = dev.fresh_hours != null ? (dev.fresh_hours < 1 ? "<1" : Math.round(dev.fresh_hours)) : "—";
   stats.append(stat("Last sync", fresh, " h ago"));
   stats.append(stat("History", num(dev.days_of_data), " days"));
   stats.append(stat("Events", (dev.total_events || 0).toLocaleString()));
   box.append(stats);
 
-  // identity (serial / firmware / mac) — read offline from the device table
-  const idItem = (k, v) => (v ? `<span><i>${k}</i>${v}</span>` : "");
-  const idHtml =
-    idItem("Ring ID", dev.serial) +
-    idItem("Firmware", dev.firmware) +
-    idItem("API", dev.api_version) +
-    idItem("Hardware", dev.hardware_id) +
-    idItem("MAC", dev.mac);
-  if (idHtml) box.append(el("div", "dh-ident", idHtml));
-
+  // left = data streams (what the ring is recording)
   const left = el("div");
-  left.append(el("p", "subhead", "What your ring is measuring"));
-  const chips = el("div", "chips");
-  (dev.measuring || []).forEach((m) => {
-    const c = el("span", "measure", `${m.on ? icon("heartbeat") : ""}${m.name}`);
-    c.setAttribute("data-on", String(!!m.on));
-    chips.append(c);
-  });
-  left.append(chips);
+  const streams = dev.streams || [];
+  if (streams.length) {
+    left.append(el("p", "subhead", "Data captured"));
+    const max = Math.max(...streams.map((s) => s.count), 1);
+    const sc = el("div", "streams");
+    streams.forEach((s) => {
+      const row = el("div", "stream");
+      const nm = el("span", "s-name");
+      nm.textContent = s.name;
+      const bar = el("span", "s-bar");
+      const fill = el("i");
+      fill.style.width = Math.max(3, (s.count / max) * 100) + "%";
+      bar.append(fill);
+      const val = el("span", "s-val");
+      val.textContent = s.count.toLocaleString();
+      row.append(nm, bar, val);
+      sc.append(row);
+    });
+    left.append(sc);
+  }
   box.append(left);
 
+  // right = insights
   const right = el("div");
   right.append(el("p", "subhead", "Insights available"));
   const ins = el("div", "insights");
@@ -233,6 +442,72 @@ function renderDevice(d) {
   });
   right.append(ins);
   box.append(right);
+
+  // ── advanced / debugging (collapsed by default) ──────────────────────────
+  const adv = el("details", "dh-advanced");
+  const sum = el("summary");
+  sum.innerHTML = `<span class="ic" style="--i:url(/icons/cpu.svg)"></span>Advanced &amp; debugging<span class="chev"></span>`;
+  adv.append(sum);
+  const ab = el("div", "adv-body");
+
+  // device identity + sync internals
+  ab.append(el("p", "subhead", "Device"));
+  const kv = el("div", "adv-kv");
+  const kvItem = (k, v) => `<div><i>${k}</i><b>${v}</b></div>`;
+  kv.innerHTML =
+    kvItem("Ring ID", esc(dev.serial || "—")) +
+    kvItem("Firmware", esc(dev.firmware || "—")) +
+    kvItem("API", esc(dev.api_version || "—")) +
+    kvItem("MAC", esc(dev.mac || "—")) +
+    kvItem("Hardware", esc(dev.hardware_id || "—")) +
+    kvItem("Battery", dev.battery_v != null ? dev.battery_v + " V" : "—") +
+    kvItem("Last sync", `${esc(dev.synced || "—")} ${esc(dev.synced_hm || "")}`) +
+    kvItem("Sync cursor", dev.next_cursor != null ? dev.next_cursor.toLocaleString() : "—") +
+    kvItem("History", `${num(dev.days_of_data)} days`);
+  ab.append(kv);
+
+  // capability toggles
+  ab.append(el("p", "subhead", "Capabilities · tap to toggle"));
+  const caps = el("div", "caps");
+  (dev.measuring || []).forEach((m) => {
+    const row = el("div", "cap" + (m.on ? " on" : ""));
+    const ic = el("span", "ic");
+    ic.style.setProperty("--i", `url(/icons/${capIcon(m.name)}.svg)`);
+    const nm = el("span", "cap-name");
+    nm.textContent = m.name;
+    const sw = el("span", "switch", "<i></i>");
+    row.append(ic, nm, sw);
+    if (m.feature) {
+      row.classList.add("interactive");
+      row.title = `Tap to turn ${m.on ? "off" : "on"} (connects to the ring)`;
+      row.addEventListener("click", () => doFeature(m.feature, m.name, m.on, row));
+    }
+    caps.append(row);
+  });
+  ab.append(caps);
+
+  const ev = dev.event_counts || [];
+  if (ev.length) {
+    ab.append(el("p", "subhead", `Event stream · ${ev.length} types`));
+    const emax = Math.max(...ev.map((e) => e.count), 1);
+    const tbl = el("div", "ev-table");
+    ev.forEach((e) => {
+      const row = el("div", "ev-row");
+      const nm = el("span", "ev-n");
+      nm.textContent = e.name;
+      const bar = el("span", "ev-bar");
+      const fi = el("i");
+      fi.style.width = Math.max(2, (e.count / emax) * 100) + "%";
+      bar.append(fi);
+      const c = el("span", "ev-c");
+      c.textContent = e.count.toLocaleString();
+      row.append(nm, bar, c);
+      tbl.append(row);
+    });
+    ab.append(tbl);
+  }
+  adv.append(ab);
+  box.append(adv);
 }
 
 function renderActions(d) {
@@ -256,7 +531,6 @@ function openProfile() {
   $("f-age").value = p.age ?? 30;
   $("f-height").value = p.height_m ?? 1.78;
   $("f-weight").value = p.weight_kg ?? 75;
-  $("f-ring").value = p.ring_size ?? 10;
   $("profile-dialog").showModal();
 }
 async function saveProfile(e) {
@@ -266,13 +540,22 @@ async function saveProfile(e) {
     age: +$("f-age").value,
     height_m: +$("f-height").value,
     weight_kg: +$("f-weight").value,
-    ring_size: +$("f-ring").value,
+    ring_size: (CURRENT_PROFILE && CURRENT_PROFILE.ring_size) || 10, // not on the ring; kept default
   };
   $("profile-save").disabled = true;
   try {
-    await fetch("/api/profile", { method: "POST", headers: { "X-Oura-Dash": "1", "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const r = await fetch("/api/profile", { method: "POST", headers: { "X-Oura-Dash": "1", "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const j = await r.json().catch(() => ({}));
+    // the server replies 200 with an { error } body on write failures — surface it
+    // and keep the dialog open instead of pretending the save succeeded.
+    if (!r.ok || j.error) {
+      toast(j.error || "Couldn't save profile.", "error");
+      return;
+    }
     $("profile-dialog").close();
     await load(); // re-runs CVA with the new demographics
+  } catch {
+    toast("Couldn't reach the local server.", "error");
   } finally {
     $("profile-save").disabled = false;
   }
@@ -283,7 +566,11 @@ function toast(msg, kind = "info") {
   let t = $("toast");
   if (!t) { t = el("div", "toast"); t.id = "toast"; document.body.append(t); }
   t.className = "toast " + kind;
-  t.textContent = msg;
+  // status dot + message (textContent on the span keeps the message injection-safe)
+  const dot = el("span", "toast-dot");
+  const text = el("span", "toast-msg");
+  text.textContent = msg;
+  t.replaceChildren(dot, text);
   requestAnimationFrame(() => t.classList.add("show"));
   clearTimeout(toast._t);
   toast._t = setTimeout(() => t.classList.remove("show"), kind === "error" ? 8000 : 3800);

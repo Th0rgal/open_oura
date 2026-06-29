@@ -8,6 +8,9 @@ device-relative deciseconds anchored to the latest event's captured_unix.
 
 Usage: python tools/run_sleep_model.py START_DS END_DS [DB] [TZ=1]
        (no args → uses the bedtime_period in the DB)
+       --batch reads a JSON array of [start_ds, end_ds] pairs from stdin and emits
+       a JSON array of results, loading the model + scanning the DB only once (the
+       dashboard uses this to score every night in a single process).
 """
 import sys, json, sqlite3, datetime
 from pathlib import Path
@@ -21,9 +24,10 @@ MODEL = str(REPO / "notes" / "models" / "sleepnet_moonstone_1_2_0.pt")
 STAGE = {1: "DEEP", 2: "LIGHT", 3: "REM", 4: "WAKE"}
 
 JSON = "--json" in sys.argv
-args = [a for a in sys.argv[1:] if a != "--json"]
+BATCH = "--batch" in sys.argv
+args = [a for a in sys.argv[1:] if a not in ("--json", "--batch")]
 start_ds = end_ds = None
-if len(args) >= 2 and args[0].isdigit():
+if not BATCH and len(args) >= 2 and args[0].isdigit():
     start_ds, end_ds = int(args[0]), int(args[1])
     rest = args[2:]
 else:
@@ -39,72 +43,65 @@ rows = con.execute("SELECT ring_timestamp, tag, decoded_json, captured_unix FROM
 max_ds, anchor_unix = max(((r[0], r[3]) for r in rows), key=lambda x: x[0])
 def ms(ds):  # device deciseconds -> absolute epoch ms (int64), consistent across signals
     return int(anchor_unix * 1000 - (max_ds - ds) * 100)
-
-if start_ds is None:  # default: most recent bedtime_period in the DB (matches run_models.last_bedtime)
-    bt = con.execute("SELECT decoded_json FROM events WHERE tag=118 ORDER BY ring_timestamp DESC").fetchone()
-    if bt is None:
-        raise SystemExit("no bedtime_period (tag 0x76) in DB — pass start/end deciseconds or sync overnight data first")
-    v = json.loads(bt[0])
-    start_ds, end_ds = v["bedtime_start_ds"], v["bedtime_end_ds"]
-
-lo, hi = start_ds - 6000, end_ds + 6000  # ±10 min margin
-beats, acm, temp = [], [], []
-for ds, tag, js, _ in rows:
-    if not (lo <= ds <= hi):
-        continue
-    v = json.loads(js)
-    if tag in (0x60, 0x80) and v.get("ibi_ms"):  # ibi_and_amplitude + green_ibi_quality
-        ibi = v["ibi_ms"]; amp = v.get("amplitude", [0] * len(ibi))
-        t = ms(ds); acc = 0
-        for i, x in enumerate(ibi):
-            if x <= 0:  # zero/negative IBI can't advance the beat clock — skip (matches run_bdi)
-                continue
-            acc += x
-            valid = 1 if 300 <= x <= 2000 else 0
-            beats.append((t + acc, float(x), float(amp[i] if i < len(amp) else 0), valid))
-    elif tag == 0x47 and v.get("motion_seconds") is not None:
-        acm.append((ms(ds), float(v["motion_seconds"])))
-    elif tag == 0x46 and v.get("temps_c"):
-        temp.append((ms(ds), float(v["temps_c"][0])))
-
-beats.sort(); acm.sort(); temp.sort()
-if not JSON:
-    print(f"window ds [{start_ds}..{end_ds}] ({(end_ds-start_ds)/10/3600:.1f}h)  "
-          f"beats={len(beats)} acm={len(acm)} temp={len(temp)}")
-if not beats or not any(b[3] == 1 for b in beats):
-    sys.exit("not enough valid IBI in this window")
-
-def col(seq, i):
-    return [r[i] for r in seq]
-ibi_ts = torch.tensor(col(beats, 0), dtype=torch.int64)
-ibi_val = torch.tensor([[b[1], b[2], b[3]] for b in beats], dtype=torch.float32)
-acm_ts = torch.tensor(col(acm, 0), dtype=torch.int64)
-acm_val = torch.tensor([[a[1]] for a in acm], dtype=torch.float32)
-temp_ts = torch.tensor(col(temp, 0), dtype=torch.int64)
-temp_val = torch.tensor([[t[1]] for t in temp], dtype=torch.float32)
-bedtime = torch.tensor([ms(start_ds), ms(end_ds)], dtype=torch.int64)
-spo2_val = torch.empty(0, 1, dtype=torch.float32)
-spo2_ts = torch.empty(0, dtype=torch.int64)
-scalars = torch.tensor([35, 25, 0, 0, 0], dtype=torch.float32)
-tst = torch.tensor([300.0], dtype=torch.float32)
-
-m = torch.jit.load(MODEL, map_location="cpu").eval()
-with torch.no_grad():
-    ts, staging, apnea, spo2_out, metrics, debug = m(
-        bedtime, ibi_val, ibi_ts, acm_val, acm_ts, temp_val, temp_ts,
-        spo2_val, spo2_ts, scalars, tst)
-
-stages = [int(s) for s in staging[:, 0].tolist()]
-n = len(stages)
-if n == 0:
-    sys.exit("SleepNet-moonstone returned zero epochs for this window")
-mins = {k: stages.count(c) * 0.5 for c, k in STAGE.items()}
-asleep = n * 0.5 - mins["WAKE"]
-in_bed = n * 0.5
 def hm(ms_):
     return datetime.datetime.utcfromtimestamp(ms_/1000 + TZ*3600).strftime("%H:%M")
 
-if JSON:
+# load the SleepNet (moonstone) model once; batch mode reuses it across nights.
+MODEL_M = torch.jit.load(MODEL, map_location="cpu").eval()
+
+
+def score_window(start_ds, end_ds):
+    """Score one bedtime window. Returns (out_dict, ts, stages) or (err_str, None, None)."""
+    lo, hi = start_ds - 6000, end_ds + 6000  # ±10 min margin
+    beats, acm, temp = [], [], []
+    for ds, tag, js, _ in rows:
+        if not (lo <= ds <= hi):
+            continue
+        v = json.loads(js)
+        if tag in (0x60, 0x80) and v.get("ibi_ms"):  # ibi_and_amplitude + green_ibi_quality
+            ibi = v["ibi_ms"]; amp = v.get("amplitude", [0] * len(ibi))
+            t = ms(ds); acc = 0
+            for i, x in enumerate(ibi):
+                if x <= 0:  # zero/negative IBI can't advance the beat clock — skip (matches run_bdi)
+                    continue
+                acc += x
+                valid = 1 if 300 <= x <= 2000 else 0
+                beats.append((t + acc, float(x), float(amp[i] if i < len(amp) else 0), valid))
+        elif tag == 0x47 and v.get("motion_seconds") is not None:
+            acm.append((ms(ds), float(v["motion_seconds"])))
+        elif tag == 0x46 and v.get("temps_c"):
+            temp.append((ms(ds), float(v["temps_c"][0])))
+
+    beats.sort(); acm.sort(); temp.sort()
+    if not beats or not any(b[3] == 1 for b in beats):
+        return "not enough valid IBI in this window", None, None
+
+    def col(seq, i):
+        return [r[i] for r in seq]
+    ibi_ts = torch.tensor(col(beats, 0), dtype=torch.int64)
+    ibi_val = torch.tensor([[b[1], b[2], b[3]] for b in beats], dtype=torch.float32)
+    acm_ts = torch.tensor(col(acm, 0), dtype=torch.int64)
+    acm_val = torch.tensor([[a[1]] for a in acm], dtype=torch.float32)
+    temp_ts = torch.tensor(col(temp, 0), dtype=torch.int64)
+    temp_val = torch.tensor([[t[1]] for t in temp], dtype=torch.float32)
+    bedtime = torch.tensor([ms(start_ds), ms(end_ds)], dtype=torch.int64)
+    spo2_val = torch.empty(0, 1, dtype=torch.float32)
+    spo2_ts = torch.empty(0, dtype=torch.int64)
+    scalars = torch.tensor([35, 25, 0, 0, 0], dtype=torch.float32)
+    tst = torch.tensor([300.0], dtype=torch.float32)
+
+    with torch.no_grad():
+        ts, staging, apnea, spo2_out, metrics, debug = MODEL_M(
+            bedtime, ibi_val, ibi_ts, acm_val, acm_ts, temp_val, temp_ts,
+            spo2_val, spo2_ts, scalars, tst)
+
+    stages = [int(s) for s in staging[:, 0].tolist()]
+    n = len(stages)
+    if n == 0:
+        return "SleepNet-moonstone returned zero epochs for this window", None, None
+    mins = {k: stages.count(c) * 0.5 for c, k in STAGE.items()}
+    asleep = n * 0.5 - mins["WAKE"]
+    in_bed = n * 0.5
     out = {
         "start_ds": start_ds, "end_ds": end_ds,
         "start_local": hm(int(ts[0])), "end_local": hm(int(ts[-1])),
@@ -115,14 +112,42 @@ if JSON:
     for c, k in STAGE.items():
         out[k.lower() + "_min"] = mins[k]
         out[k.lower() + "_pct"] = round(100 * mins[k] / in_bed)
+    return out, ts, stages
+
+
+if BATCH:
+    # one process, every night: read [[start,end], ...] from stdin, emit a JSON
+    # array (null for any window that couldn't be scored).
+    pairs = json.load(sys.stdin)
+    results = []
+    for p in pairs:
+        out, _, _ = score_window(int(p[0]), int(p[1]))
+        results.append(out if isinstance(out, dict) else None)
+    print(json.dumps(results))
+    sys.exit(0)
+
+if start_ds is None:  # default: most recent bedtime_period in the DB (matches run_models.last_bedtime)
+    bt = con.execute("SELECT decoded_json FROM events WHERE tag=118 ORDER BY ring_timestamp DESC").fetchone()
+    if bt is None:
+        raise SystemExit("no bedtime_period (tag 0x76) in DB — pass start/end deciseconds or sync overnight data first")
+    v = json.loads(bt[0])
+    start_ds, end_ds = v["bedtime_start_ds"], v["bedtime_end_ds"]
+
+out, ts, stages = score_window(start_ds, end_ds)
+if not isinstance(out, dict):
+    sys.exit(out)  # error string
+
+if JSON:
     print(json.dumps(out))
     sys.exit(0)
 
+n = out["epochs"]
+in_bed = out["in_bed_min"]
+print(f"window ds [{start_ds}..{end_ds}] ({(end_ds-start_ds)/10/3600:.1f}h)")
 print(f"\nHypnogram: {n} epochs = {n*0.5:.0f} min in bed")
 for k in ["DEEP", "LIGHT", "REM", "WAKE"]:
-    pct = 100 * mins[k] / in_bed if n else 0
-    print(f"  {k:<6} {mins[k]:>6.0f} min  ({pct:4.0f}%)")
-print(f"  asleep {asleep:.0f} min,  sleep efficiency {100*asleep/in_bed:.0f}%")
+    print(f"  {k:<6} {out[k.lower()+'_min']:>6.0f} min  ({out[k.lower()+'_pct']:4.0f}%)")
+print(f"  asleep {out['asleep_min']:.0f} min,  sleep efficiency {out['efficiency_pct']:.0f}%")
 
 # compact timeline: one glyph per ~10 min (20 epochs), majority stage
 g = {1: "D", 2: "L", 3: "R", 4: "W"}

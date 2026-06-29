@@ -16,11 +16,12 @@
   --warn: #c9842b;
   --shadow: 0 1px 2px rgba(17, 20, 24, 0.04), 0 8px 24px rgba(17, 20, 24, 0.05);
 
-  /* sleep stages (cool sleep + one warm wake) */
-  --deep: #2c3a87;
-  --light: #6f8cf0;
-  --rem: #25b3c0;
-  --wake: #e0a44e;
+  /* sleep stages — vivid hues, lightness-led (deep darkest → awake lightest);
+     rendered glassy (lower opacity) on the hypnogram so the saturation reads soft */
+  --deep: #454fb0;
+  --light: #8693d6;
+  --rem: #4fa6b0;
+  --wake: #d2b06e;
 
   --radius: 16px;
   --radius-sm: 10px;
@@ -32,6 +33,15 @@
   /* monochrome curves */
   --spark: var(--muted);
   --spark-fill: color-mix(in oklab, var(--muted) 9%, transparent);
+
+  /* liquid glass + "lit from above" (open_agent + aave glass principles) */
+  --glass-bg: color-mix(in oklab, var(--surface) 68%, transparent);
+  --glass-blur: saturate(180%) blur(18px);
+  --sheen: inset 0 1px 0 0 rgb(255 255 255 / 0.85);          /* 1px top bevel = light from above */
+  --sheen-strong: inset 0 1px 0 0 rgb(255 255 255 / 0.95);
+  --rim: inset 0 1px 0 0 rgb(255 255 255 / 0.72), inset 0 0 0 1px rgb(255 255 255 / 0.16);
+  --glow: color-mix(in oklab, var(--accent) 12%, transparent);
+  --glow-2: color-mix(in oklab, var(--light) 12%, transparent);
 }
 
 /* mask-based icon: inherits text color, themes automatically */
@@ -60,10 +70,15 @@
     --good: #45c08a;
     --warn: #e0a44e;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 32px rgba(0, 0, 0, 0.36);
-    --deep: #4659c0;
-    --light: #7e98f3;
-    --rem: #34c6d4;
-    --wake: #e6ad5c;
+    --deep: #5d6989;
+    --light: #8c97b3;
+    --rem: #6fa1a8;
+    --wake: #c1b08f;
+    --sheen: inset 0 1px 0 0 rgb(255 255 255 / 0.07);
+    --sheen-strong: inset 0 1px 0 0 rgb(255 255 255 / 0.11);
+    --rim: inset 0 1px 0 0 rgb(255 255 255 / 0.13), inset 0 0 0 1px rgb(255 255 255 / 0.05);
+    --glow: color-mix(in oklab, var(--accent) 15%, transparent);
+    --glow-2: color-mix(in oklab, var(--light) 13%, transparent);
   }
 }
 :root[data-theme="dark"] {
@@ -80,10 +95,15 @@
   --good: #45c08a;
   --warn: #e0a44e;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 32px rgba(0, 0, 0, 0.36);
-  --deep: #4659c0;
-  --light: #7e98f3;
-  --rem: #34c6d4;
-  --wake: #e6ad5c;
+  --deep: #5d6989;
+  --light: #8c97b3;
+  --rem: #6fa1a8;
+  --wake: #c1b08f;
+  --sheen: inset 0 1px 0 0 rgb(255 255 255 / 0.07);
+  --sheen-strong: inset 0 1px 0 0 rgb(255 255 255 / 0.11);
+  --rim: inset 0 1px 0 0 rgb(255 255 255 / 0.13), inset 0 0 0 1px rgb(255 255 255 / 0.05);
+  --glow: color-mix(in oklab, var(--accent) 15%, transparent);
+  --glow-2: color-mix(in oklab, var(--light) 13%, transparent);
 }
 
 * { box-sizing: border-box; }
@@ -93,7 +113,12 @@ html { -webkit-text-size-adjust: 100%; }
 body {
   margin: 0;
   font-family: var(--sans);
-  background: var(--bg);
+  /* ambient canvas glow: two soft accent-tinted washes, viewport-fixed so the
+     surface isn't dead-flat (open_agent's --canvas-glow idea) */
+  background:
+    radial-gradient(72% 52% at 50% -12%, var(--glow), transparent 62%) fixed,
+    radial-gradient(46% 40% at 104% 2%, color-mix(in oklab, var(--glow) 55%, transparent), transparent 58%) fixed,
+    var(--bg);
   color: var(--text);
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
@@ -103,15 +128,25 @@ body {
 .wrap {
   max-width: var(--maxw);
   margin: 0 auto;
-  padding: clamp(20px, 4vw, 44px) clamp(16px, 4vw, 32px) 64px;
+  padding: clamp(20px, 4vw, 44px) clamp(16px, 4vw, 32px) clamp(56px, 9vh, 104px);
 }
 
-/* ── header ─────────────────────────────────────────────── */
+/* ── header (sticky liquid-glass bar) ───────────────────── */
 .top {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  position: sticky;
+  top: 12px;
+  z-index: 30;
   margin-bottom: 26px;
+  padding: 9px 11px 9px 16px;
+  border-radius: 18px;
+  background: var(--glass-bg);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--line);
+  box-shadow: var(--sheen), 0 6px 22px rgb(17 20 24 / 0.06);
 }
 .brand { display: flex; align-items: center; gap: 11px; }
 .mark {
@@ -127,16 +162,20 @@ body {
   display: inline-flex; align-items: center; gap: 6px;
   font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums;
   padding: 6px 11px; border-radius: 999px; border: 1px solid var(--line);
+  background: color-mix(in oklab, var(--surface) 50%, transparent);
+  box-shadow: var(--sheen);
 }
 .batt .ic { font-size: 15px; }
 .batt.low { color: var(--warn); }
 .action {
   display: inline-flex; align-items: center; gap: 7px;
   font-family: var(--sans); font-size: 13px; font-weight: 520;
-  color: var(--text); background: var(--surface);
+  color: var(--text);
+  background: color-mix(in oklab, var(--surface) 55%, transparent);
   border: 1px solid var(--line); border-radius: 999px;
   padding: 6px 13px; cursor: pointer;
-  transition: border-color 0.16s ease, transform 0.1s ease;
+  box-shadow: var(--sheen);
+  transition: border-color 0.16s ease, transform 0.1s ease, background 0.16s ease;
 }
 .action:hover { border-color: color-mix(in oklab, var(--accent) 38%, var(--line)); }
 .action:active { transform: scale(0.97); }
@@ -176,14 +215,14 @@ body {
   border-radius: var(--radius);
   padding: 16px 18px 14px;
   min-height: 116px;
-  box-shadow: var(--shadow);
+  box-shadow: var(--sheen), var(--shadow);
   display: flex; flex-direction: column; gap: 4px;
   transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
 }
 @media (prefers-reduced-motion: no-preference) {
   .tile:hover, .panel:hover { transform: translateY(-2px); }
 }
-.tile:hover { box-shadow: 0 2px 4px rgba(17,20,24,0.05), 0 14px 36px rgba(17,20,24,0.09); border-color: color-mix(in oklab, var(--accent) 28%, var(--line)); }
+.tile:hover { box-shadow: var(--sheen-strong), 0 2px 4px rgba(17,20,24,0.05), 0 16px 40px rgba(17,20,24,0.10); border-color: color-mix(in oklab, var(--accent) 28%, var(--line)); }
 .tile .label { font-size: 10.5px; color: var(--muted); letter-spacing: 0.1em; text-transform: uppercase; font-weight: 580; }
 .tile .value {
   font-family: var(--mono);
@@ -196,8 +235,12 @@ body {
 .tile .delta.up { color: var(--good); }
 .tile .delta.down { color: var(--warn); }
 .tile .delta.flat { color: var(--faint); }
-.tile .spark { margin-top: 8px; height: 26px; }
+.tile .spark { margin-top: 8px; height: 26px; position: relative; }
 .tile .spark svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.tile .spark-dot {
+  position: absolute; right: 0; width: 5px; height: 5px; border-radius: 50%;
+  background: var(--spark); transform: translate(50%, -50%);
+}
 
 /* ── panels ─────────────────────────────────────────────── */
 .panel {
@@ -206,7 +249,7 @@ body {
   border-radius: var(--radius);
   padding: 22px 24px;
   margin-top: 16px;
-  box-shadow: var(--shadow);
+  box-shadow: var(--sheen), var(--shadow);
   transition: transform 0.18s ease, box-shadow 0.18s ease;
 }
 .panel-head {
@@ -236,11 +279,19 @@ body {
 .night .right { min-width: 0; }
 
 .hyp {
+  position: relative;
   display: flex; height: 38px; width: 100%;
   border-radius: var(--radius-sm); overflow: hidden;
   background: var(--surface-2);
+  box-shadow: var(--sheen), inset 0 0 0 1px var(--line-soft), 0 2px 8px rgb(17 20 24 / 0.06);
+  filter: saturate(1.55); /* dial vividness without re-tuning every token */
 }
-.hyp i { display: block; height: 100%; flex: 1 1 0; }
+/* glass gloss: bright top highlight fading to a faint bottom shade */
+.hyp::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none; border-radius: inherit;
+  background: linear-gradient(180deg, rgb(255 255 255 / 0.30), rgb(255 255 255 / 0.07) 36%, rgb(0 0 0 / 0) 58%, rgb(0 0 0 / 0.09));
+}
+.hyp i { display: block; height: 100%; flex: 1 1 0; opacity: 0.68; } /* more transparent = glassy, softens the vivid hues */
 .hyp i.s1 { background: var(--deep); } .hyp i.s2 { background: var(--light); }
 .hyp i.s3 { background: var(--rem); }  .hyp i.s4 { background: var(--wake); }
 
@@ -275,26 +326,59 @@ body {
 .gauge > i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), color-mix(in oklab, var(--accent) 60%, var(--light))); border-radius: 999px; }
 .scale { display: flex; justify-content: space-between; font-size: 11px; color: var(--faint); margin-top: 6px; }
 
-/* ── activity ───────────────────────────────────────────── */
-.sessions { display: flex; flex-direction: column; }
-.day-head {
-  font-size: 10.5px; color: var(--faint); font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;
-  margin: 18px 0 4px;
+/* ── activity actogram (24h time axis per day) ──────────── */
+.acto { --acto-gutter: 84px; --acto-stats: 124px; }
+.acto-lanes { position: relative; }
+.acto-grid { position: absolute; top: 0; bottom: 0; left: var(--acto-gutter); right: var(--acto-stats); pointer-events: none; }
+.acto-grid i { position: absolute; top: 2px; bottom: 2px; width: 1px; background: var(--line-soft); transform: translateX(-0.5px); }
+.acto-day { display: grid; grid-template-columns: var(--acto-gutter) 1fr var(--acto-stats); align-items: center; height: 44px; }
+.acto-day + .acto-day { border-top: 1px solid var(--line-soft); }
+/* per-day totals as a compact mini bar chart (steps + active kcal) */
+.acto-stats { display: flex; flex-direction: column; justify-content: center; gap: 6px; padding-left: 14px; }
+.astat { display: grid; grid-template-columns: 13px 1fr 34px; align-items: center; gap: 7px; }
+.astat .ic { font-size: 12px; color: var(--faint); }
+.ab { height: 5px; border-radius: 999px; background: var(--surface-2); overflow: hidden; }
+.ab i { display: block; height: 100%; border-radius: 999px; background: color-mix(in oklab, var(--text) 26%, transparent); }
+.astat b { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 11px; font-weight: 560; color: var(--muted); text-align: right; }
+.acto-stats-head { text-align: right; font-size: 9px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--faint); padding-left: 14px; }
+@media (max-width: 640px) { .acto { --acto-stats: 88px; } .astat b { display: none; } }
+.acto-label {
+  font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 11px;
+  color: var(--faint); letter-spacing: 0.01em; white-space: nowrap;
 }
-.day-head:first-child { margin-top: 0; }
-.session {
-  display: grid; grid-template-columns: 86px 1fr auto; gap: 14px; align-items: center;
-  padding: 9px 0; border-top: 1px solid var(--line-soft);
+.acto-track { position: relative; height: 30px; }
+/* continuous movement ridge (MET) behind the session marks */
+.acto-ridge { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.acto-ridge path { fill: color-mix(in oklab, var(--text) 7%, transparent); }
+.acto-base { position: absolute; left: 0; right: 0; bottom: 0; height: 1px; background: var(--line-soft); }
+.acto-bar {
+  position: absolute; top: 5px; height: 20px; min-width: 20px; border-radius: 6px;
+  display: flex; align-items: center; gap: 2px; padding: 0 2px; overflow: hidden;
+  color: var(--muted);
+  background: color-mix(in oklab, var(--surface) 78%, transparent);
+  border: 1px solid color-mix(in oklab, var(--text) 12%, transparent);
+  box-shadow: var(--sheen);
 }
-.day-head + .session { border-top: 0; }
-.session .when { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 12.5px; color: var(--muted); }
-.session .what { display: flex; align-items: center; gap: 9px; min-width: 0; }
-.session .name { font-weight: 540; font-size: 14px; text-transform: capitalize; }
-.session .tag {
-  font-size: 10.5px; padding: 1px 8px; border-radius: 999px; text-transform: uppercase;
-  letter-spacing: 0.06em; border: 1px solid var(--line); color: var(--muted); font-weight: 560;
+.acto-bar.workout {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: color-mix(in oklab, var(--accent) 32%, transparent);
 }
-.session .dur { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 13px; color: var(--muted); }
+.acto-bar .ic { font-size: 12.5px; flex: none; margin-left: 2px; }
+.acto-name {
+  font-size: 10px; padding: 0 4px 0 2px; white-space: nowrap; line-height: 1;
+  color: inherit; text-transform: capitalize; letter-spacing: 0.01em;
+}
+.acto-bar.workout .acto-name { font-weight: 580; }
+.acto-axis { display: grid; grid-template-columns: var(--acto-gutter) 1fr var(--acto-stats); margin-top: 7px; }
+.acto-bar { cursor: pointer; }
+.acto-bar:hover { filter: brightness(1.04); border-color: color-mix(in oklab, var(--accent) 45%, var(--line)); }
+.acto-ticks { position: relative; height: 13px; right: 2px; }
+.acto-ticks span {
+  position: absolute; transform: translateX(-50%);
+  font-family: var(--mono); font-size: 10px; color: var(--faint); letter-spacing: 0.04em;
+}
+@media (max-width: 560px) { .acto { --acto-gutter: 62px; } .acto-label { font-size: 10px; } }
 
 /* ── device & data health ───────────────────────────────── */
 .device { display: grid; grid-template-columns: repeat(2, 1fr); gap: 22px 28px; }
@@ -306,15 +390,42 @@ body {
 .dh-stat .v .u { font-size: 12px; color: var(--faint); margin-left: 3px; }
 
 .subhead { font-size: 11px; color: var(--faint); letter-spacing: 0.06em; text-transform: uppercase; margin: 0 0 11px; }
-.chips { display: flex; flex-wrap: wrap; gap: 8px; }
-.measure {
-  display: inline-flex; align-items: center; gap: 7px;
-  font-size: 13px; padding: 6px 11px; border-radius: 999px;
-  border: 1px solid var(--line); background: var(--surface-2);
+.subhead.st-head { margin-top: 18px; }
+
+/* capability toggles */
+.caps { display: flex; flex-direction: column; gap: 2px; }
+.cap {
+  display: grid; grid-template-columns: 18px 1fr auto; align-items: center; gap: 10px;
+  padding: 7px 4px; border-radius: 8px; color: var(--faint);
 }
-.measure .ic { font-size: 12.5px; color: var(--muted); }
-.measure[data-on="true"] { color: var(--text); }
-.measure[data-on="false"] { color: var(--faint); }
+.cap .ic { font-size: 15px; }
+.cap-name { font-size: 13px; color: inherit; }
+.cap.on { color: var(--text); }
+.cap.interactive { cursor: pointer; transition: background 0.14s ease; }
+.cap.interactive:hover { background: color-mix(in oklab, var(--text) 4%, transparent); }
+.switch {
+  width: 30px; height: 18px; border-radius: 999px; flex: none; position: relative;
+  background: color-mix(in oklab, var(--text) 14%, transparent);
+  transition: background 0.18s ease;
+}
+.switch i {
+  position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.3); transition: transform 0.18s ease;
+}
+.cap.on .switch { background: var(--accent); }
+.cap.on .switch i { transform: translateX(12px); }
+.cap.busy .switch { opacity: 0.55; }
+.cap.busy .switch i { animation: pulse 0.8s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: 0.4; } }
+@media (prefers-reduced-motion: reduce) { .cap.busy .switch i { animation: none; } }
+
+/* data streams bar chart */
+.streams { display: flex; flex-direction: column; gap: 8px; }
+.stream { display: grid; grid-template-columns: 84px 1fr 54px; gap: 10px; align-items: center; }
+.stream .s-name { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.stream .s-bar { height: 6px; border-radius: 999px; background: var(--surface-2); overflow: hidden; }
+.stream .s-bar i { display: block; height: 100%; border-radius: 999px; background: color-mix(in oklab, var(--text) 24%, transparent); }
+.stream .s-val { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 11.5px; color: var(--faint); text-align: right; }
 
 .insights { display: flex; flex-direction: column; gap: 1px; }
 .insight {
@@ -335,7 +446,8 @@ body {
 /* ── footer ─────────────────────────────────────────────── */
 .foot {
   display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px;
-  margin-top: 28px; font-size: 12px; color: var(--faint);
+  margin-top: 32px; padding-top: 20px; border-top: 1px solid var(--line-soft);
+  font-size: 12px; color: var(--faint);
 }
 #foot-meta { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 
@@ -376,9 +488,10 @@ body {
 /* ── profile dialog ─────────────────────────────────────── */
 .dialog {
   border: 1px solid var(--line); border-radius: var(--radius);
-  background: var(--surface); color: var(--text);
+  background: color-mix(in oklab, var(--surface) 82%, transparent); color: var(--text);
+  -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
   padding: 0; width: min(420px, calc(100vw - 32px));
-  box-shadow: 0 24px 60px rgba(0,0,0,0.28);
+  box-shadow: var(--rim), 0 24px 60px rgba(0,0,0,0.30);
 }
 .dialog::backdrop { background: rgba(10,12,16,0.42); backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px); }
 .dialog form { padding: 22px 24px 20px; }
@@ -418,14 +531,86 @@ body {
 .toast {
   position: fixed; left: 50%; bottom: 22px; transform: translate(-50%, 14px);
   max-width: min(460px, calc(100vw - 28px));
-  background: var(--surface); color: var(--text);
-  border: 1px solid var(--line); border-left: 3px solid var(--faint);
+  display: flex; align-items: center; gap: 11px;
+  background: color-mix(in oklab, var(--surface) 78%, transparent); color: var(--text);
+  -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--line);
   border-radius: 12px; padding: 12px 16px; font-size: 13.5px; line-height: 1.42;
-  box-shadow: 0 16px 40px rgba(0,0,0,0.26);
+  box-shadow: var(--sheen), 0 16px 40px rgba(0,0,0,0.26);
   opacity: 0; pointer-events: none; z-index: 60;
   transition: opacity 0.22s ease, transform 0.22s ease;
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
-.toast.error { border-left-color: var(--warn); }
-.toast.ok { border-left-color: var(--good); }
+/* leading status dot with a soft halo conveys state without an accent bar */
+.toast-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
+.toast-msg { flex: 1 1 auto; min-width: 0; }
+.toast.error .toast-dot { background: var(--warn); box-shadow: 0 0 0 4px color-mix(in oklab, var(--warn) 16%, transparent); }
+.toast.ok .toast-dot { background: var(--good); box-shadow: 0 0 0 4px color-mix(in oklab, var(--good) 16%, transparent); }
 @media (prefers-reduced-motion: reduce) { .toast { transition: opacity 0.22s ease; transform: translate(-50%, 0); } }
+
+/* ── reduced transparency: drop glass, keep solid surfaces ──────────────── */
+@media (prefers-reduced-transparency: reduce) {
+  .top, .batt, .action, .dialog, .toast {
+    -webkit-backdrop-filter: none; backdrop-filter: none;
+    background: var(--surface);
+  }
+  body { background: var(--bg); }
+}
+
+/* ── activity session detail ────────────────────────────── */
+.act-dialog form { padding: 20px 22px 18px; }
+.ad-head { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+.ad-head .ic { font-size: 22px; color: var(--accent); }
+.ad-head h3 { font-family: var(--serif); font-weight: 400; font-size: 23px; margin: 0; text-transform: capitalize; }
+.ad-tag { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--accent); border: 1px solid color-mix(in oklab, var(--accent) 35%, transparent); border-radius: 999px; padding: 2px 8px; margin-left: auto; }
+.ad-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 13px 18px; margin-bottom: 16px; }
+.ad-grid .kv .k { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint); }
+.ad-grid .kv .v { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 16px; color: var(--text); margin-top: 2px; }
+.t3list { display: flex; flex-direction: column; gap: 7px; margin-bottom: 14px; }
+.t3 { display: grid; grid-template-columns: 90px 1fr 38px; gap: 10px; align-items: center; }
+.t3n { font-size: 12.5px; color: var(--muted); text-transform: capitalize; }
+.t3bar { height: 6px; border-radius: 999px; background: var(--surface-2); overflow: hidden; }
+.t3bar i { display: block; height: 100%; background: color-mix(in oklab, var(--accent) 55%, transparent); border-radius: 999px; }
+.t3p { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 12px; color: var(--faint); text-align: right; }
+.ad-foot { font-size: 11px; color: var(--faint); line-height: 1.4; margin: 0 0 14px; }
+.ad-muted { font-size: 12.5px; color: var(--faint); }
+
+/* ── battery gauge ──────────────────────────────────────── */
+.batt-viz {
+  position: relative; display: inline-block; width: 40px; height: 18px; margin-top: 9px;
+  border: 1.5px solid var(--muted); border-radius: 4px;
+}
+.batt-viz::after { content: ""; position: absolute; right: -4px; top: 5px; width: 2.5px; height: 7px; background: var(--muted); border-radius: 0 2px 2px 0; }
+.batt-viz i { position: absolute; left: 2px; top: 2px; bottom: 2px; width: calc((100% - 4px) * var(--p)); min-width: 2px; background: var(--text); border-radius: 2px; transition: width 0.3s ease; }
+.batt-viz.low i { background: var(--warn); }
+
+/* ── advanced / debugging disclosure ────────────────────── */
+.dh-advanced { grid-column: 1 / -1; margin-top: 8px; border-top: 1px solid var(--line-soft); padding-top: 16px; }
+.dh-advanced > summary {
+  display: flex; align-items: center; gap: 8px; cursor: pointer; list-style: none; user-select: none;
+  font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--faint); font-weight: 600;
+}
+.dh-advanced > summary::-webkit-details-marker { display: none; }
+.dh-advanced > summary .ic { font-size: 14px; }
+.dh-advanced > summary:hover { color: var(--muted); }
+.dh-advanced .chev { width: 6px; height: 6px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(45deg); margin-left: auto; transition: transform 0.2s ease; }
+.dh-advanced[open] .chev { transform: rotate(-135deg); }
+.adv-body { margin-top: 16px; }
+.adv-body .subhead { margin: 18px 0 11px; }
+.adv-body .subhead:first-child { margin-top: 0; }
+.adv-kv { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px 18px; }
+@media (max-width: 560px) { .adv-kv { grid-template-columns: 1fr 1fr; } }
+.adv-kv > div { display: flex; flex-direction: column; gap: 2px; }
+.adv-kv i { font-style: normal; font-size: 10px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--faint); }
+.adv-kv b { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 13px; font-weight: 540; color: var(--text); }
+.ev-table { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 26px; }
+@media (max-width: 560px) { .ev-table { grid-template-columns: 1fr; } }
+.ev-row { display: grid; grid-template-columns: 1fr 56px 50px; gap: 9px; align-items: center; }
+.ev-n { font-family: var(--mono); font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ev-bar { height: 5px; border-radius: 999px; background: var(--surface-2); overflow: hidden; }
+.ev-bar i { display: block; height: 100%; border-radius: 999px; background: color-mix(in oklab, var(--text) 18%, transparent); }
+.ev-c { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 11px; color: var(--faint); text-align: right; }
+
+/* capabilities + battery tweaks */
+.adv-body .caps { max-width: 400px; margin-top: -2px; }
+.dh-stat.low .v { color: var(--warn); }
