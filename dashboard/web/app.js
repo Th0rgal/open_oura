@@ -225,7 +225,7 @@ function openActDetail(s) {
         ${work ? '<span class="ad-tag">workout</span>' : ""}
       </div>
       <div class="ad-grid">
-        ${kv("Time", `${hhmm(s.start)}–${hhmm(s.end)}`)}
+        ${kv("Time", `${hhmm(s.start)}–${hhmm(s.endTrue ?? s.end)}`)}
         ${kv("Duration", `${s.duration_min} min`)}
         ${s.active_kcal != null ? kv("Active calories", `${Math.round(s.active_kcal).toLocaleString()} kcal`) : ""}
         ${kv("Confidence", conf)}
@@ -255,10 +255,12 @@ function renderActivity(d) {
   for (const s of all) {
     const [ymd, hm] = (s.start || "").split(" ");
     if (!ymd) continue;
-    const start = toMin(hm), end = Math.min(1440, start + (s.duration_min || 0));
+    // endTrue is the real end (may cross midnight); end is clamped to the day so the
+    // bar geometry stays on this day's lane. The window is sized from the clamped end.
+    const start = toMin(hm), endTrue = start + (s.duration_min || 0), end = Math.min(1440, endTrue);
     minStart = Math.min(minStart, start); maxEnd = Math.max(maxEnd, end);
     if (!byDay.has(ymd)) byDay.set(ymd, []);
-    byDay.get(ymd).push({ ...s, start, end });
+    byDay.get(ymd).push({ ...s, start, end, endTrue });
   }
   const days = [...byDay.keys()].sort().reverse().slice(0, 8);
 
@@ -314,8 +316,10 @@ function renderActivity(d) {
       const work = s.is_workout >= 0.5;
       const bar = el("div", "acto-bar" + (work ? " workout" : ""));
       bar.style.left = pct(s.start) + "%";
-      bar.style.width = Math.max(0.5, (s.duration_min / span) * 100) + "%";
-      bar.title = `${s.label || "activity"} · ${s.duration_min} min · ${hhmm(s.start)}–${hhmm(s.end)} · tap for details`;
+      // width tracks the visible (day-clamped) segment so a past-midnight session
+      // isn't drawn wider than its lane; the tooltip still reports the true duration.
+      bar.style.width = Math.max(0.5, ((s.end - s.start) / span) * 100) + "%";
+      bar.title = `${s.label || "activity"} · ${s.duration_min} min · ${hhmm(s.start)}–${hhmm(s.endTrue)} · tap for details`;
       // build via DOM (textContent) so the label can't inject markup; actIcon()
       // only ever returns a fixed basename, so the icon URL is safe.
       const ico = el("span", "ic");
