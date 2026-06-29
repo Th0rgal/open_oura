@@ -111,10 +111,18 @@ def timing_features(db, start_ds, end_ds, mid_hour):
         # fall back to the scored night's own midpoint — independent of whether any
         # bedtime_period rows exist (with --start/--end, `bts` can be empty).
         cur_mid_ds = (start_ds + end_ds) / 2.0
-    prev_h = [(p % 864000) / 36000.0 for p in prev_mid_ds[-7:]]   # deltas only
+    prev_h = [(p % 864000) / 36000.0 for p in prev_mid_ds[-7:]]
     cur_h = (cur_mid_ds % 864000) / 36000.0
-    reg = abs(cur_h - np.mean(prev_h)) if prev_h else 0.0
-    reg = min(reg, 24 - reg)                                       # circular distance
+    if prev_h:
+        # circular mean of the prior midpoints on a 24h clock, so regularity is a true
+        # circular delta: frame-invariant (independent of --tz / the ds→clock phase)
+        # and correct across the midnight wrap, where a naive arithmetic mean breaks.
+        ang = np.array(prev_h) * (np.pi / 12.0)
+        mean_h = (np.arctan2(np.sin(ang).mean(), np.cos(ang).mean()) % (2 * np.pi)) * (12.0 / np.pi)
+        reg = abs(cur_h - mean_h)
+        reg = min(reg, 24 - reg)                                   # circular distance
+    else:
+        reg = 0.0
     return {"mid_hour": mid_hour, "mid_opt": -((mid_hour - 27.0) ** 2), "mid_reg": reg}
 
 

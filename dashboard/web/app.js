@@ -617,18 +617,29 @@ async function doSync() {
 }
 
 // ── load ────────────────────────────────────────────────────
+// show the error in the headline and stop every panel's loading shimmer, so the
+// page reads as "errored" rather than stuck mid-load.
+function showLoadError(msg) {
+  document.querySelectorAll(".skeleton").forEach((el) => {
+    if (el.id === "digest") return; // handled below — keep it for the message
+    el.remove();
+  });
+  const dg = $("digest");
+  dg.classList.remove("skeleton", "skeleton-text");
+  dg.classList.add("reveal");
+  dg.textContent = msg;
+}
+
 async function load() {
   let d;
   try {
     d = await (await fetch("/api/summary")).json();
   } catch (e) {
-    $("digest").classList.remove("skeleton", "skeleton-text");
-    $("digest").textContent = "Could not reach the local server.";
+    showLoadError("Could not reach the local server.");
     return;
   }
   if (d.error) {
-    $("digest").classList.remove("skeleton", "skeleton-text");
-    $("digest").textContent = d.error;
+    showLoadError(d.error);
     return;
   }
   CURRENT_PROFILE = d.profile || null;
