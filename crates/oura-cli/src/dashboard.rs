@@ -424,11 +424,13 @@ pub fn build_summary(db: &Path, tz: i64) -> Result<Value> {
         }
         let latest = *s.last().unwrap();
         let base = s[..s.len() - 1].iter().sum::<f64>() / (s.len() - 1) as f64;
+        // guard a zero baseline → no Inf/NaN leaking into the JSON the UI reads
+        let delta_pct = if base != 0.0 { ((latest - base) / base * 100.0).round() } else { 0.0 };
         json!({
             "series": s.iter().map(|x| x.round()).collect::<Vec<_>>(),
             "latest": latest.round(),
             "baseline": (base * 10.0).round() / 10.0,
-            "delta_pct": ((latest - base) / base * 100.0).round(),
+            "delta_pct": delta_pct,
         })
     };
 
@@ -438,7 +440,7 @@ pub fn build_summary(db: &Path, tz: i64) -> Result<Value> {
         feat("Daytime HR", has("ibi_and_amplitude_event") || has("green_ibi_quality_event"), "daytime_hr"),
         feat("SpO2", has("spo2_r_pi_event"), "spo2"),
         feat("Exercise HR", has("ehr_trace_event"), "exercise_hr"),
-        feat("Real steps", has("real_step_event_feature_2"), "real_steps"),
+        feat("Real steps", has("real_step_event_feature_1") || has("real_step_event_feature_2"), "real_steps"),
         feat("Cardio PPG (CVA)", has("cva_raw_ppg_data"), "cva_ppg"),
     ]);
 
@@ -497,8 +499,11 @@ pub fn build_summary(db: &Path, tz: i64) -> Result<Value> {
 
     // device identity (serial / firmware / mac …) + the true last-sync time
     let dev = store.device_info().ok().flatten();
+    // only a real recorded BLE sync timestamp counts; falling back to anchor_unix
+    // (the latest event's capture time) would make the panel look freshly synced
+    // even when no sync was ever recorded. Absent → null (the UI shows "—").
     let last_sync = dev.as_ref().map(|d| d.6).filter(|&t| t > 0);
-    let synced_unix = last_sync.map(|t| t as f64).unwrap_or(anchor_unix as f64);
+    let synced_unix = last_sync.map(|t| t as f64);
 
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as f64).unwrap_or(anchor_unix as f64);
     let device = json!({
@@ -507,9 +512,9 @@ pub fn build_summary(db: &Path, tz: i64) -> Result<Value> {
         "firmware": dev.as_ref().map(|d| d.2.clone()).filter(|s| !s.is_empty()),
         "api_version": dev.as_ref().map(|d| d.3.clone()).filter(|s| !s.is_empty()),
         "mac": dev.as_ref().map(|d| d.4.clone()).filter(|s| !s.is_empty()),
-        "synced": date_label(synced_unix, tz),
-        "synced_hm": hm(synced_unix, tz),
-        "fresh_hours": ((now - synced_unix) / 3600.0 * 10.0).round() / 10.0,
+        "synced": synced_unix.map(|s| date_label(s, tz)),
+        "synced_hm": synced_unix.map(|s| hm(s, tz)),
+        "fresh_hours": synced_unix.map(|s| ((now - s) / 3600.0 * 10.0).round() / 10.0),
         "days_of_data": ((max_ds - min_ds) as f64 / 10.0 / 86400.0 * 10.0).round() / 10.0,
         "total_events": events.len(),
         "nights": nights.len(),
@@ -715,7 +720,9 @@ async fn handle(
     let n = sock.read(&mut buf).await?;
     let req = String::from_utf8_lossy(&buf[..n]);
     let method = req.split_whitespace().next().unwrap_or("GET");
-    let path = req.split_whitespace().nth(1).unwrap_or("/");
+    let target = req.split_whitespace().nth(1).unwrap_or("/");
+    // route on the path only — a query string (e.g. cache-buster) must not 404 the API
+    let path = target.split('?').next().unwrap_or(target);
     let body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
 
     // Loopback-only (DNS-rebind guard).
