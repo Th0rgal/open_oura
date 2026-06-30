@@ -22,7 +22,7 @@ from pathlib import Path
 
 import numpy as np
 
-from fit_sleep_score import EmpCurve, LinFit, MonoCurve, engineer, getval, num, r2
+from fit_sleep_score import ConstCurve, EmpCurve, LinFit, MonoCurve, engineer, getval, num, r2
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -78,15 +78,6 @@ TRAIL = {7: ["Average MET", "High Activity Time", "Medium Activity Time"],
          14: ["Average HRV", "Average Resting Heart Rate", "Total Sleep Duration", "Average MET"]}
 
 
-class ConstCurve:
-    """Constant predictor (training mean) for near-saturated contributors."""
-    def __init__(self, y):
-        self.v = float(np.mean(y))
-
-    def predict(self, x):
-        return np.full(len(np.atleast_1d(x)), self.v)
-
-
 def engineer_seq(rows):
     """Add lag-1 and causal trailing-mean features (rows already date-sorted by
     fit_sleep_score.engineer)."""
@@ -108,7 +99,8 @@ def engineer_seq(rows):
 
 def main():
     cands = ([Path(sys.argv[1])] if len(sys.argv) > 1 else
-             list(Path.home().glob("Desktop/oura_*trends.csv")) + list(REPO.glob("*trends*.csv")))
+             [REPO / "local" / "trends.csv"] * (REPO / "local" / "trends.csv").exists()
+             + list(Path.home().glob("Desktop/oura_*trends.csv")) + list(REPO.glob("*trends*.csv")))
     if not cands:
         sys.exit("no trends CSV — pass the path")
     rows = engineer_seq(engineer(list(csv.DictReader(open(cands[0])))))

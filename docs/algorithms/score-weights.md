@@ -146,3 +146,13 @@ method is exact where a contributor is a function of the day's physiology (all o
 Sleep bar two; Readiness's direct half; Activity's inactivity half). The rest is
 gated on **accumulated personal baselines/goals**, not on missing logic — the same
 wall that blocks live Readiness/Activity until weeks of local history accrue.
+
+## Live scoring from the ring
+
+`oura sleep-score` computes Sleep live today. `oura readiness-score` computes
+Readiness live from a per-day summary + rolling baselines accrued nightly — with the
+baseline-relative contributors flagged "provisional" until ~14 days of history mature.
+The substrate (daily summaries, baselines, Recovery Index, persisted calibration) is
+documented in [`daily-summaries-and-baselines.md`](daily-summaries-and-baselines.md).
+Calibration is fit once by `tools/calibrate_scores.py` into `local/score_params.json`,
+so the scorers don't need the trends CSV at runtime.

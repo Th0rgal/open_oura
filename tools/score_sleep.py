@@ -23,57 +23,10 @@ from pathlib import Path
 import numpy as np
 
 from _common import resolve_db
-from fit_sleep_score import EmpCurve, LinFit, MonoCurve, engineer, getval
+from fit_sleep_score import load_params, score_from_params
 
 REPO = Path(__file__).resolve().parent.parent
-
-WEIGHTS = {
-    "Total Sleep Score": 35, "Restfulness Score": 15, "Sleep Efficiency Score": 10,
-    "REM Sleep Score": 10, "Deep Sleep Score": 10, "Sleep Latency Score": 10,
-    "Sleep Timin Score": 10,
-}
-# contributor -> (driver column(s) as named in the trends CSV / engineered, kind).
-# All drivers here are reproducible from ring data (see metrics_from_night()).
-DRIVERS = {
-    "Total Sleep Score": (["Total Sleep Duration"], "mono"),
-    "Sleep Efficiency Score": (["Sleep Efficiency"], "mono"),
-    "REM Sleep Score": (["REM Sleep Duration"], "mono"),
-    "Deep Sleep Score": (["Deep Sleep Duration"], "mono"),
-    "Sleep Latency Score": (["Sleep Latency"], "emp"),
-    "Restfulness Score": (["awake_frac", "Sleep Efficiency"], "lin"),
-    "Sleep Timin Score": (["mid_opt", "mid_reg", "mid_hour"], "lin"),
-}
-
-
-def find_csv(arg):
-    if arg:
-        return Path(arg)
-    cands = list(Path.home().glob("Desktop/oura_*trends.csv")) + list(REPO.glob("*trends*.csv"))
-    if not cands:
-        sys.exit("no trends CSV for calibration — pass --csv (export from your Oura account)")
-    return cands[0]
-
-
-def fit_curves(csv_path):
-    """Fit every contributor curve from the trends export."""
-    import csv as _csv
-    rows = engineer(list(_csv.DictReader(open(csv_path))))
-    need = {"Sleep Score", *WEIGHTS}
-    for drv, _ in DRIVERS.values():
-        need.update(drv)
-    data = [{c: getval(r, c) for c in need} for r in rows]
-    data = [d for d in data if all(v is not None for v in d.values())]
-    col = lambda name: np.array([d[name] for d in data])
-    curves = {}
-    for sub, (drivers, kind) in DRIVERS.items():
-        y = col(sub)
-        if kind == "mono":
-            curves[sub] = (MonoCurve(col(drivers[0]), y), drivers, kind)
-        elif kind == "emp":
-            curves[sub] = (EmpCurve(col(drivers[0]), y), drivers, kind)
-        else:
-            curves[sub] = (LinFit(np.column_stack([col(d) for d in drivers]), y), drivers, kind)
-    return curves, len(data)
+PARAMS = REPO / "local" / "score_params.json"
 
 
 def clock_midpoint(start_local, end_local):
@@ -154,7 +107,8 @@ def metrics_from_night(db, start_ds, end_ds, tz=1):
 def main():
     ap = argparse.ArgumentParser(description="Live Sleep Score from ring data")
     ap.add_argument("db", nargs="?")
-    ap.add_argument("--csv", help="trends export for calibration (default: ~/Desktop/oura_*trends.csv)")
+    ap.add_argument("--params", default=str(PARAMS),
+                    help="calibrated score params (tools/calibrate_scores.py output)")
     ap.add_argument("--start", type=int, help="bedtime start (deciseconds)")
     ap.add_argument("--end", type=int, help="bedtime end (deciseconds)")
     ap.add_argument("--tz", type=int, default=1, help="hours offset for local bedtime clock")
@@ -162,7 +116,7 @@ def main():
     args = ap.parse_args()
 
     db = resolve_db(args.db, REPO)
-    curves, n_cal = fit_curves(find_csv(args.csv))
+    params = load_params(args.params)
 
     if args.start and args.end:
         start_ds, end_ds = args.start, args.end
@@ -179,14 +133,7 @@ def main():
 
     metrics, hyp = metrics_from_night(db, start_ds, end_ds, args.tz)
 
-    subs, contributions = {}, {}
-    for sub, (curve, drivers, kind) in curves.items():
-        x = (metrics[drivers[0]] if kind in ("mono", "emp")
-             else np.array([[metrics[d] for d in drivers]]))
-        s = float(np.clip(np.ravel(curve.predict(x))[0], 1, 100))
-        subs[sub] = s
-        contributions[sub] = WEIGHTS[sub] * s / 100.0
-    score = round(sum(contributions.values()))
+    score, subs, contributions = score_from_params(params, "Sleep Score", metrics)
 
     if args.json:
         print(json.dumps({"sleep_score": score, "sub_scores": subs, "metrics": metrics,
@@ -195,12 +142,13 @@ def main():
                                          "rem_min", "light_min", "wake_min")}}))
         return
 
-    print(f"Sleep Score (live from ring, calibrated on {n_cal} export days)")
+    print(f"Sleep Score (live from ring, calibrated on {params.get('n_days', '?')} export days)")
     print(f"  window ds [{start_ds}..{end_ds}]  {hyp['start_local']}–{hyp['end_local']}  "
           f"asleep {hyp['asleep_min']:.0f}m  eff {hyp['efficiency_pct']}%\n")
+    weights = params["weights"]["Sleep Score"]
     print(f"  {'contributor':24s}{'weight':>7}{'sub':>6}{'pts':>7}")
-    for sub in WEIGHTS:
-        print(f"  {sub:24s}{WEIGHTS[sub]:6d}%{subs[sub]:6.0f}{contributions[sub]:7.1f}")
+    for sub, w in weights.items():
+        print(f"  {sub:24s}{w:6d}%{subs[sub]:6.0f}{contributions[sub]:7.1f}")
     print(f"  {'':24s}{'':7}{'':6}{'':7}")
     print(f"  {'SLEEP SCORE':24s}{'':7}{'':6}{score:7d}")
 

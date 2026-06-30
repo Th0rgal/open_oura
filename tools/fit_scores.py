@@ -42,7 +42,8 @@ SCORES = {
 def find_csv(arg):
     if arg:
         return Path(arg)
-    cands = list(Path.home().glob("Desktop/oura_*trends.csv")) + \
+    cands = [REPO / "local" / "trends.csv"] * (REPO / "local" / "trends.csv").exists() + \
+        list(Path.home().glob("Desktop/oura_*trends.csv")) + \
         list(REPO.glob("oura_*trends.csv")) + list(REPO.glob("*trends*.csv"))
     if not cands:
         sys.exit("no trends CSV found — pass the path (export from your Oura account)")

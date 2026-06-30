@@ -92,3 +92,10 @@ Restfulness + Timing). See [`score-weights.md`](score-weights.md).
 (ceiling R²=0.84–0.998), end-to-end Sleep R²=0.97, Readiness R²=0.49, Activity
 R²=0.06 — the gap is the baseline-relative / personalised-goal / multi-day-load
 contributors that need accumulated history, not missing logic.
+
+**Live from the ring:** `oura sleep-score` (today) and `oura readiness-score` —
+the latter accrues a per-day summary + rolling baselines nightly (`tools/build_daily.py`),
+including a from-scratch **Recovery Index** (overnight RHR-minimum→wake), and flags
+baseline-relative contributors provisional until ~14 days mature. Calibration is
+persisted once to `local/score_params.json`. See
+[`daily-summaries-and-baselines.md`](daily-summaries-and-baselines.md).

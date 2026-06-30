@@ -298,7 +298,8 @@ def r2(pred, y):
 
 def main():
     cands = ([Path(sys.argv[1])] if len(sys.argv) > 1 else
-             list(Path.home().glob("Desktop/oura_*trends.csv")) + list(REPO.glob("*trends*.csv")))
+             [REPO / "local" / "trends.csv"] * (REPO / "local" / "trends.csv").exists()
+             + list(Path.home().glob("Desktop/oura_*trends.csv")) + list(REPO.glob("*trends*.csv")))
     if not cands:
         sys.exit("no trends CSV — pass the path")
     data = load(cands[0])
