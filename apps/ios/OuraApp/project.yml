@@ -1,0 +1,46 @@
+# xcodegen spec for a *device / TestFlight* build of OuraApp.
+#   1. ../build-xcframework.sh         # both device + sim slices of OuraCore
+#   2. xcodegen generate               # writes OuraApp.xcodeproj next to this file
+#   3. open OuraApp.xcodeproj, set your Team under Signing & Capabilities
+#      (or set DEVELOPMENT_TEAM below), then Product → Archive → Distribute → TestFlight
+#
+# The simulator dev harness (build_run.sh) stays as-is for quick local runs.
+name: OuraApp
+options:
+  bundleIdPrefix: com.openoura
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    MARKETING_VERSION: "0.1"
+    CURRENT_PROJECT_VERSION: "1"
+    PRODUCT_BUNDLE_IDENTIFIER: com.openoura.app
+    CODE_SIGN_STYLE: Automatic
+    # Fill in your 10-char Apple Developer Team ID (or set it in Xcode's Signing tab).
+    DEVELOPMENT_TEAM: ""
+
+targets:
+  OuraApp:
+    type: application
+    platform: iOS
+    settings:
+      base:
+        # use the hand-written Info.plist verbatim (Bluetooth usage strings, the
+        # export-compliance flag) rather than letting xcodegen synthesise one.
+        INFOPLIST_FILE: Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+    sources:
+      - path: OuraApp.swift
+      - path: Theme.swift
+      - path: BLETransport.swift
+      - path: ../generated/oura_core.swift
+      - path: Assets.xcassets
+      # NOTE: oura.db is deliberately NOT bundled — it is your personal health data.
+      # For a real beta, users sync their own ring over BLE. To make a personal-only
+      # build that shows data immediately, drop an oura.db here and add it as a resource.
+    dependencies:
+      # static lib packaged as an xcframework → link, don't embed
+      - framework: ../OuraCore.xcframework
+        embed: false

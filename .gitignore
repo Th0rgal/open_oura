@@ -71,3 +71,6 @@ apps/**/build-torch/
 apps/ios/spike/libtorch*/
 *.xcuserstate
 
+
+# xcodegen-generated project (regenerate with: xcodegen generate)
+apps/ios/OuraApp/OuraApp.xcodeproj/
