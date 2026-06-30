@@ -1,8 +1,10 @@
 # xcodegen spec for a *device / TestFlight* build of OuraApp — WITH the on-device
 # torch models (SleepNet / CVA / activity), mirroring build_run_torch.sh.
-#   1. ../build-xcframework.sh         # device + sim slices of OuraCore (Rust)
-#   2. ../spike/build_libtorch_ios.sh  # once: builds local/libtorch-ios (the .dylibs)
-#   3. xcodegen generate               # writes OuraApp.xcodeproj next to this file
+#   1. ../build-xcframework.sh                    # device + sim slices of OuraCore (Rust)
+#   2. ../spike/build_libtorch_ios.sh             # libtorch for the simulator
+#      ../spike/build_libtorch_ios.sh device      # libtorch for the device
+#      ../package-libtorch-xcframeworks.sh        # → libtorch-xcframeworks/*.xcframework
+#   3. xcodegen generate                          # writes OuraApp.xcodeproj next to this file
 #   4. open OuraApp.xcodeproj, set your Team, then Product → Archive → TestFlight
 #
 # Paths below are relative to this dir (apps/ios/OuraApp); ../../../ is the repo root.
@@ -39,9 +41,6 @@ targets:
         HEADER_SEARCH_PATHS:
           - $(SRCROOT)/../../../local/libtorch-ios/pytorch/build_ios/install/include
           - $(SRCROOT)/../../../local/libtorch-ios/pytorch/build_ios/install/include/torch/csrc/api/include
-        LIBRARY_SEARCH_PATHS:
-          - $(inherited)
-          - $(SRCROOT)/../../../local/libtorch-ios/pytorch/build_ios/install/lib
         OTHER_LDFLAGS: [-lc++, -lsqlite3]
         LD_RUNPATH_SEARCH_PATHS: [$(inherited), "@executable_path/Frameworks"]
     sources:
@@ -70,16 +69,18 @@ targets:
       # Rust core (static lib in an xcframework) — link, don't embed
       - framework: ../OuraCore.xcframework
         embed: false
-      # libtorch lite interpreter (dynamic) — link AND embed+sign into Frameworks
-      - framework: ../../../local/libtorch-ios/pytorch/build_ios/install/lib/libtorch.dylib
+      # libtorch lite interpreter — xcframeworks (device + sim slices) so an archive
+      # picks the right one per SDK. Link AND embed+sign into Frameworks.
+      # Built by: spike/build_libtorch_ios.sh [device] + package-libtorch-xcframeworks.sh
+      - framework: ../libtorch-xcframeworks/libtorch.xcframework
         embed: true
         codeSign: true
-      - framework: ../../../local/libtorch-ios/pytorch/build_ios/install/lib/libtorch_cpu.dylib
+      - framework: ../libtorch-xcframeworks/libtorch_cpu.xcframework
         embed: true
         codeSign: true
-      - framework: ../../../local/libtorch-ios/pytorch/build_ios/install/lib/libc10.dylib
+      - framework: ../libtorch-xcframeworks/libc10.xcframework
         embed: true
         codeSign: true
-      - framework: ../../../local/libtorch-ios/pytorch/build_ios/install/lib/libtorch_global_deps.dylib
+      - framework: ../libtorch-xcframeworks/libtorch_global_deps.xcframework
         embed: true
         codeSign: true
