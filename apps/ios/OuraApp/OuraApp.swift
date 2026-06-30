@@ -34,7 +34,10 @@ enum Core {
         guard let path = Bundle.main.path(forResource: "oura", ofType: "db") else {
             return Summary(error: "oura.db not in bundle")
         }
-        let json = summaryJson(dbPath: path, tzOffset: 1)   // same tz default as the web dashboard
+        // the phone's actual UTC offset (whole hours), so night labels / sleep windows
+        // / digest timing match the wearer's local clock — not a hardcoded constant.
+        let tzOffset = Int64(TimeZone.current.secondsFromGMT() / 3600)
+        let json = summaryJson(dbPath: path, tzOffset: tzOffset)
         guard let data = json.data(using: .utf8),
               let s = try? JSONDecoder().decode(Summary.self, from: data)
         else { return Summary(error: "decode failed") }

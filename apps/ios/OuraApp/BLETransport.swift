@@ -49,6 +49,8 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
 
     private var connectCont: CheckedContinuation<Void, Error>?
     private var writeCont: CheckedContinuation<Void, Error>?
+    private var connectTimeout: DispatchWorkItem?
+    private var pendingNotify = 0 // notify subscriptions still awaiting confirmation
     private var poweredOn = false
     // delegate callbacks land on a concurrent queue; this serialises take-and-resume
     // of the continuations so a success and a timeout can't both resume one (a crash).
@@ -66,12 +68,16 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
         try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
             connectCont = c
             // fail rather than hang forever if the ring never advertises (off the
-            // charger / not worn) or Bluetooth stays off.
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [weak self] in
+            // charger / not worn) or Bluetooth stays off. The work item is stored so
+            // finishConnect() can cancel it — a stale timer from a prior/finished
+            // attempt must not fire and abort a newer connection.
+            let work = DispatchWorkItem { [weak self] in
                 guard let self else { return }
                 self.central.stopScan()
                 self.finishConnect(.failure(BLEError.timedOut))
             }
+            lock.lock(); connectTimeout = work; lock.unlock()
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: work)
             if poweredOn { startScan() }
         }
     }
@@ -141,14 +147,25 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService,
                     error: Error?) {
+        var notifyChars: [CBCharacteristic] = []
         for c in service.characteristics ?? [] {
             if c.uuid == RingUUID.write { writeChar = c }
-            if RingUUID.notify.contains(c.uuid.uuidString.uppercased()) {
-                peripheral.setNotifyValue(true, for: c)
-            }
+            if RingUUID.notify.contains(c.uuid.uuidString.uppercased()) { notifyChars.append(c) }
         }
-        if writeChar != nil { finishConnect(.success(())) }
-        else { finishConnect(.failure(BLEError.noWriteCharacteristic)) }
+        guard writeChar != nil else { return finishConnect(.failure(BLEError.noWriteCharacteristic)) }
+        guard !notifyChars.isEmpty else { return finishConnect(.failure(BLEError.notFound)) }
+        // don't report "connected" until every notify subscription is confirmed —
+        // otherwise Rust can start syncing before inbound frames flow and miss the
+        // ring's early responses. didUpdateNotificationStateFor finishes the connect.
+        lock.lock(); pendingNotify = notifyChars.count; lock.unlock()
+        for c in notifyChars { peripheral.setNotifyValue(true, for: c) }
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic,
+                    error: Error?) {
+        if let error { return finishConnect(.failure(error)) }
+        lock.lock(); pendingNotify -= 1; let ready = pendingNotify <= 0; lock.unlock()
+        if ready { finishConnect(.success(())) }
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic,
@@ -163,7 +180,11 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
     }
 
     private func finishConnect(_ result: Result<Void, Error>) {
-        lock.lock(); let c = connectCont; connectCont = nil; lock.unlock()
+        lock.lock()
+        let c = connectCont; connectCont = nil
+        let timer = connectTimeout; connectTimeout = nil
+        lock.unlock()
+        timer?.cancel() // stop a still-pending timeout from firing on a finished attempt
         c?.resume(with: result)
     }
 
