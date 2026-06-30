@@ -81,6 +81,7 @@ final class RingSync: ObservableObject {
 
     /// Connect, wire the inbound-frame pump, and run a full sync into the writable DB.
     func run(keyHex: String) async {
+        lastReport = nil   // clear any prior success so a failed retry isn't read as one
         let key = keyHex.trimmingCharacters(in: .whitespacesAndNewlines)
         guard key.count == 32, key.allSatisfy(\.isHexDigit) else {
             status = "key must be 32 hex characters"
