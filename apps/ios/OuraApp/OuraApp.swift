@@ -319,7 +319,22 @@ struct RootView: View {
                                 .fixedSize(horizontal: false, vertical: true)
                         }
 
-                        NightOrbit(seed: Int(s.vitals.hrv.latest ?? 4))
+                        // hero: the most recent day's real movement profile (model-free)
+                        if let day = s.activeDays.first, let prof = s.activity_profile[day], prof.count > 1 {
+                            VStack(alignment: .leading, spacing: 8) {
+                                MovementRidge(profile: prof, height: 132)
+                                HStack(spacing: 8) {
+                                    Text("\(day) · movement").font(Obs.mono(11)).foregroundStyle(Obs.ink2)
+                                    Spacer()
+                                    if let st = s.activity_daily[day] {
+                                        Text("\(Int(st.steps ?? 0)) steps").font(Obs.mono(11)).foregroundStyle(Obs.ink2)
+                                        Text("· \(Int(st.active_kcal ?? 0)) kcal").font(Obs.mono(11)).foregroundStyle(Obs.teal)
+                                    }
+                                }
+                            }
+                        } else {
+                            NightOrbit(seed: Int(s.vitals.hrv.latest ?? 4))
+                        }
 
                         // vitals
                         ObsTag("vitals · last night")
