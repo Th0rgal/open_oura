@@ -7,7 +7,7 @@
     <key>CFBundleExecutable</key>
     <string>OuraApp</string>
     <key>CFBundleIdentifier</key>
-    <string>com.openoura.app</string>
+    <string>md.thomas.openoura</string>
     <key>CFBundleName</key>
     <string>open_oura</string>
     <key>CFBundleDisplayName</key>
@@ -33,6 +33,10 @@
     <string>open_oura connects to your Oura ring over Bluetooth to read your health data on-device.</string>
     <key>NSBluetoothPeripheralUsageDescription</key>
     <string>open_oura connects to your Oura ring over Bluetooth to read your health data on-device.</string>
+    <key>NSHealthShareUsageDescription</key>
+    <string>open_oura can read selected Apple Health data to compare it with your ring metrics on-device.</string>
+    <key>NSHealthUpdateUsageDescription</key>
+    <string>open_oura can write selected ring-derived metrics to Apple Health if you enable Health export.</string>
     <!-- Only standard crypto (AES for ring auth) → exempt from export compliance.
          Declared so App Store Connect doesn't prompt on every upload. -->
     <key>ITSAppUsesNonExemptEncryption</key>

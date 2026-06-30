@@ -6,7 +6,7 @@ signing requires *your* Apple Developer account.
 
 ## One-time
 - **Apple Developer Program** membership ($99/yr).
-- Register the App ID **`com.openoura.app`** and create the app in App Store Connect.
+- Register the App ID **`md.thomas.openoura`** and create the app in App Store Connect.
 - Install xcodegen: `brew install xcodegen`.
 
 ## Build & upload

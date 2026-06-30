@@ -33,7 +33,7 @@ echo "==> boot + install + launch + screenshot"
 xcrun simctl boot "$DEV" 2>/dev/null || true
 xcrun simctl bootstatus "$DEV" -b >/dev/null 2>&1 || true
 xcrun simctl install "$DEV" "$APP"
-xcrun simctl launch "$DEV" com.openoura.app
+xcrun simctl launch "$DEV" md.thomas.openoura
 sleep 2
 xcrun simctl io "$DEV" screenshot "$BUILD/screenshot.png"
 echo "screenshot: $BUILD/screenshot.png"
