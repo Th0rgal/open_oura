@@ -111,9 +111,38 @@ once awake-fraction is in. Example (latest night in `oura.db`): 471 min asleep,
 Deep 40 · Latency 92 · Timing 99). Calibration CSV auto-found at
 `~/Desktop/oura_*trends.csv` or passed with `--csv`.
 
-## Readiness / Activity end-to-end (not yet built)
+## Readiness & Activity end-to-end (`tools/fit_scores_all.py`)
 
-Readiness contributors are mostly **baseline-relative** (HRV Balance, Resting HR,
-Sleep/Activity Balance, Recovery Index compare against a personal ~2-week baseline),
-so they need accumulated history, not a static curve — plus the rest-mode cap noted
-above. Activity uses the piecewise `Y=[0,25,95,100]` combiner.
+Same approach as Sleep, with lag-1 and trailing-mean features engineered so a linear
+fit can form "today vs personal baseline". Held-out results:
+
+| score | ceiling (weights × actual subs) | achieved (subs from raw) |
+| --- | --- | --- |
+| Sleep | R²=0.998 | **R²=0.969** (85% within ±1) |
+| Readiness | R²=0.941 | **R²=0.49** (56% within ±3) |
+| Activity | R²=0.838 | **R²=0.06** |
+
+The **ceiling** (≈0.84–0.998) confirms the recovered weights are right for all three.
+The **achieved** gap is entirely about which contributors are a function of a *single
+day's* exposed metrics vs need history/hidden inputs:
+
+**Readiness** — reconstructs the direct contributors, not the baseline-relative ones:
+- ✅ Previous Night R²=0.96 (= that night's Sleep Score), Temperature R²=0.995,
+  Sleep Balance R²=0.74.
+- ❌ HRV Balance 0.21, Resting HR 0.31, Recovery Index ~0, Activity Balance 0.30 —
+  these compare today against a personal ~2-week **baseline trajectory** (an EMA we
+  don't carry), so current-value + trailing-mean can't reproduce them. ~50% of weight.
+
+**Activity** — only the within-day inactivity contributors reconstruct:
+- ✅ Stay Active R²=0.99 (← inactive time), Move Every Hour R²=0.83 (← long inactive
+  periods).
+- ❌ Meet Daily Targets (24% weight) tracks a **personalised daily goal** not in the
+  export (no single-day driver |corr|>0.2); Training Volume/Frequency (27%) are
+  near-constant 100 here and encode **multi-day training load**. So Activity does not
+  reconstruct end-to-end from single-day columns.
+
+Takeaway: the weights are recovered for all three scores, and the contributor-curve
+method is exact where a contributor is a function of the day's physiology (all of
+Sleep bar two; Readiness's direct half; Activity's inactivity half). The rest is
+gated on **accumulated personal baselines/goals**, not on missing logic — the same
+wall that blocks live Readiness/Activity until weeks of local history accrue.

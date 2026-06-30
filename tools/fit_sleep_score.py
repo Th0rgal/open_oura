@@ -125,14 +125,19 @@ def pav(y):
 
 
 class MonoCurve:
-    """Isotonic + linear-interpolation curve for a single monotone driver."""
+    """Isotonic + linear-interpolation curve for a single monotone driver.
+    Direction-aware: if the driver correlates negatively with the sub-score
+    (e.g. inactive-time → stay-active), fit on the negated driver so the
+    increasing-isotonic fit still applies."""
     def __init__(self, raw, sub):
-        order = np.argsort(raw)
-        self.xs = raw[order]
+        self.sign = -1.0 if np.corrcoef(raw, sub)[0, 1] < 0 else 1.0
+        x = self.sign * raw
+        order = np.argsort(x)
+        self.xs = x[order]
         self.ys = pav(sub[order])
 
     def predict(self, x):
-        return np.interp(x, self.xs, self.ys)
+        return np.interp(self.sign * np.asarray(x, float), self.xs, self.ys)
 
 
 class EmpCurve:

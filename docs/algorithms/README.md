@@ -87,5 +87,8 @@ R²=0.9987 (weights 35/15/10/10/10/10/10, essentially exact), Readiness R²=0.96
 Activity R²=0.904. `tools/fit_sleep_score.py` then adds the contributor curves
 (sub-score = f(raw metric)) to reconstruct the **Sleep Score end-to-end from raw
 metrics at R²=0.964** (84% within ±1 pt; 5/7 contributors near-exact, residual in
-Restfulness + Timing). See [`score-weights.md`](score-weights.md). Still pending:
-Readiness/Activity end-to-end (baseline-relative contributors + rest-mode cap).
+Restfulness + Timing). See [`score-weights.md`](score-weights.md).
+`tools/fit_scores_all.py` extends it to all three: weights recovered for each
+(ceiling R²=0.84–0.998), end-to-end Sleep R²=0.97, Readiness R²=0.49, Activity
+R²=0.06 — the gap is the baseline-relative / personalised-goal / multi-day-load
+contributors that need accumulated history, not missing logic.
