@@ -225,7 +225,7 @@ function openActDetail(s) {
         ${work ? '<span class="ad-tag">workout</span>' : ""}
       </div>
       <div class="ad-grid">
-        ${kv("Time", `${hhmm(s.start)}–${hhmm(s.endTrue ?? s.end)}`)}
+        ${kv("Time", `${hhmm(s.start)}–${s.end}`)}
         ${kv("Duration", `${s.duration_min} min`)}
         ${s.active_kcal != null ? kv("Active calories", `${Math.round(s.active_kcal).toLocaleString()} kcal`) : ""}
         ${kv("Confidence", conf)}
@@ -255,12 +255,12 @@ function renderActivity(d) {
   for (const s of all) {
     const [ymd, hm] = (s.start || "").split(" ");
     if (!ymd) continue;
-    // endTrue is the real end (may cross midnight); end is clamped to the day so the
-    // bar geometry stays on this day's lane. The window is sized from the clamped end.
-    const start = toMin(hm), endTrue = start + (s.duration_min || 0), end = Math.min(1440, endTrue);
-    minStart = Math.min(minStart, start); maxEnd = Math.max(maxEnd, end);
+    // endMin is the day-clamped end (minutes) for the bar geometry; the API's `s.end`
+    // string is the correct wall-clock end (already wraps past midnight) for display.
+    const start = toMin(hm), endMin = Math.min(1440, start + (s.duration_min || 0));
+    minStart = Math.min(minStart, start); maxEnd = Math.max(maxEnd, endMin);
     if (!byDay.has(ymd)) byDay.set(ymd, []);
-    byDay.get(ymd).push({ ...s, start, end, endTrue });
+    byDay.get(ymd).push({ ...s, start, endMin });
   }
   const days = [...byDay.keys()].sort().reverse().slice(0, 8);
 
@@ -318,8 +318,8 @@ function renderActivity(d) {
       bar.style.left = pct(s.start) + "%";
       // width tracks the visible (day-clamped) segment so a past-midnight session
       // isn't drawn wider than its lane; the tooltip still reports the true duration.
-      bar.style.width = Math.max(0.5, ((s.end - s.start) / span) * 100) + "%";
-      bar.title = `${s.label || "activity"} · ${s.duration_min} min · ${hhmm(s.start)}–${hhmm(s.endTrue)} · tap for details`;
+      bar.style.width = Math.max(0.5, ((s.endMin - s.start) / span) * 100) + "%";
+      bar.title = `${s.label || "activity"} · ${s.duration_min} min · ${hhmm(s.start)}–${s.end} · tap for details`;
       // build via DOM (textContent) so the label can't inject markup; actIcon()
       // only ever returns a fixed basename, so the icon URL is safe.
       const ico = el("span", "ic");
@@ -548,7 +548,7 @@ async function exportRingKey() {
 }
 
 async function fetchRingKey() {
-  const r = await fetch("/api/ring-key");
+  const r = await fetch("/api/ring-key", { headers: { "X-Oura-Dash": "1" } });
   if (!r.ok) {
     toast("Restart the dashboard server to enable key export.", "error");
     return null;

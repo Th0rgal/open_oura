@@ -1003,6 +1003,8 @@ async fn handle(
 
     // CSRF guard for mutating/action endpoints: a same-origin fetch can set this
     // header; an <img>/<form> or cross-origin fetch cannot (CORS preflight we never approve).
+    // GET /api/ring-key is guarded too — it discloses the ring auth key, so only the
+    // dashboard's own same-origin page (which sets the header) may read it.
     let csrf_ok = header(&req, "x-oura-dash").is_some();
     let forbid = matches!(
         (method, path),
@@ -1010,6 +1012,7 @@ async fn handle(
             | ("POST", "/api/sync")
             | ("POST", "/api/feature")
             | ("POST", "/api/ring-key")
+            | ("GET", "/api/ring-key")
     ) && !csrf_ok;
     if forbid {
         return write_resp(&mut sock, "403 Forbidden", "text/plain", b"forbidden").await;
