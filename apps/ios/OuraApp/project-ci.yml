@@ -1,0 +1,42 @@
+# xcodegen spec for a MODEL-FREE build of OuraApp — the CI / Xcode Cloud target.
+# No libtorch / .ptl / oura.db (all gitignored local artifacts that a clean cloud
+# checkout doesn't have), so it builds from just the repo + the Rust xcframework that
+# ci_scripts/ci_post_clone.sh rebuilds. The app shows the model-free summary and can
+# sync from a real ring over BLE; the on-device hypnogram/CVA/activity models are only
+# in the local torch build (project.yml). Generate with:
+#   xcodegen generate --spec project-ci.yml
+name: OuraApp
+options:
+  bundleIdPrefix: md.thomas
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    MARKETING_VERSION: "0.1"
+    CURRENT_PROJECT_VERSION: "1"
+    PRODUCT_BUNDLE_IDENTIFIER: md.thomas.openoura
+    CODE_SIGN_STYLE: Automatic
+    CODE_SIGN_ENTITLEMENTS: OuraApp.entitlements
+    DEVELOPMENT_TEAM: ""
+
+targets:
+  OuraApp:
+    type: application
+    platform: iOS
+    settings:
+      base:
+        INFOPLIST_FILE: Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        OTHER_LDFLAGS: [-lsqlite3]
+    sources:
+      - path: OuraApp.swift
+      - path: Theme.swift
+      - path: BLETransport.swift
+      - path: RingSync.swift
+      - path: ../generated/oura_core.swift
+      - path: Assets.xcassets
+    dependencies:
+      - framework: ../OuraCore.xcframework
+        embed: false
