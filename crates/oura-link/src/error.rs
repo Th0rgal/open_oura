@@ -19,6 +19,7 @@ pub enum Error {
     Io(#[from] std::io::Error),
 }
 
+#[cfg(feature = "ble")]
 impl From<btleplug::Error> for Error {
     fn from(e: btleplug::Error) -> Self {
         Error::Ble(e.to_string())
