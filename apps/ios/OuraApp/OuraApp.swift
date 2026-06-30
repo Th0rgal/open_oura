@@ -8,11 +8,19 @@ struct Trend: Decodable {
     var delta_pct: Double? = nil
 }
 struct Vitals: Decodable { var hrv = Trend(); var rhr = Trend() }
-struct NightRow: Decodable {
+struct NightRow: Decodable, Identifiable {
     var date: String?; var start: String?; var end: String?
     var in_bed_h: Double?; var hrv_ms: Double?; var rhr: Double?
     var skin_temp: Double?; var spo2_mean: Double?
+    // model-derived (present once the hypnogram runner is wired): per-30s stage codes
+    // 1=deep 2=light 3=rem 4=wake, the stage percentages, and efficiency.
+    var deep_pct: Double?; var light_pct: Double?; var rem_pct: Double?
+    var wake_pct: Double?; var efficiency: Double?
+    var stages: [Int]? = nil
+    var id: String { (date ?? "") + (start ?? "") }
+    var hasHypnogram: Bool { (stages?.count ?? 0) > 1 }
 }
+struct DailyStat: Decodable { var active_kcal: Double?; var total_kcal: Double?; var steps: Double? }
 struct Stream: Decodable { let name: String; let count: Int }
 struct Device: Decodable {
     var serial: String?; var firmware: String?
@@ -26,7 +34,11 @@ struct Summary: Decodable {
     var device: Device?
     var nights: [NightRow] = []
     var vitals = Vitals()
+    var activity_profile: [String: [Double]] = [:]   // date → 96 × 15-min mean MET-above-rest
+    var activity_daily: [String: DailyStat] = [:]     // date → steps / active-kcal / total-kcal
     var error: String?
+    /// recent days (newest first) that have a movement profile.
+    var activeDays: [String] { activity_profile.keys.sorted(by: >) }
 }
 
 enum Core {
@@ -130,9 +142,157 @@ struct NightOrbit: View {
     }
 }
 
+// Sleep-stage hypnogram: a strip of colored segments over the night (1=deep …
+// 4=wake), matching the web dashboard's `.hyp`. Renders whenever stage data exists.
+struct Hypnogram: View {
+    let stages: [Int]
+    var height: CGFloat = 40
+    var body: some View {
+        Canvas { ctx, size in
+            guard !stages.isEmpty else { return }
+            let w = size.width / CGFloat(stages.count)
+            for (i, s) in stages.enumerated() {
+                let r = CGRect(x: CGFloat(i) * w, y: 0, width: w + 0.6, height: size.height)
+                ctx.fill(Path(r), with: .color(Obs.stage(s).opacity(0.85)))
+            }
+        }
+        .frame(height: height)
+        .clipShape(RoundedRectangle(cornerRadius: 4))
+    }
+}
+
+// Deep / Light / REM / Awake proportion bar + legend.
+struct StageBreakdown: View {
+    let deep: Double, light: Double, rem: Double, wake: Double
+    private var parts: [(String, Double, Color)] {
+        [("Deep", deep, Obs.deep), ("Light", light, Obs.light), ("REM", rem, Obs.rem), ("Awake", wake, Obs.wake)]
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            GeometryReader { geo in
+                HStack(spacing: 1.5) {
+                    ForEach(parts, id: \.0) { p in
+                        Rectangle().fill(p.2)
+                            .frame(width: max(0, geo.size.width * CGFloat(p.1 / 100) - 1.5))
+                    }
+                    Spacer(minLength: 0)
+                }
+            }
+            .frame(height: 8).clipShape(Capsule())
+            HStack(spacing: 14) {
+                ForEach(parts, id: \.0) { p in
+                    HStack(spacing: 5) {
+                        Circle().fill(p.2).frame(width: 7, height: 7)
+                        Text("\(p.0) ").font(Obs.mono(11)).foregroundStyle(Obs.ink2)
+                            + Text("\(Int(p.1))%").font(Obs.mono(11, .medium)).foregroundStyle(Obs.ink)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Continuous movement ridge from the 96 × 15-min MET-above-rest buckets — the web
+// actogram's ridge, model-free (computed from raw MET). One day's profile.
+struct MovementRidge: View {
+    let profile: [Double]
+    var height: CGFloat = 44
+    var body: some View {
+        Canvas { ctx, size in
+            guard profile.count > 1 else { return }
+            let peak = max(profile.max() ?? 1, 0.5)
+            let n = profile.count
+            func pt(_ i: Int) -> CGPoint {
+                CGPoint(x: size.width * CGFloat(i) / CGFloat(n - 1),
+                        y: size.height * (1 - CGFloat(min(1, profile[i] / peak))))
+            }
+            var area = Path(); area.move(to: CGPoint(x: 0, y: size.height))
+            for i in 0..<n { area.addLine(to: pt(i)) }
+            area.addLine(to: CGPoint(x: size.width, y: size.height)); area.closeSubpath()
+            ctx.fill(area, with: .color(Obs.teal.opacity(0.16)))
+            var line = Path(); line.move(to: pt(0))
+            for i in 1..<n { line.addLine(to: pt(i)) }
+            ctx.stroke(line, with: .color(Obs.teal.opacity(0.8)), style: .init(lineWidth: 1.2, lineJoin: .round))
+        }
+        .frame(height: height)
+    }
+}
+
+// A tappable night summary — opens the detail sheet.
+struct SleepRow: View {
+    let n: NightRow
+    var body: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(n.date ?? "—").font(Obs.mono(13, .medium)).foregroundStyle(Obs.ink)
+                Text("\(n.start ?? "—")→\(n.end ?? "—") · \(n.in_bed_h.map { String(format: "%.1fh", $0) } ?? "—")")
+                    .font(Obs.mono(11)).foregroundStyle(Obs.ink2)
+            }
+            Spacer(minLength: 8)
+            if n.hasHypnogram { Hypnogram(stages: n.stages!, height: 22).frame(width: 120) }
+            else if let e = n.efficiency { Text("\(Int(e))%").font(Obs.mono(13)).foregroundStyle(Obs.ink2) }
+            Image(systemName: "chevron.right").font(.system(size: 11)).foregroundStyle(Obs.trace)
+        }
+        .contentShape(Rectangle())
+    }
+}
+
+// The detail sheet: hypnogram (or a note when on-device staging isn't available yet)
+// + stage breakdown + that night's vitals.
+struct SleepDetail: View {
+    let n: NightRow
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        ZStack {
+            Obs.black.ignoresSafeArea()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(n.date ?? "Sleep").font(Obs.prose(19, .semibold)).foregroundStyle(Obs.ink)
+                            Text("\(n.start ?? "—") → \(n.end ?? "—") · \(n.in_bed_h.map { String(format: "%.1f h in bed", $0) } ?? "—")")
+                                .font(Obs.mono(12)).foregroundStyle(Obs.ink2)
+                        }
+                        Spacer()
+                        Button { dismiss() } label: {
+                            Image(systemName: "xmark").font(.system(size: 13, weight: .medium)).foregroundStyle(Obs.ink2)
+                        }
+                    }
+
+                    ObsTag("hypnogram")
+                    if n.hasHypnogram {
+                        Hypnogram(stages: n.stages!)
+                        StageBreakdown(deep: n.deep_pct ?? 0, light: n.light_pct ?? 0,
+                                       rem: n.rem_pct ?? 0, wake: n.wake_pct ?? 0)
+                    } else {
+                        Text("On-device sleep staging is computed by the SleepNet model, which runs once the on-device torch runner is wired (it powers the web dashboard today). Signal-derived vitals for this night are below.")
+                            .font(Obs.mono(12)).foregroundStyle(Obs.ink2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    ObsTag("that night")
+                    let cells: [(String, String)] = [
+                        ("hrv", n.hrv_ms.map { "\(Int($0)) ms" } ?? "—"),
+                        ("resting hr", n.rhr.map { "\(Int($0)) bpm" } ?? "—"),
+                        ("skin temp", n.skin_temp.map { String(format: "%.1f °c", $0) } ?? "—"),
+                        ("blood o₂", n.spo2_mean.map { "\(Int($0))%" } ?? "—"),
+                        ("efficiency", n.efficiency.map { "\(Int($0))%" } ?? "—"),
+                    ]
+                    VStack(spacing: 12) {
+                        ForEach(cells, id: \.0) { ObsStat(label: $0.0, value: $0.1) }
+                    }
+                }
+                .padding(24)
+            }
+        }
+        .preferredColorScheme(.dark)
+    }
+}
+
 // ── root ─────────────────────────────────────────────────────────────────────
 struct RootView: View {
     private let s = Core.summary()
+    @State private var sheetNight: NightRow?
     private func f(_ v: Double?, _ fallback: String = "—") -> String {
         v.map { "\(Int($0))" } ?? fallback
     }
@@ -177,14 +337,36 @@ struct RootView: View {
                             VitalCell(tag: "blood o₂", value: f(latest?.spo2_mean), unit: "%")
                         }
 
-                        // sleep timing (signal-derived; hypnogram arrives with the torch runner)
-                        if let n = latest {
-                            ObsTag("sleep · \(n.date ?? "")")
-                            VStack(spacing: 12) {
-                                ObsStat(label: "time in bed",
-                                        value: n.in_bed_h.map { String(format: "%.1f h", $0) } ?? "—",
-                                        accent: Obs.teal)
-                                ObsStat(label: "window", value: "\(n.start ?? "—") → \(n.end ?? "—")")
+                        // sleep — every night, tap for the hypnogram + breakdown + vitals
+                        if !s.nights.isEmpty {
+                            ObsTag("sleep · tap a night")
+                            VStack(spacing: 14) {
+                                ForEach(s.nights) { n in
+                                    Button { sheetNight = n } label: { SleepRow(n: n) }
+                                        .buttonStyle(.plain)
+                                }
+                            }
+                        }
+
+                        // activity — the movement ridge (MET) + steps / calories per day
+                        if !s.activeDays.isEmpty {
+                            ObsTag("activity")
+                            VStack(spacing: 18) {
+                                ForEach(s.activeDays.prefix(5), id: \.self) { day in
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        HStack {
+                                            Text(day).font(Obs.mono(12, .medium)).foregroundStyle(Obs.ink2)
+                                            Spacer()
+                                            if let st = s.activity_daily[day] {
+                                                Text("\(Int((st.steps ?? 0))) steps")
+                                                    .font(Obs.mono(11)).foregroundStyle(Obs.ink2)
+                                                Text("· \(Int((st.active_kcal ?? 0))) kcal")
+                                                    .font(Obs.mono(11)).foregroundStyle(Obs.teal)
+                                            }
+                                        }
+                                        MovementRidge(profile: s.activity_profile[day] ?? [])
+                                    }
+                                }
                             }
                         }
 
@@ -208,6 +390,7 @@ struct RootView: View {
             }
         }
         .preferredColorScheme(.dark)
+        .sheet(item: $sheetNight) { SleepDetail(n: $0) }
     }
 }
 

@@ -13,6 +13,17 @@ enum Obs {
     static let teal = Color(red: 0.31, green: 0.82, blue: 0.77)   // in-range / good
     static let yellow = Color(red: 0.90, green: 0.75, blue: 0.30) // the one threshold
 
+    // sleep-stage hues, matching the web dashboard's dark theme (deep darkest → awake
+    // lightest). Used by the hypnogram + stage breakdown.
+    static let deep = Color(red: 0.365, green: 0.412, blue: 0.537)
+    static let light = Color(red: 0.549, green: 0.592, blue: 0.702)
+    static let rem = Color(red: 0.435, green: 0.631, blue: 0.659)
+    static let wake = Color(red: 0.757, green: 0.690, blue: 0.561)
+    /// stage code 1=deep 2=light 3=rem 4=wake (matches run_sleep_model.py)
+    static func stage(_ s: Int) -> Color {
+        switch s { case 1: return deep; case 2: return light; case 3: return rem; default: return wake }
+    }
+
     // Type — SF Mono for every number/axis/tag; SF Pro for prose.
     static func mono(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
         .system(size: size, weight: weight, design: .monospaced)
