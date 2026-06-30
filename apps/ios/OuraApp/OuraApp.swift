@@ -364,7 +364,8 @@ struct RootView: View {
     @State private var sheetNight: NightRow?
     @State private var showAllNights = false
     @State private var showAllActivity = false
-    private let previewCount = 3
+    @State private var showAllWorkouts = false
+    private let previewCount = 1   // last night / last day by default
     private func f(_ v: Double?, _ fallback: String = "—") -> String {
         v.map { "\(Int($0))" } ?? fallback
     }
@@ -487,13 +488,15 @@ struct RootView: View {
                             }
                         }
 
-                        // activity — the movement ridge (MET) + steps / calories per day
-                        // detected workout sessions (on-device activity model)
+                        // detected workout sessions (on-device activity model) — default
+                        // to the most recent day's workouts, expand for the full history
                         let workouts = s.workouts.filter { $0.isWorkout >= 0.5 }
                         if !workouts.isEmpty {
                             ObsTag("workouts")
+                            let lastDay = workouts.map(\.dayLabel).max() ?? ""
+                            let recent = workouts.filter { $0.dayLabel == lastDay }
                             VStack(spacing: 10) {
-                                ForEach(workouts.prefix(8)) { w in
+                                ForEach(showAllWorkouts ? workouts : recent) { w in
                                     HStack {
                                         Text(w.label.prefix(1).uppercased() + w.label.dropFirst())
                                             .font(Obs.mono(13, .medium)).foregroundStyle(Obs.ink)
@@ -501,6 +504,9 @@ struct RootView: View {
                                         Text("\(w.durationMin) min").font(Obs.mono(12)).foregroundStyle(Obs.teal)
                                         Text("\(w.dayLabel.suffix(5)) \(w.startHM)").font(Obs.mono(11)).foregroundStyle(Obs.ink2)
                                     }
+                                }
+                                if workouts.count > recent.count {
+                                    MoreButton(expanded: showAllWorkouts, count: workouts.count, noun: "workouts") { showAllWorkouts.toggle() }
                                 }
                             }
                         }

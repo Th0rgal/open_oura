@@ -151,9 +151,8 @@ function renderNights(d) {
     row.append(right);
     return row;
   };
-  // show a few nights; the rest live in an expandable, scrollable drawer so the
-  // panel never grows unbounded.
-  collapsibleList(box, d.nights, nightRow, 3, "nights");
+  // show last night only; the rest live in an expandable, scrollable drawer.
+  collapsibleList(box, d.nights, nightRow, 1, "nights");
 }
 
 // Render `items` into `box` capped at `preview`; any overflow goes into a
@@ -369,8 +368,9 @@ function renderActivity(d) {
     day.append(stat);
     return day;
   };
-  // show a few days; the rest go in an expandable, scrollable drawer
-  const ACTO_PREVIEW = 3;
+  // show the last day only (its sessions/workouts included); the rest go in an
+  // expandable, scrollable drawer.
+  const ACTO_PREVIEW = 1;
   days.slice(0, ACTO_PREVIEW).forEach((ymd) => lanes.append(buildLane(ymd)));
   if (days.length > ACTO_PREVIEW) {
     const drawer = el("div", "more-list");
