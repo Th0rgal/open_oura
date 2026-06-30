@@ -56,3 +56,19 @@ int oura_sleepnet(const char *model_path,
         return -1;
     }
 }
+
+int oura_cva(const char *model_path, const float *ppg, int n_segs, const float *demo,
+             double *out_vascular_age, double *out_pwv) {
+    try {
+        auto m = torch::jit::_load_for_mobile(std::string(model_path), c10::nullopt);
+        auto ppg_t = blobFloat2d(ppg, n_segs, 1500);
+        auto demo_t = blobFloat2d(demo, 1, 5);
+        auto out = m.forward({ppg_t, demo_t}).toTuple();
+        // (daily_cva, quality, raw_quality, daily_pwv, ppg_segment_metrics)
+        *out_vascular_age = out->elements()[0].toTensor().item<double>();
+        *out_pwv = out->elements()[3].toTensor().item<double>();
+        return 0;
+    } catch (const std::exception &e) {
+        return -1;
+    }
+}

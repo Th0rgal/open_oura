@@ -20,6 +20,12 @@ int oura_sleepnet(const char *model_path,
                   const int64_t *temp_ts, const float *temp_val, int n_temp,
                   int64_t bedtime_start_ms, int64_t bedtime_end_ms,
                   int *out_stages, int max_out);
+
+// Cardiovascular age (cva_2_1_0): forward(ppg [n_segs×1500] f32, demo [1×5] f32) →
+// (vascular_age, …, pwv, …). `ppg` is row-major; `demo` is [sex(-1/0/1), height_m,
+// age, ring, weight]. Writes vascular_age + pulse-wave velocity; returns 0 / -1.
+int oura_cva(const char *model_path, const float *ppg, int n_segs, const float *demo,
+             double *out_vascular_age, double *out_pwv);
 #ifdef __cplusplus
 }
 #endif

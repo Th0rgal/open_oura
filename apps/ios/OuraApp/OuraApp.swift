@@ -21,6 +21,8 @@ struct NightRow: Decodable, Identifiable {
     var hasHypnogram: Bool { (stages?.count ?? 0) > 1 }
 }
 struct DailyStat: Decodable { var active_kcal: Double?; var total_kcal: Double?; var steps: Double? }
+struct Profile: Decodable { var sex: String?; var age: Double?; var height_m: Double?; var weight_kg: Double?; var ring_size: Double? }
+struct Cardio: Decodable { var vascular_age: Double?; var chronological_age: Double?; var pwv_ms: Double?; var segments: Int? }
 struct Stream: Decodable { let name: String; let count: Int }
 struct Device: Decodable {
     var serial: String?; var firmware: String?
@@ -36,6 +38,8 @@ struct Summary: Decodable {
     var vitals = Vitals()
     var activity_profile: [String: [Double]] = [:]   // date → 96 × 15-min mean MET-above-rest
     var activity_daily: [String: DailyStat] = [:]     // date → steps / active-kcal / total-kcal
+    var profile: Profile?
+    var cardio: Cardio?
     var error: String?
     /// recent days (newest first) that have a movement profile.
     var activeDays: [String] { activity_profile.keys.sorted(by: >) }
@@ -70,6 +74,13 @@ enum Core {
             s.nights[i].rem_pct = pct(3); s.nights[i].wake_pct = pct(4)
             let asleep = total - Double(stages.filter { $0 == 4 }.count)
             s.nights[i].efficiency = (asleep / total * 100).rounded()
+        }
+        // cardiovascular age from the ring's raw PPG (cva_2_1_0), on-device
+        if let cva = CvaModel.run(sex: s.profile?.sex ?? "M", age: s.profile?.age ?? 30,
+                                  heightM: s.profile?.height_m ?? 1.78, weightKg: s.profile?.weight_kg ?? 75,
+                                  ringSize: s.profile?.ring_size ?? 10) {
+            s.cardio = Cardio(vascular_age: cva.vascularAge, chronological_age: s.profile?.age ?? 30,
+                              pwv_ms: cva.pwv, segments: cva.segments)
         }
         #endif
         return s
@@ -311,6 +322,12 @@ struct RootView: View {
     private func f(_ v: Double?, _ fallback: String = "—") -> String {
         v.map { "\(Int($0))" } ?? fallback
     }
+    private func relAge(_ diff: Double) -> String {
+        let a = abs((diff * 10).rounded() / 10)
+        if diff < -0.05 { return "\(a) yr younger" }
+        if diff > 0.05 { return "\(a) yr older" }
+        return "in line"
+    }
     var body: some View {
         let latest = s.nights.first
         ZStack {
@@ -365,6 +382,17 @@ struct RootView: View {
                                       value: latest?.skin_temp.map { String(format: "%.1f", $0) } ?? "—",
                                       unit: "°c")
                             VitalCell(tag: "blood o₂", value: f(latest?.spo2_mean), unit: "%")
+                        }
+
+                        // cardiovascular age (on-device CVA model, from raw PPG)
+                        if let cv = s.cardio, let va = cv.vascular_age {
+                            ObsTag("cardiovascular")
+                            VStack(spacing: 12) {
+                                ObsStat(label: "vascular age", value: String(format: "%.1f yr", va), accent: Obs.teal)
+                                if let ca = cv.chronological_age { ObsStat(label: "vs your age", value: relAge(va - ca)) }
+                                if let pwv = cv.pwv_ms { ObsStat(label: "pulse-wave velocity", value: String(format: "%.2f m/s", pwv)) }
+                                if let seg = cv.segments { ObsStat(label: "segments analysed", value: "\(seg)") }
+                            }
                         }
 
                         // sleep — every night, tap for the hypnogram + breakdown + vitals
