@@ -49,7 +49,7 @@ oura --name "Oura Ring 5" --key-file key.hex pair
 # Show / enable measurement features (HR, SpO2 are off after a key-only pairing)
 oura --key-file key.hex features --enable-hr --enable-spo2
 
-# Drain history events into SQLite (incremental; resumes from a saved cursor)
+# Drain history events into SQLite (incremental; app-style setup + flush/ack)
 oura --name "Oura Ring Gen3" --key-file key.hex --db oura.db sync
 
 # Latest cached HR / SpO2 values (ring must be worn)
@@ -94,8 +94,11 @@ those are server-side and out of scope by design (see `docs/data-recovery-map.md
 
 ## Event decoding status
 
-The history-event **envelope** (tag, timestamp, type name) is fully decoded. The
-per-event **body** layouts come from the ring's native `libringeventparser.so`,
+The history-event **envelope** (tag, timestamp, type name) is fully decoded. Ring
+5 may concatenate multiple `tag|length|payload` event frames into one BLE
+notification; the protocol layer walks the whole notification before handing
+events to the store. The per-event **body** layouts come from the ring's native
+`libringeventparser.so`,
 which was decompiled with Ghidra - every parser is a named function
 (`parse_api_temp_event`, `parse_api_hrv_event`, …), so the decoders below are
 **ports of the firmware's own logic**, not guesses (see `docs/native-decoder.md`).
@@ -117,6 +120,8 @@ land. Each decoder has a unit test.
 | `sleep_phase_*` | 2-bit codes, 4/byte | hypnogram deep/light/rem/awake (not emitted yet) |
 | `ambient` / `ehr_acm_intensity` | `u16` LE samples | raw values |
 | `time_sync` / `state_change` / `wear_event` / `alert` / debug | u32 / byte+text | as labelled |
+| `rtc_beacon` (`0x85`) | `u32 unix_s`, reserved bytes, trailer | precise 1-second wall-clock anchor |
+| `cva_raw_ppg_data` (`0x81`) | `0x80 + i24 absolute`, otherwise signed i8 deltas | raw CVA PPG samples (stateless per event) |
 
 **Ring-5 HR/SpO2 sources (empirical):** daytime HR arrives as `green_ibi_quality`
 (`0x80`); overnight HR + amplitude as `ibi_and_amplitude` (`0x60`); SpO2 as the raw
@@ -124,8 +129,9 @@ land. Each decoder has a unit test.
 runtime, so `0x80`/`0x8b` were matched by structure and confirmed against real
 captured bytes (coherent HR, stable physiological R-ratio).
 
-**Still to port** (catalogued from the `.so`, lower priority): the bit-packed
-session-stateful variants (`green_ibi_and_amp`, `spo2_ibi_and_amplitude`), the
+**Still to port** (catalogued from the `.so`, lower priority): fully stateful
+cross-record CVA PPG accumulation, the bit-packed session-stateful variants
+(`green_ibi_and_amp`, `spo2_ibi_and_amplitude`), the
 opaque `sleep_summary_1..4` fields, `motion_period`, `real_steps`, and the ~40
 `debug_data` statistics subtypes. Adding any of these never needs a re-sync - run
 `oura redecode`.

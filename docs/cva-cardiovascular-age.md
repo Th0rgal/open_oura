@@ -8,11 +8,18 @@ be blocked on. With it captured, we can run Oura's own CVA model offline.
 
 ## Decoding tag `0x81`
 
-Each event body is **signed int8 deltas**; a cumulative sum reconstructs the PPG
-ADC samples. The Rust decoder (`oura-protocol`, `decode_cva_raw_ppg`) emits
-`{"ppg_samples": [...], "n": N}` per event (per-event cumsum). A full measurement
-spans a *burst* of consecutive events **<2 s apart** (~1503 samples ≈ 10 s at the
-ring-reported rate, ~140 Hz on Ring 5); concatenate the burst's deltas, then cumsum.
+Each event body is a stateful delta stream. Byte `0x80` marks the next three bytes
+as a signed 24-bit **absolute** ADC sample; every other byte is a signed int8 delta
+from the previous sample. The Rust decoder (`oura-protocol`,
+`decode_cva_raw_ppg`) now understands these absolute markers and emits
+`{"ppg_samples": [...], "n": N, "absolute_markers": M}` per event.
+
+A full measurement spans a *burst* of consecutive events **<2 s apart** (~1503
+samples ≈ 10 s at the ring-reported rate, ~140 Hz on Ring 5). For exact waveform
+continuity, concatenate the burst while carrying the last absolute value across
+adjacent `0x81` records; the generic event-body decoder is intentionally
+stateless and restarts from zero for records that do not contain an absolute
+marker.
 
 Validation that the decode is correct: the reconstructed waveform is pulsatile and
 its **pulse rate matches the independent IBI-derived heart rate** (e.g. 38 bpm from

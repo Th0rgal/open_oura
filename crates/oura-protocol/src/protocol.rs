@@ -74,6 +74,35 @@ impl Packet {
         Some(Packet { tag, payload })
     }
 
+    /// Parse every complete `tag|length|payload` packet concatenated into one BLE
+    /// notification. Ring 5 commonly packs history events this way after
+    /// `GetEvent`; older code that parsed only the first packet silently dropped
+    /// the rest of the notification.
+    pub fn parse_many(frame: &[u8]) -> Vec<Packet> {
+        let mut out = Vec::new();
+        let mut i = 0usize;
+        while i + 2 <= frame.len() {
+            let tag = frame[i];
+            let len = frame[i + 1] as usize;
+            let start = i + 2;
+            let end = start + len;
+            if end > frame.len() {
+                break;
+            }
+            out.push(Packet {
+                tag,
+                payload: frame[start..end].to_vec(),
+            });
+            i = end;
+        }
+        if out.is_empty() {
+            if let Some(p) = Packet::parse(frame) {
+                out.push(p);
+            }
+        }
+        out
+    }
+
     /// The extended op tag (first payload byte) for `0x2f` frames.
     pub fn ext_tag(&self) -> Option<u8> {
         if self.tag == 0x2f {
@@ -122,6 +151,39 @@ pub fn req_sync_time(unix_secs: u64, timezone_half_hours: u8) -> Vec<u8> {
     Packet::new(0x12, payload).encode()
 }
 
+/// App-style time sync used by Ring 4/5 app captures (`12 09 <token>
+/// <unix/256:u24 LE> 00000000 f6`). This stamps the ring's internal RTC and is
+/// the shape observed in the official-app connect sequence.
+pub fn req_sync_time_counter(unix_secs: u64, token: u8) -> Vec<u8> {
+    let counter = (unix_secs / 256) as u32;
+    vec![
+        0x12,
+        0x09,
+        token,
+        (counter & 0xff) as u8,
+        ((counter >> 8) & 0xff) as u8,
+        ((counter >> 16) & 0xff) as u8,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0xf6,
+    ]
+}
+
+/// Enable/disable the app's history/event stream registration (`0x16`).
+pub fn req_stream_subscribe(mode: u8) -> Vec<u8> {
+    Packet::new(0x16, vec![mode]).encode()
+}
+
+/// Subscribe one app event category (`18 03 <category> <flags:u16 LE>`).
+pub fn req_event_subscribe(category: u8, flags: u16) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(3);
+    payload.push(category);
+    payload.extend_from_slice(&flags.to_le_bytes());
+    Packet::new(0x18, payload).encode()
+}
+
 /// Enable/disable the async notification flags (`0x1c`).
 pub fn req_set_notification(flags: u8) -> Vec<u8> {
     Packet::new(0x1c, vec![flags]).encode()
@@ -153,9 +215,37 @@ pub fn req_get_event(start_deciseconds: u32, max_events: u8, flags: i32) -> Vec<
     Packet::new(0x10, payload).encode()
 }
 
+/// Acknowledge history events through `cursor` without asking for more records.
+/// The official app sends this after a fetch burst using `max_events = 0`.
+pub fn req_get_event_ack(cursor: u32) -> Vec<u8> {
+    req_get_event(cursor, 0, -1)
+}
+
+/// Release flash-buffered data into the notification stream (`28 01 00`).
+/// Ring 5 accepts this shape and responds on `0x29`; older docs also label the
+/// same opcode as the sleep-analysis check without force.
+pub fn req_data_flush() -> Vec<u8> {
+    vec![0x28, 0x01, 0x00]
+}
+
 /// Get a feature's status (`0x2f` ext `0x20`).
 pub fn req_feature_status(feature: u8) -> Vec<u8> {
     vec![0x2f, 0x02, 0x20, feature]
+}
+
+/// Generic parameter read (`2f 02 20 <param_id>`) from the app setup sweep.
+pub fn req_param_read(param_id: u8) -> Vec<u8> {
+    vec![0x2f, 0x02, 0x20, param_id]
+}
+
+/// Generic byte-0 parameter write (`2f 03 22 <param_id> <value>`).
+pub fn req_param_write_byte0(param_id: u8, value: u8) -> Vec<u8> {
+    vec![0x2f, 0x03, 0x22, param_id, value]
+}
+
+/// Generic byte-2 parameter write/subscription write (`2f 03 26 <param_id> <value>`).
+pub fn req_param_write_byte2(param_id: u8, value: u8) -> Vec<u8> {
+    vec![0x2f, 0x03, 0x26, param_id, value]
 }
 
 /// Get a feature's latest values (`0x2f` ext `0x24`).
@@ -291,7 +381,11 @@ pub fn req_rdata_get_page(page: u16) -> Vec<u8> {
 /// Configure/start an RData session for one or more signal types. Layout matches
 /// the app's `RDataStart`: `03 <len> 02 <startTime u32 LE> <currentTime u32 LE>
 /// <type bytes...>` (length byte = type count + 9).
-pub fn req_rdata_configure(types: &[rdata::DataType], start_unix: u32, current_unix: u32) -> Vec<u8> {
+pub fn req_rdata_configure(
+    types: &[rdata::DataType],
+    start_unix: u32,
+    current_unix: u32,
+) -> Vec<u8> {
     let mut payload = Vec::with_capacity(types.len() + 9);
     payload.push(rdata::SUB_CONFIGURE);
     payload.extend_from_slice(&start_unix.to_le_bytes());
@@ -322,13 +416,42 @@ mod tests {
     #[test]
     fn get_event_matches_known_hex() {
         // start=0, max=8, flags=-1 -> 10 09 00000000 08 ffffffff
-        assert_eq!(hex::encode(req_get_event(0, 8, -1)), "10090000000008ffffffff");
+        assert_eq!(
+            hex::encode(req_get_event(0, 8, -1)),
+            "10090000000008ffffffff"
+        );
+        assert_eq!(hex::encode(req_get_event_ack(0)), "10090000000000ffffffff");
+    }
+
+    #[test]
+    fn parses_concatenated_packets() {
+        let frames = Packet::parse_many(&hex::decode("0d0639000000360f290100").unwrap());
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].tag, 0x0d);
+        assert_eq!(frames[1].tag, 0x29);
+    }
+
+    #[test]
+    fn app_setup_requests_match_known_hex() {
+        assert_eq!(
+            hex::encode(req_sync_time_counter(0, 0)),
+            "12090000000000000000f6"
+        );
+        assert_eq!(hex::encode(req_stream_subscribe(2)), "160102");
+        assert_eq!(hex::encode(req_event_subscribe(0x14, 0x1000)), "1803140010");
+        assert_eq!(hex::encode(req_data_flush()), "280100");
+        assert_eq!(hex::encode(req_param_read(0x02)), "2f022002");
+        assert_eq!(hex::encode(req_param_write_byte0(0x02, 0x03)), "2f03220203");
+        assert_eq!(hex::encode(req_param_write_byte2(0x02, 0x02)), "2f03260202");
     }
 
     #[test]
     fn realtime_requests_match_known_hex() {
         // ACM (0x20), 1 minute, delay 0 -> 06 07 20000000 0100 00
-        assert_eq!(hex::encode(req_set_realtime(realtime::ACM, 1, 0)), "060720000000010000");
+        assert_eq!(
+            hex::encode(req_set_realtime(realtime::ACM, 1, 0)),
+            "060720000000010000"
+        );
         // off -> 06 04 00000000
         assert_eq!(hex::encode(req_realtime_off()), "060400000000");
     }

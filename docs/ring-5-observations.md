@@ -1,8 +1,10 @@
 # Oura Ring 5 Observations
 
 First-contact BLE findings for the Oura Ring 5, captured on 2026-06-21 in Lisbon
-with the paired phone's Bluetooth disabled. macOS CoreBluetooth hides the real BLE
-MAC, so the identifiers below are macOS peripheral UUIDs unless noted.
+with the paired phone's Bluetooth disabled. Follow-up protocol probes were run on
+2026-06-30 against the same Ring 5 after comparing `LogosIsLife/open_ring`.
+macOS CoreBluetooth hides the real BLE MAC, so the identifiers below are macOS
+peripheral UUIDs unless noted.
 
 The takeaway: Ring 5 uses the **same** GATT layout, framing, and app-auth flow as
 the Ring 3 (see `horizon-ring3-protocol-cheatsheet.md`) and the ringverse Ring 4
@@ -37,6 +39,20 @@ the ring connects more readily while on its charger).
 The client subscribes to every notify/indicate characteristic in the service, so
 the extra Ring 5 characteristics are handled automatically.
 
+## Framing Detail
+
+Control responses use the same `tag | length | payload` framing as Ring 3/4.
+Ring 5 history notifications can contain **multiple framed events concatenated in
+one BLE notification**. A parser must walk the entire notification, consuming
+`2 + length` bytes repeatedly; parsing only the first `tag|len` frame drops most
+events in a packed notification.
+
+Ring 5 history events observed through `GetEvent` still use the local
+`tag | length | <u32 ring timestamp> | body` envelope. The Ring 4 `open_ring`
+driver describes this as an inner record stream with `(counter, session)` fields;
+for Ring 5 the same four bytes are treated as the monotonic ring timestamp cursor
+by this project.
+
 ## First active probes (ring on charger, not worn)
 
 - **Firmware** `0803000000` → `0912020100020103010001090329665544332211`:
@@ -56,6 +72,48 @@ event sync, and live ACM (~50 Hz). With a key installed, control commands
 serial still read unauthenticated. Connect from a fresh scan and keep the ring on
 its charger for reliable advertising.
 
+## 2026-06-30 `open_ring` Gap Probes
+
+Tested with `captures/ring5.key` and captured in ignored
+`captures/ring5-openring-gap-probes.jsonl`. Destructive commands such as factory
+reset, DFU reset, soft reset, and flight mode were **not** run.
+
+Confirmed accepted on Ring 5:
+
+- App-style time sync shape: `12 09 <token> <unix/256:u24 LE> 00 00 00 00 f6`.
+  The zero-counter probe wrote successfully; the Rust library now exposes
+  `req_sync_time_counter` and `OuraClient::sync_time_app`.
+- Stream registration: `16 01 02`.
+- Event category subscription shapes:
+  `18 03 <category> <flags:u16 LE>`; the app-observed categories are
+  `(0x14,0x1000)`, `(0x18,0x1000)`, `(0x28,0x0900)`, `(0x34,0x0400)`,
+  `(0x04,0x1000)`, `(0x08,0x1000)`.
+- App setup parameter sweep:
+  `2f022002`, `2f022004`, `2f020301`, `2f02200b`, `2f02200d`, `2f022003`,
+  `2f02200b`, `2f022010`.
+- Data flush / sleep-analysis opcode shape: `28 01 00` ACKed with `29 01 00`
+  and released buffered history events.
+- History ack-fetch shape: `10 09 <cursor:u32 LE> 00 ff ff ff ff`. When sent
+  from cursor `0`, the ring still streamed buffered history; use the current
+  max cursor, not zero, for a real acknowledgement.
+- DHR burst parameter writes: `2f03220203` and `2f03260202` ACKed and caused
+  dense HR/CVA-related event output. The ring was restored afterward; follow-up
+  `feature-status` showed daytime HR back at `AUTOMATIC` and subscription `0`.
+
+Code changes from these probes:
+
+- `Packet::parse_many` now parses every framed packet in one notification.
+- `OuraClient::setup_app_stream` runs the confirmed app-style stream/category
+  registration and parameter sweep before sync.
+- Event draining now sends `req_data_flush()` before fetches and
+  `req_get_event_ack(cursor)` after successful progress.
+- CVA raw PPG (`0x81`) now treats `0x80` as a 24-bit absolute-sample marker
+  instead of a normal signed delta byte.
+- RTC beacon (`0x85`) is named and decoded as a 1-second wall-clock anchor.
+
 ## Open items specific to Ring 5
 
 - Characterise the roles of the extra `…0004/0005/0006` characteristics.
+- Implement a stateful streaming CVA decoder that carries the `0x81` accumulator
+  across adjacent records. The current event-body decoder is correct for
+  per-record absolute markers but intentionally stateless.

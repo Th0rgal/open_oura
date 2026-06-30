@@ -36,7 +36,11 @@ impl RingEvent {
         } else {
             0
         };
-        let body = if p.len() > 4 { p[4..].to_vec() } else { Vec::new() };
+        let body = if p.len() > 4 {
+            p[4..].to_vec()
+        } else {
+            Vec::new()
+        };
         let name = event_name(packet.tag);
         let decoded = decode_body(packet.tag, &body);
         RingEvent {
@@ -96,10 +100,11 @@ fn decode_body(tag: u8, body: &[u8]) -> Option<serde_json::Value> {
         // spo2_r_pi_event (Ring 5 tag 0x8b): SpO2 R-ratio + perfusion index.
         0x8b => decode_spo2_r_pi(body),
         // cva_raw_ppg_data (tag 0x81): raw PPG for cardiovascular age, emitted when
-        // cva_ppg (CAP_CVA_PPG_SAMPLER) is on. Body = int8 deltas; cumulative-sum
-        // reconstructs the PPG ADC samples (per-event here; a full measurement
-        // concatenates events <2 s apart — see tools/run_cva_model.py).
+        // cva_ppg (CAP_CVA_PPG_SAMPLER) is on. Body is a delta stream with 0x80
+        // absolute-sample markers.
         0x81 => decode_cva_raw_ppg(body),
+        // rtc_beacon: precise unix-second wall-clock anchor (Ring 4/5 captures).
+        0x85 => decode_rtc_beacon(body),
         // ibi_and_amplitude_event: 14-byte packed 6× (IBI delta ms, amplitude).
         0x60 => decode_ibi_amplitude(body),
         // alert_event: single alert-type byte.
@@ -113,9 +118,9 @@ fn decode_body(tag: u8, body: &[u8]) -> Option<serde_json::Value> {
         // BLE/radio telemetry + self-test diagnostics. Identified from the native
         // parser registration table; bodies preserved (layouts are device-internal).
         0x5b => decode_telemetry(body, "ble_connection_ind"), // parse_api_ble_connection_ind @ 0x3c6118
-        0x79 => decode_telemetry(body, "self_test_data"),     // parse_api_selftest_data_event @ 0x3ca74c
-        0x82 => decode_telemetry(body, "scan_start"),         // parse_api_scan_start @ 0x3cbe20
-        0x83 => decode_telemetry(body, "scan_end"),           // parse_api_scan_end @ 0x3cc43c
+        0x79 => decode_telemetry(body, "self_test_data"), // parse_api_selftest_data_event @ 0x3ca74c
+        0x82 => decode_telemetry(body, "scan_start"),     // parse_api_scan_start @ 0x3cbe20
+        0x83 => decode_telemetry(body, "scan_end"),       // parse_api_scan_end @ 0x3cc43c
         // ── Ported from the native parser, NOT YET VALIDATED against captured
         //    bytes (these event types haven't appeared in our syncs). Each emits
         //    `"_status":"unvalidated"`; drop it once confirmed on a real sample.
@@ -124,10 +129,10 @@ fn decode_body(tag: u8, body: &[u8]) -> Option<serde_json::Value> {
         0x4f => decode_sleep_summary_3(body), // parse_api_sleep_summary_3 @ 0x3c78bc
         0x58 => decode_sleep_summary_4(body), // parse_api_sleep_summary_4 @ 0x3c7ad8
         0x7e | 0x7f => decode_real_steps(body), // parse_api_real_steps_features_1/2 @ 0x3c03a4/0x3c0720
-        0x86 => decode_aohr(body),            // parse_api_aohr_event @ 0x3cd4f0
-        0x84 => decode_ambient(body),         // parse_api_ambient_event @ 0x3cefb4
-        0x87 => decode_atlas_metadata(body),  // parse_api_atlas_metadata @ 0x3c3c9c
-        0x88 => decode_atlas_raw_bioz(body),  // parse_atlas_raw_data @ 0x3c4c08
+        0x86 => decode_aohr(body),              // parse_api_aohr_event @ 0x3cd4f0
+        0x84 => decode_ambient(body),           // parse_api_ambient_event @ 0x3cefb4
+        0x87 => decode_atlas_metadata(body),    // parse_api_atlas_metadata @ 0x3c3c9c
+        0x88 => decode_atlas_raw_bioz(body),    // parse_atlas_raw_data @ 0x3c4c08
         _ => None,
     }
 }
@@ -233,24 +238,55 @@ fn decode_u16_samples(body: &[u8], key: &str) -> Option<serde_json::Value> {
     Some(serde_json::json!({ key: v }))
 }
 
-/// `cva_raw_ppg_data` (tag 0x81): raw PPG ADC samples, delta-encoded as signed
-/// int8. Cumulative-sum reconstructs the waveform (per-event, relative to this
-/// event's start). A full CVA measurement concatenates the events of one burst
-/// (<2 s apart, ~1503 samples ≈ 10 s @ ~140 Hz) before the model segments them
-/// into 1500-sample windows — see `tools/run_cva_model.py`.
+/// `cva_raw_ppg_data` (tag 0x81): raw PPG ADC samples. The stream is stateful
+/// across records: `0x80` marks the next three bytes as a signed 24-bit absolute
+/// sample, all other bytes are signed i8 deltas from the previous sample. This
+/// stateless event decoder starts from zero for each body; streaming callers that
+/// need exact continuity should carry the last value across adjacent `0x81`
+/// records.
 fn decode_cva_raw_ppg(body: &[u8]) -> Option<serde_json::Value> {
     if body.is_empty() {
         return None;
     }
+    let mut samples = Vec::new();
     let mut acc: i32 = 0;
-    let samples: Vec<i32> = body
-        .iter()
-        .map(|&b| {
+    let mut i = 0usize;
+    let mut absolutes = 0usize;
+    while i < body.len() {
+        let b = body[i];
+        if b == 0x80 && i + 3 < body.len() {
+            let raw =
+                (body[i + 1] as u32) | ((body[i + 2] as u32) << 8) | ((body[i + 3] as u32) << 16);
+            acc = if raw & 0x80_0000 != 0 {
+                (raw | 0xff00_0000) as i32
+            } else {
+                raw as i32
+            };
+            samples.push(acc);
+            absolutes += 1;
+            i += 4;
+        } else {
             acc += i32::from(b as i8);
-            acc
-        })
-        .collect();
-    Some(serde_json::json!({ "ppg_samples": samples, "n": samples.len() }))
+            samples.push(acc);
+            i += 1;
+        }
+    }
+    Some(
+        serde_json::json!({ "ppg_samples": samples, "n": samples.len(), "absolute_markers": absolutes }),
+    )
+}
+
+/// `rtc_beacon` (tag 0x85): high-precision wall-clock anchor, 1-second granular.
+fn decode_rtc_beacon(body: &[u8]) -> Option<serde_json::Value> {
+    if body.len() < 10 {
+        return None;
+    }
+    let unix = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
+    let trailer = u16::from_le_bytes([body[8], body[9]]);
+    Some(serde_json::json!({
+        "unix_time": unix,
+        "trailer": trailer,
+    }))
 }
 
 /// `activity_information`: a state byte followed by per-bin MET levels. The native
@@ -322,7 +358,11 @@ fn decode_ibi_amplitude(body: &[u8]) -> Option<serde_json::Value> {
         ((b[10] & 1) as u16) | ((b[4] as u16) << 3) | ((b[13] >> 5) & 6) as u16,
         ((b[11] & 1) as u16) | ((b[5] as u16) << 3) | ((b[13] >> 3) & 6) as u16,
     ];
-    let shift = if (b[13] & 0x0f) == 7 { 0 } else { (b[13] & 0x0f) + 1 };
+    let shift = if (b[13] & 0x0f) == 7 {
+        0
+    } else {
+        (b[13] & 0x0f) + 1
+    };
     let amplitude: Vec<u32> = (0..6).map(|k| ((b[6 + k] >> 1) as u32) << shift).collect();
     // heart rate from plausible beats (validated on overnight data ~ median 41 bpm)
     let hr_bpm: Vec<u16> = ibi_ms
@@ -361,7 +401,9 @@ fn decode_sleep_acm_period(body: &[u8]) -> Option<serde_json::Value> {
     }
     let r4 = |v: f64| (v * 10000.0).round() / 10000.0;
     let fp = |frac: u8, intg: u8| intg as f64 + frac as f64 / 255.0;
-    let q12 = |lo: u8, hi: u8| ((lo as u16 | ((hi as u16 & 0x0f) << 8)) as f64 / 4095.0) + (hi >> 4) as f64;
+    let q12 = |lo: u8, hi: u8| {
+        ((lo as u16 | ((hi as u16 & 0x0f) << 8)) as f64 / 4095.0) + (hi >> 4) as f64
+    };
     let vals = [
         r4(fp(body[0], body[1])),
         r4(fp(body[2], body[3])),
@@ -785,6 +827,7 @@ pub fn event_name(tag: u8) -> &'static str {
         0x8b => "spo2_r_pi_event",
         0x82 => "scan_start",
         0x83 => "scan_end",
+        0x85 => "rtc_beacon",
         _ => "unknown",
     }
 }
@@ -987,7 +1030,10 @@ mod tests {
         assert_eq!(r[0].as_f64().unwrap(), 0.783);
         for x in r {
             let rv = x.as_f64().unwrap();
-            assert!((0.5..1.0).contains(&rv), "R {rv} out of physiological range");
+            assert!(
+                (0.5..1.0).contains(&rv),
+                "R {rv} out of physiological range"
+            );
         }
     }
 
@@ -1031,12 +1077,18 @@ mod tests {
 
     #[test]
     fn decodes_cva_raw_ppg() {
-        // Captured cva_raw_ppg_data body (int8 deltas) → cumulative-sum PPG samples.
+        // Captured cva_raw_ppg_data body: 0x80 + 24-bit absolute sample, then
+        // signed i8 deltas.
         let v = decode_cva_raw_ppg(&hex::decode("8029c50702fefefefdfafbf7fd03").unwrap()).unwrap();
-        assert_eq!(v["n"].as_u64().unwrap(), 14);
-        let s: Vec<i64> = v["ppg_samples"].as_array().unwrap().iter().map(|x| x.as_i64().unwrap()).collect();
-        // -128, -128+41, -87-59, -146+7, ...
-        assert_eq!(&s[..4], &[-128, -87, -146, -139]);
-        assert_eq!(*s.last().unwrap(), -166);
+        assert_eq!(v["n"].as_u64().unwrap(), 11);
+        assert_eq!(v["absolute_markers"].as_u64().unwrap(), 1);
+        let s: Vec<i64> = v["ppg_samples"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_i64().unwrap())
+            .collect();
+        assert_eq!(&s[..4], &[509225, 509227, 509225, 509223]);
+        assert_eq!(*s.last().unwrap(), 509198);
     }
 }

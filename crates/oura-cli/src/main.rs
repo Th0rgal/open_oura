@@ -808,9 +808,13 @@ async fn cmd_sync(cli: &Cli, key: &Option<[u8; 16]>, sync_time: bool) -> Result<
 
     let client = connect(cli).await?;
     client.authenticate(key).await.context("authenticating")?;
+    client
+        .setup_app_stream()
+        .await
+        .context("running app-style stream setup")?;
 
     if sync_time {
-        client.sync_time().await.context("syncing time")?;
+        client.sync_time_app().await.context("syncing time")?;
     }
 
     let serial = client.serial().await.unwrap_or_else(|_| "unknown".into());

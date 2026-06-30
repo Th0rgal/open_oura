@@ -2,12 +2,12 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::error::{Error, Result};
+use crate::transport::{transact, Transport};
 use oura_protocol::auth::{encrypt_nonce, AuthResult};
 use oura_protocol::device::{self, Battery, Capability, DeviceInfo};
-use crate::error::{Error, Result};
 use oura_protocol::events::{EventBatchSummary, RingEvent};
 use oura_protocol::protocol::{self, feature, feature_mode, Packet};
-use crate::transport::{transact, Transport};
 
 /// Default quiet window for collecting responses to a request.
 pub const DEFAULT_QUIET: Duration = Duration::from_millis(1500);
@@ -108,7 +108,7 @@ impl<T: Transport> OuraClient<T> {
 
     async fn request(&self, bytes: &[u8]) -> Result<Vec<Packet>> {
         let frames = transact(&self.transport, bytes, self.quiet).await?;
-        Ok(frames.iter().filter_map(|f| Packet::parse(f)).collect())
+        Ok(frames.iter().flat_map(|f| Packet::parse_many(f)).collect())
     }
 
     fn find(packets: &[Packet], tag: u8) -> Option<&Packet> {
@@ -174,7 +174,9 @@ impl<T: Transport> OuraClient<T> {
             .ok_or_else(|| Error::Auth("no nonce response".into()))?;
 
         let encrypted = encrypt_nonce(key, &nonce);
-        let packets = self.request(&protocol::req_authenticate(&encrypted)).await?;
+        let packets = self
+            .request(&protocol::req_authenticate(&encrypted))
+            .await?;
         let state = packets
             .iter()
             .find(|p| p.ext_tag() == Some(0x2e))
@@ -209,9 +211,56 @@ impl<T: Transport> OuraClient<T> {
         Ok(())
     }
 
+    /// Align the ring clock using the official-app `12 09` counter form observed
+    /// on Ring 4/5. Prefer this for app-parity setup; `sync_time` keeps the older
+    /// `u64 unix + timezone` shape used by earlier probes.
+    pub async fn sync_time_app(&self) -> Result<()> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let token = (now as u8).wrapping_mul(37).wrapping_add(0xa5);
+        self.request(&protocol::req_sync_time_counter(now, token))
+            .await?;
+        Ok(())
+    }
+
     /// Enable the async notification flags so the ring pushes events.
     pub async fn set_notification(&self, flags: u8) -> Result<()> {
         self.request(&protocol::req_set_notification(flags)).await?;
+        Ok(())
+    }
+
+    /// Run the app-observed stream registration/capability-read sequence. Ring 5
+    /// accepts these commands; they make the session closer to the official app
+    /// before event fetches or live feature work.
+    pub async fn setup_app_stream(&self) -> Result<()> {
+        self.request(&protocol::req_stream_subscribe(0x02)).await?;
+        // Official app category masks observed by open_ring. These are
+        // registrations, not feature-mode changes.
+        for (category, flags) in [
+            (0x14, 0x1000),
+            (0x18, 0x1000),
+            (0x28, 0x0900),
+            (0x34, 0x0400),
+            (0x04, 0x1000),
+            (0x08, 0x1000),
+        ] {
+            self.request(&protocol::req_event_subscribe(category, flags))
+                .await?;
+        }
+        for req in [
+            protocol::req_param_read(0x02),
+            protocol::req_param_read(0x04),
+            vec![0x2f, 0x02, 0x03, 0x01],
+            protocol::req_param_read(0x0b),
+            protocol::req_param_read(0x0d),
+            protocol::req_param_read(0x03),
+            protocol::req_param_read(0x0b),
+            protocol::req_param_read(0x10),
+        ] {
+            self.request(&req).await?;
+        }
         Ok(())
     }
 
@@ -240,9 +289,12 @@ impl<T: Transport> OuraClient<T> {
         let mut total = 0u32;
         // Safety bound against a misbehaving ring that never reports drained.
         for _ in 0..100_000 {
-            let packets = self
-                .request(&protocol::req_get_event(start, 255, -1))
-                .await?;
+            let mut packets = self.request(&protocol::req_data_flush()).await?;
+            packets.extend(
+                self
+                    .request(&protocol::req_get_event(start, 255, -1))
+                    .await?,
+            );
 
             let mut summary: Option<EventBatchSummary> = None;
             let mut max_ts = start;
@@ -265,6 +317,7 @@ impl<T: Transport> OuraClient<T> {
             let progressed = batch_events > 0 && next > start;
             if progressed {
                 start = next;
+                let _ = self.request(&protocol::req_get_event_ack(start)).await;
                 on_batch(start); // persist incrementally (this batch is fully drained)
             }
             // Stop when drained, or when we can make no further progress.
@@ -283,7 +336,9 @@ impl<T: Transport> OuraClient<T> {
     /// Read a feature's latest cached values (HR / SpO2). Reflects the last
     /// automatic measurement; meaningful only when the ring is worn.
     pub async fn feature_latest(&self, feature_id: u8) -> Result<LatestValues> {
-        let packets = self.request(&protocol::req_feature_latest(feature_id)).await?;
+        let packets = self
+            .request(&protocol::req_feature_latest(feature_id))
+            .await?;
         let p = packets
             .iter()
             .find(|p| p.ext_tag() == Some(0x25))
@@ -338,7 +393,9 @@ impl<T: Transport> OuraClient<T> {
 
     /// Read a feature's status (mode/state/subscription).
     pub async fn feature_status(&self, feature_id: u8) -> Result<FeatureStatus> {
-        let packets = self.request(&protocol::req_feature_status(feature_id)).await?;
+        let packets = self
+            .request(&protocol::req_feature_status(feature_id))
+            .await?;
         packets
             .iter()
             .find_map(FeatureStatus::parse)
@@ -356,7 +413,9 @@ impl<T: Transport> OuraClient<T> {
             .and_then(|p| p.payload.get(2).copied())
         {
             Some(0x00) => Ok(()),
-            Some(other) => Err(Error::Protocol(format!("set_feature_mode result {other:#04x}"))),
+            Some(other) => Err(Error::Protocol(format!(
+                "set_feature_mode result {other:#04x}"
+            ))),
             None => Err(Error::Protocol("no set_feature_mode response".into())),
         }
     }
@@ -388,14 +447,18 @@ impl<T: Transport> OuraClient<T> {
     /// Returns the response status byte (255 if absent).
     pub async fn rdata_stop(&self) -> Result<u8> {
         let packets = self.request(&protocol::req_rdata_stop()).await?;
-        Ok(Self::find(&packets, 0x03).and_then(|p| p.payload.get(1).copied()).unwrap_or(255))
+        Ok(Self::find(&packets, 0x03)
+            .and_then(|p| p.payload.get(1).copied())
+            .unwrap_or(255))
     }
 
     /// Clear the RData session/data from the ring's flash (part of teardown).
     /// Returns the response status byte (255 if absent).
     pub async fn rdata_clear(&self) -> Result<u8> {
         let packets = self.request(&protocol::req_rdata_clear()).await?;
-        Ok(Self::find(&packets, 0x03).and_then(|p| p.payload.get(1).copied()).unwrap_or(255))
+        Ok(Self::find(&packets, 0x03)
+            .and_then(|p| p.payload.get(1).copied())
+            .unwrap_or(255))
     }
 
     /// Configure/arm an RData session for one or more signal types. **This starts
@@ -408,7 +471,11 @@ impl<T: Transport> OuraClient<T> {
         current_unix: u32,
     ) -> Result<(u8, u8)> {
         let packets = self
-            .request(&protocol::req_rdata_configure(types, start_unix, current_unix))
+            .request(&protocol::req_rdata_configure(
+                types,
+                start_unix,
+                current_unix,
+            ))
             .await?;
         Self::find(&packets, 0x03)
             .and_then(|p| Some((*p.payload.first()?, *p.payload.get(1)?)))
@@ -590,10 +657,7 @@ mod tests {
     #[tokio::test]
     async fn reads_firmware_over_mock() {
         let mock = MockTransport::new();
-        mock.on(
-            "0803000000",
-            &["091202000003040301000105000cffeeddccbbaa"],
-        );
+        mock.on("0803000000", &["091202000003040301000105000cffeeddccbbaa"]);
         let client = OuraClient::new(mock).with_quiet(Duration::from_millis(20));
         let info = client.firmware().await.unwrap();
         assert_eq!(info.firmware_version, "3.4.3");
@@ -604,24 +668,22 @@ mod tests {
         let mock = MockTransport::new();
         mock.on("2f012b", &["2f102c0e2d6a0a08c99b4365f458e6e97382"]);
         // The encrypted authenticate request for this key+nonce, then success.
-        mock.on(
-            "2f112da38a8772d3acb6db5c2b516dd56987c8",
-            &["2f022e00"],
-        );
+        mock.on("2f112da38a8772d3acb6db5c2b516dd56987c8", &["2f022e00"]);
         let client = OuraClient::new(mock).with_quiet(Duration::from_millis(20));
         let key: [u8; 16] = hex::decode("4431967d8bacc2659743142b68391d9a")
             .unwrap()
             .try_into()
             .unwrap();
-        assert_eq!(client.authenticate(&key).await.unwrap(), AuthResult::Success);
+        assert_eq!(
+            client.authenticate(&key).await.unwrap(),
+            AuthResult::Success
+        );
     }
 
     #[test]
     fn acm_frame_decodes_two_samples() {
         // 33 0c 32 01 | 0100 0200 0300 | 0400 0500 0600
-        let frame = [
-            0x33, 0x0c, 0x32, 0x01, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0,
-        ];
+        let frame = [0x33, 0x0c, 0x32, 0x01, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0];
         let s = parse_acm_frame(&frame);
         assert_eq!(s.len(), 2);
         assert_eq!((s[0].x, s[0].y, s[0].z), (1, 2, 3));
