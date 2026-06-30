@@ -31,12 +31,14 @@ protocol RingTransport: AnyObject {
     var notifications: AsyncStream<Data> { get }
 }
 
-enum BLEError: Error { case poweredOff, notFound, noWriteCharacteristic, disconnected }
+enum BLEError: Error { case poweredOff, notFound, noWriteCharacteristic, disconnected, timedOut }
 
 /// Scans for an Oura ring advertising the service (filtered by case-insensitive
 /// name), connects, discovers the write + notify characteristics, and bridges them
 /// to `RingTransport`. Mirrors `oura-link::ble::Connection`.
-final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBPeripheralDelegate {
+// @unchecked Sendable: continuations are taken/resumed under `lock`, and the rest of
+// the mutable CB state is only touched on the central manager's callback queue.
+final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBPeripheralDelegate, @unchecked Sendable {
     private var central: CBCentralManager!
     private var peripheral: CBPeripheral?
     private var writeChar: CBCharacteristic?
@@ -46,7 +48,11 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
     lazy var notifications: AsyncStream<Data> = AsyncStream { self.notifyContinuation = $0 }
 
     private var connectCont: CheckedContinuation<Void, Error>?
+    private var writeCont: CheckedContinuation<Void, Error>?
     private var poweredOn = false
+    // delegate callbacks land on a concurrent queue; this serialises take-and-resume
+    // of the continuations so a success and a timeout can't both resume one (a crash).
+    private let lock = NSLock()
 
     init(nameContains: String = "Oura") {
         self.nameContains = nameContains
@@ -59,6 +65,13 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
     func connect(timeout: TimeInterval = 20) async throws {
         try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
             connectCont = c
+            // fail rather than hang forever if the ring never advertises (off the
+            // charger / not worn) or Bluetooth stays off.
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [weak self] in
+                guard let self else { return }
+                self.central.stopScan()
+                self.finishConnect(.failure(BLEError.timedOut))
+            }
             if poweredOn { startScan() }
         }
     }
@@ -67,9 +80,15 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
         central.scanForPeripherals(withServices: [RingUUID.service], options: nil)
     }
 
+    /// Write a request frame and await the ring's GATT acknowledgement, so the caller
+    /// (Rust `OuraClient`, which drives requests sequentially) knows the frame landed
+    /// before sending the next. Resolved in `didWriteValueFor`.
     func write(_ data: Data) async throws {
         guard let p = peripheral, let wc = writeChar else { throw BLEError.noWriteCharacteristic }
-        p.writeValue(data, for: wc, type: .withResponse)
+        try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
+            lock.lock(); writeCont = c; lock.unlock()
+            p.writeValue(data, for: wc, type: .withResponse)
+        }
     }
 
     // ── CBCentralManagerDelegate ──
@@ -107,6 +126,9 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral,
                         error: Error?) {
         notifyContinuation?.finish()
+        // don't strand a caller awaiting a connect or write when the link drops.
+        finishWrite(.failure(BLEError.disconnected))
+        finishConnect(.failure(BLEError.disconnected))
     }
 
     // ── CBPeripheralDelegate ──
@@ -134,9 +156,19 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
         if let v = characteristic.value { notifyContinuation?.yield(v) }
     }
 
+    /// GATT write-with-response acknowledgement (or error) for the in-flight `write`.
+    func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic,
+                    error: Error?) {
+        finishWrite(error.map { .failure($0) } ?? .success(()))
+    }
+
     private func finishConnect(_ result: Result<Void, Error>) {
-        guard let c = connectCont else { return }
-        connectCont = nil
-        c.resume(with: result)
+        lock.lock(); let c = connectCont; connectCont = nil; lock.unlock()
+        c?.resume(with: result)
+    }
+
+    private func finishWrite(_ result: Result<Void, Error>) {
+        lock.lock(); let c = writeCont; writeCont = nil; lock.unlock()
+        c?.resume(with: result)
     }
 }
