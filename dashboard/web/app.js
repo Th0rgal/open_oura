@@ -928,14 +928,19 @@ function showLoadError(msg) {
   dg.textContent = msg;
 }
 
+let LOAD_SEQ = 0;
 async function load() {
+  // guard against overlapping loads (sync/profile-save during an in-flight build):
+  // a slower earlier response must not overwrite a newer one.
+  const seq = ++LOAD_SEQ;
   let d;
   try {
     d = await (await fetch("/api/summary")).json();
   } catch (e) {
-    showLoadError("Could not reach the local server.");
+    if (seq === LOAD_SEQ) showLoadError("Could not reach the local server.");
     return;
   }
+  if (seq !== LOAD_SEQ) return; // a newer load() superseded this response — drop it
   if (d.error) {
     showLoadError(d.error);
     return;

@@ -681,8 +681,8 @@ pub fn build_summary(db: &Path, tz: i64) -> Result<Value> {
             "ibi_and_amplitude_event" | "green_ibi_quality_event" => Some("Heart beats"),
             "ehr_trace_event" | "ehr_acm_intensity_event" => Some("Exercise HR"),
             "motion_event" | "sleep_acm_period" => Some("Motion"),
-            "temp_event" => Some("Skin temp"),
-            "real_step_event_feature_1" => Some("Steps"),
+            "temp_event" | "sleep_temp_event" => Some("Skin temp"),
+            "real_step_event_feature_1" | "real_step_event_feature_2" => Some("Steps"),
             "cva_raw_ppg_data" => Some("Cardio PPG"),
             _ => None,
         };
