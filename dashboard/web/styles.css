@@ -603,6 +603,35 @@ body {
 .adv-kv > div { display: flex; flex-direction: column; gap: 2px; }
 .adv-kv i { font-style: normal; font-size: 10px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--faint); }
 .adv-kv b { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 13px; font-weight: 540; color: var(--text); }
+.key-tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.key-btn {
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--surface-2); color: var(--text);
+  padding: 8px 12px; font-size: 13px;
+}
+.key-btn:hover { border-color: var(--muted); }
+.key-input { position: absolute; inline-size: 1px; block-size: 1px; opacity: 0; pointer-events: none; }
+.key-dialog { width: min(460px, calc(100vw - 32px)); }
+.key-dialog form { padding-bottom: 18px; }
+.qr-wrap {
+  display: grid; place-items: center; margin: 14px 0;
+  background: #fff; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  padding: 12px;
+}
+.qr-wrap canvas { inline-size: 232px; block-size: 232px; max-inline-size: 100%; image-rendering: pixelated; }
+.key-field {
+  width: 100%; box-sizing: border-box; font-family: var(--mono); font-size: 12px; color: var(--text);
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius-sm);
+  padding: 10px 11px; letter-spacing: 0.02em;
+}
+.key-field:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.key-textarea { min-height: 84px; resize: vertical; line-height: 1.45; text-transform: uppercase; }
+.key-video {
+  width: 100%; aspect-ratio: 4 / 3; margin-top: 12px; object-fit: cover;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius-sm);
+}
+.key-actions { flex-wrap: wrap; }
+.key-actions .btn-text:disabled { opacity: 0.45; cursor: not-allowed; }
 .ev-table { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 26px; }
 @media (max-width: 560px) { .ev-table { grid-template-columns: 1fr; } }
 .ev-row { display: grid; grid-template-columns: 1fr 56px 50px; gap: 9px; align-items: center; }

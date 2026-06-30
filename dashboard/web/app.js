@@ -470,6 +470,20 @@ function renderDevice(d) {
     kvItem("History", `${num(dev.days_of_data)} days`);
   ab.append(kv);
 
+  // local auth key portability
+  ab.append(el("p", "subhead", "Ring auth key"));
+  const keyTools = el("div", "key-tools");
+  const exportBtn = el("button", "btn-text key-btn", "Export / QR");
+  exportBtn.type = "button";
+  exportBtn.title = "Show copy, download, and QR options for the local ring auth key.";
+  exportBtn.addEventListener("click", exportRingKey);
+  const importBtn = el("button", "btn-text key-btn", "Import / scan");
+  importBtn.type = "button";
+  importBtn.title = "Paste, upload, or scan a ring auth key.";
+  importBtn.addEventListener("click", openImportKeyDialog);
+  keyTools.append(exportBtn, importBtn);
+  ab.append(keyTools);
+
   // capability toggles
   ab.append(el("p", "subhead", "Capabilities · tap to toggle"));
   const caps = el("div", "caps");
@@ -512,6 +526,290 @@ function renderDevice(d) {
   }
   adv.append(ab);
   box.append(adv);
+}
+
+function ringKeyFilename() {
+  const serial = (window.__lastDeviceSerial || "oura-ring").replace(/[^A-Za-z0-9_.-]+/g, "-");
+  return `${serial}.key`;
+}
+
+async function exportRingKey() {
+  try {
+    const j = await fetchRingKey();
+    if (!j) return;
+    if (!j.ok) {
+      toast(j.message || "No key file is configured. Start the dashboard with --key-file.", "error");
+      return;
+    }
+    openExportKeyDialog(j.key);
+  } catch {
+    toast("Couldn't export the ring auth key.", "error");
+  }
+}
+
+async function fetchRingKey() {
+  const r = await fetch("/api/ring-key");
+  if (!r.ok) {
+    toast("Restart the dashboard server to enable key export.", "error");
+    return null;
+  }
+  return await r.json();
+}
+
+async function copyText(text, ok = "Copied.") {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(ok, "ok");
+  } catch {
+    toast("Couldn't write to the clipboard.", "error");
+  }
+}
+
+function downloadRingKey(key) {
+  const blob = new Blob([key + "\n"], { type: "text/plain" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = ringKeyFilename();
+  document.body.append(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(a.href);
+  toast("Ring auth key downloaded.", "ok");
+}
+
+function openExportKeyDialog(key) {
+  let dlg = $("key-export-dialog");
+  if (!dlg) {
+    dlg = el("dialog", "dialog key-dialog");
+    dlg.id = "key-export-dialog";
+    dlg.addEventListener("click", (e) => { if (e.target === dlg) dlg.close(); });
+    document.body.append(dlg);
+  }
+  dlg.innerHTML = `
+    <form method="dialog">
+      <h3>Ring auth key</h3>
+      <p class="dialog-sub">Use this on another computer running open_oura with the same ring.</p>
+      <div class="qr-wrap"><canvas id="key-qr" width="232" height="232" aria-label="Ring auth key QR code"></canvas></div>
+      <input id="key-export-value" class="key-field" readonly value="${esc(key)}" />
+      <div class="dialog-actions key-actions">
+        <button type="button" id="key-copy" class="btn-primary">Copy</button>
+        <button type="button" id="key-download" class="btn-text">Download</button>
+        <button class="btn-text">Close</button>
+      </div>
+    </form>`;
+  dlg.querySelector("#key-copy").addEventListener("click", () => copyText(key, "Ring auth key copied."));
+  dlg.querySelector("#key-download").addEventListener("click", () => downloadRingKey(key));
+  dlg.showModal();
+  drawQr($("key-qr"), key.toUpperCase());
+}
+
+function openImportKeyDialog() {
+  let dlg = $("key-import-dialog");
+  if (!dlg) {
+    dlg = el("dialog", "dialog key-dialog");
+    dlg.id = "key-import-dialog";
+    dlg.addEventListener("click", (e) => { if (e.target === dlg) closeImportKeyDialog(); });
+    document.body.append(dlg);
+  }
+  const canScan = "BarcodeDetector" in window && navigator.mediaDevices && navigator.mediaDevices.getUserMedia;
+  dlg.innerHTML = `
+    <form method="dialog">
+      <h3>Import ring key</h3>
+      <p class="dialog-sub">Paste a 32-character hex key, upload a .key file, or scan the export QR code.</p>
+      <textarea id="key-import-value" class="key-field key-textarea" spellcheck="false" autocomplete="off" placeholder="32 hex characters"></textarea>
+      <video id="key-scan-video" class="key-video" playsinline muted hidden></video>
+      <div class="dialog-actions key-actions">
+        <button type="button" id="key-import-save" class="btn-primary">Import</button>
+        <button type="button" id="key-import-file" class="btn-text">File</button>
+        <button type="button" id="key-import-scan" class="btn-text"${canScan ? "" : " disabled"}>Scan</button>
+        <button type="button" id="key-import-close" class="btn-text">Close</button>
+      </div>
+      <input id="key-import-file-input" class="key-input" type="file" accept=".key,text/plain" />
+    </form>`;
+  dlg.querySelector("#key-import-save").addEventListener("click", () => importRingKeyText($("key-import-value").value));
+  dlg.querySelector("#key-import-file").addEventListener("click", () => $("key-import-file-input").click());
+  dlg.querySelector("#key-import-file-input").addEventListener("change", (e) => importRingKeyFile(e.target));
+  dlg.querySelector("#key-import-scan").addEventListener("click", startKeyScan);
+  dlg.querySelector("#key-import-close").addEventListener("click", closeImportKeyDialog);
+  dlg.showModal();
+}
+
+function closeImportKeyDialog() {
+  stopKeyScan();
+  const dlg = $("key-import-dialog");
+  if (dlg) dlg.close();
+}
+
+let KEY_SCAN_STREAM = null;
+let KEY_SCAN_STOP = false;
+
+async function startKeyScan() {
+  try {
+    const video = $("key-scan-video");
+    const detector = new BarcodeDetector({ formats: ["qr_code"] });
+    KEY_SCAN_STOP = false;
+    KEY_SCAN_STREAM = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+    video.srcObject = KEY_SCAN_STREAM;
+    video.hidden = false;
+    await video.play();
+    const scan = async () => {
+      if (KEY_SCAN_STOP) return;
+      const codes = await detector.detect(video).catch(() => []);
+      const raw = codes[0] && codes[0].rawValue;
+      if (raw) {
+        $("key-import-value").value = raw.trim();
+        stopKeyScan();
+        toast("QR code scanned.", "ok");
+        return;
+      }
+      requestAnimationFrame(scan);
+    };
+    scan();
+  } catch {
+    toast("Camera QR scan is not available in this browser.", "error");
+    stopKeyScan();
+  }
+}
+
+function stopKeyScan() {
+  KEY_SCAN_STOP = true;
+  if (KEY_SCAN_STREAM) KEY_SCAN_STREAM.getTracks().forEach((t) => t.stop());
+  KEY_SCAN_STREAM = null;
+  const video = $("key-scan-video");
+  if (video) {
+    video.pause();
+    video.srcObject = null;
+    video.hidden = true;
+  }
+}
+
+async function importRingKeyFile(input) {
+  const file = input.files && input.files[0];
+  input.value = "";
+  if (!file) return;
+  try {
+    await importRingKeyText(await file.text());
+  } catch {
+    toast("Couldn't read that key file.", "error");
+  }
+}
+
+async function importRingKeyText(text) {
+  const key = (text || "").trim();
+  if (!/^[0-9a-fA-F]{32}$/.test(key)) {
+    toast("Auth key must be exactly 32 hex characters.", "error");
+    return;
+  }
+  try {
+    const j = await (await fetch("/api/ring-key", {
+      method: "POST",
+      headers: { "X-Oura-Dash": "1", "Content-Type": "application/json" },
+      body: JSON.stringify({ key }),
+    })).json();
+    if (j.ok) {
+      closeImportKeyDialog();
+      toast("Ring auth key imported.", "ok");
+    }
+    else toast(j.message || "Couldn't import the ring auth key.", "error");
+  } catch {
+    toast("Couldn't reach the local dashboard server.", "error");
+  }
+}
+
+// Fixed QR Code version 2-L generator, enough for this 32-char hex key.
+function drawQr(canvas, text) {
+  const n = 25, modules = Array.from({ length: n }, () => Array(n).fill(false));
+  const reserved = Array.from({ length: n }, () => Array(n).fill(false));
+  const set = (x, y, v, r = true) => { if (x >= 0 && y >= 0 && x < n && y < n) { modules[y][x] = v; if (r) reserved[y][x] = true; } };
+  const finder = (x, y) => {
+    for (let dy = -1; dy <= 7; dy++) for (let dx = -1; dx <= 7; dx++) {
+      const xx = x + dx, yy = y + dy;
+      const on = dx >= 0 && dy >= 0 && dx <= 6 && dy <= 6 && (dx === 0 || dy === 0 || dx === 6 || dy === 6 || (dx >= 2 && dx <= 4 && dy >= 2 && dy <= 4));
+      set(xx, yy, on);
+    }
+  };
+  finder(0, 0); finder(n - 7, 0); finder(0, n - 7);
+  for (let i = 8; i < n - 8; i++) { set(i, 6, i % 2 === 0); set(6, i, i % 2 === 0); }
+  for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) set(18 + dx, 18 + dy, Math.max(Math.abs(dx), Math.abs(dy)) !== 1);
+  set(8, n - 8, true);
+  reserveFormatAreas(reserved);
+  const data = qrDataCodewords(text), ecc = qrRs(data, 10), bits = [];
+  data.concat(ecc).forEach((b) => { for (let i = 7; i >= 0; i--) bits.push(((b >>> i) & 1) === 1); });
+  let k = 0, up = true;
+  for (let x = n - 1; x > 0; x -= 2) {
+    if (x === 6) x--;
+    for (let yy = 0; yy < n; yy++) {
+      const y = up ? n - 1 - yy : yy;
+      for (let dx = 0; dx < 2; dx++) {
+        const xx = x - dx;
+        if (reserved[y][xx]) continue;
+        let bit = bits[k++] || false;
+        if ((xx + y) % 2 === 0) bit = !bit;
+        set(xx, y, bit, false);
+      }
+    }
+    up = !up;
+  }
+  placeFormat(modules, reserved, 1, 0);
+  const ctx = canvas.getContext("2d"), scale = Math.floor(canvas.width / (n + 8)), off = Math.floor((canvas.width - n * scale) / 2);
+  ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "#111";
+  for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) if (modules[y][x]) ctx.fillRect(off + x * scale, off + y * scale, scale, scale);
+}
+
+function reserveFormatAreas(reserved) {
+  const n = reserved.length;
+  for (let i = 0; i <= 5; i++) reserved[i][8] = true;
+  reserved[7][8] = true; reserved[8][8] = true; reserved[8][7] = true;
+  for (let i = 9; i < 15; i++) reserved[8][14 - i] = true;
+  for (let i = 0; i < 8; i++) reserved[8][n - 1 - i] = true;
+  for (let i = 8; i < 15; i++) reserved[n - 1 - (14 - i)][8] = true;
+}
+
+function qrDataCodewords(text) {
+  const alpha = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:";
+  const bits = [];
+  const push = (v, n) => { for (let i = n - 1; i >= 0; i--) bits.push((v >>> i) & 1); };
+  push(2, 4); push(text.length, 9);
+  for (let i = 0; i < text.length; i += 2) {
+    const a = alpha.indexOf(text[i]), b = alpha.indexOf(text[i + 1]);
+    if (b >= 0) push(a * 45 + b, 11); else push(a, 6);
+  }
+  push(0, Math.min(4, 272 - bits.length));
+  while (bits.length % 8) bits.push(0);
+  const out = [];
+  for (let i = 0; i < bits.length; i += 8) out.push(bits.slice(i, i + 8).reduce((a, b) => (a << 1) | b, 0));
+  for (let p = 0; out.length < 34; p++) out.push(p % 2 ? 0x11 : 0xec);
+  return out;
+}
+
+function qrRs(data, count) {
+  const mul = (x, y) => { let z = 0; for (; y; y >>>= 1) { if (y & 1) z ^= x; x = (x << 1) ^ (x & 0x80 ? 0x11d : 0); } return z & 255; };
+  let gen = [1];
+  for (let i = 0, root = 1; i < count; i++, root = mul(root, 2)) {
+    const next = Array(gen.length + 1).fill(0);
+    gen.forEach((c, j) => { next[j] ^= mul(c, root); next[j + 1] ^= c; });
+    gen = next;
+  }
+  const rem = Array(count).fill(0);
+  data.forEach((b) => {
+    const factor = b ^ rem.shift();
+    rem.push(0);
+    gen.slice(0, count).forEach((c, i) => { rem[i] ^= mul(c, factor); });
+  });
+  return rem;
+}
+
+function placeFormat(modules, reserved, ecl, mask) {
+  let data = (ecl << 3) | mask, rem = data;
+  for (let i = 0; i < 10; i++) rem = (rem << 1) ^ ((rem >>> 9) * 0x537);
+  const bits = ((data << 10) | rem) ^ 0x5412;
+  const set = (x, y, i) => { modules[y][x] = ((bits >>> i) & 1) === 1; reserved[y][x] = true; };
+  for (let i = 0; i <= 5; i++) set(8, i, i);
+  set(8, 7, 6); set(8, 8, 7); set(7, 8, 8);
+  for (let i = 9; i < 15; i++) set(14 - i, 8, i);
+  for (let i = 0; i < 8; i++) set(24 - i, 8, i);
+  for (let i = 8; i < 15; i++) set(8, 24 - (14 - i), i);
 }
 
 function renderActions(d) {
@@ -643,6 +941,7 @@ async function load() {
     return;
   }
   CURRENT_PROFILE = d.profile || null;
+  window.__lastDeviceSerial = d.device && d.device.serial;
   $("digest").classList.remove("skeleton", "skeleton-text");
   $("digest").classList.add("reveal");
   $("digest").innerHTML = (d.digest || "").replace(/([+-]?\d[\d.]*\s?(?:%|bpm|ms|m\/s))/g, '<span class="metric">$1</span>');

@@ -43,7 +43,11 @@ impl Demographics {
     fn from_json(v: &Value) -> Self {
         let d = Demographics::default();
         Demographics {
-            sex: v["sex"].as_str().and_then(|s| s.chars().next()).unwrap_or(d.sex).to_ascii_uppercase(),
+            sex: v["sex"]
+                .as_str()
+                .and_then(|s| s.chars().next())
+                .unwrap_or(d.sex)
+                .to_ascii_uppercase(),
             age: v["age"].as_f64().unwrap_or(d.age),
             height_m: v["height_m"].as_f64().unwrap_or(d.height_m),
             weight_kg: v["weight_kg"].as_f64().unwrap_or(d.weight_kg),
@@ -53,7 +57,13 @@ impl Demographics {
 }
 impl Default for Demographics {
     fn default() -> Self {
-        Demographics { sex: 'M', age: 30.0, height_m: 1.78, weight_kg: 75.0, ring_size: 10.0 }
+        Demographics {
+            sex: 'M',
+            age: 30.0,
+            height_m: 1.78,
+            weight_kg: 75.0,
+            ring_size: 10.0,
+        }
     }
 }
 
@@ -70,9 +80,40 @@ fn read_profile(db: &Path) -> Demographics {
 }
 fn write_profile(db: &Path, v: &Value) -> Result<Demographics> {
     let demo = Demographics::from_json(v);
-    std::fs::write(profile_path(db), serde_json::to_vec_pretty(&demo.to_json())?)
-        .context("writing profile.json")?;
+    std::fs::write(
+        profile_path(db),
+        serde_json::to_vec_pretty(&demo.to_json())?,
+    )
+    .context("writing profile.json")?;
     Ok(demo)
+}
+
+fn read_ring_key(path: Option<&Path>) -> Result<String> {
+    let path = path.ok_or_else(|| anyhow!("dashboard was started without --key-file"))?;
+    let key = std::fs::read_to_string(path)
+        .with_context(|| format!("reading key file {}", path.display()))?;
+    validate_ring_key(&key)
+}
+
+fn write_ring_key(path: Option<&Path>, key: &str) -> Result<String> {
+    let path = path.ok_or_else(|| anyhow!("dashboard was started without --key-file"))?;
+    let key = validate_ring_key(key)?;
+    std::fs::write(path, format!("{key}\n"))
+        .with_context(|| format!("writing key file {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(key)
+}
+
+fn validate_ring_key(key: &str) -> Result<String> {
+    let key = key.trim();
+    if key.len() != 32 || !key.as_bytes().iter().all(u8::is_ascii_hexdigit) {
+        return Err(anyhow!("auth key must be exactly 16 bytes of hex"));
+    }
+    Ok(key.to_ascii_lowercase())
 }
 
 /// Real on-ring feature modes snapshotted at the last sync (`feature_modes.json` next
@@ -133,19 +174,36 @@ fn spo2_pct(r: f64) -> f64 {
 // ── python model orchestration (same pattern as `oura sessions`) ──────────────
 fn repo_root() -> Option<PathBuf> {
     let marker = Path::new("tools/run_activity_model.py");
-    let find = |start: &Path| start.ancestors().find(|d| d.join(marker).is_file()).map(Path::to_path_buf);
-    std::env::current_dir().ok().and_then(|d| find(&d)).or_else(|| find(Path::new(env!("CARGO_MANIFEST_DIR"))))
+    let find = |start: &Path| {
+        start
+            .ancestors()
+            .find(|d| d.join(marker).is_file())
+            .map(Path::to_path_buf)
+    };
+    std::env::current_dir()
+        .ok()
+        .and_then(|d| find(&d))
+        .or_else(|| find(Path::new(env!("CARGO_MANIFEST_DIR"))))
 }
 
 fn python_bin(root: &Path) -> PathBuf {
     let venv = root.join(".venv/bin/python");
-    if venv.is_file() { venv } else { PathBuf::from("python3") }
+    if venv.is_file() {
+        venv
+    } else {
+        PathBuf::from("python3")
+    }
 }
 
 /// Run a python runner and parse its `--json` stdout. Returns None on any failure
 /// (missing venv/model, night with no data, …) so the dashboard degrades softly.
 fn run_py_json(root: &Path, py: &Path, script: &str, args: &[String]) -> Option<Value> {
-    let out = Command::new(py).current_dir(root).arg(root.join(script)).args(args).output().ok()?;
+    let out = Command::new(py)
+        .current_dir(root)
+        .arg(root.join(script))
+        .args(args)
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -155,7 +213,13 @@ fn run_py_json(root: &Path, py: &Path, script: &str, args: &[String]) -> Option<
 /// Like `run_py_json` but feeds `stdin` to the process — used for the batched sleep
 /// runner, which reads its list of night ranges from stdin. The payload is small
 /// (a few night pairs), so writing it before draining stdout can't deadlock.
-fn run_py_json_stdin(root: &Path, py: &Path, script: &str, args: &[String], stdin: &[u8]) -> Option<Value> {
+fn run_py_json_stdin(
+    root: &Path,
+    py: &Path,
+    script: &str,
+    args: &[String],
+    stdin: &[u8],
+) -> Option<Value> {
     use std::io::Write;
     let mut child = Command::new(py)
         .current_dir(root)
@@ -198,7 +262,10 @@ type VitalStat = (Vec<f64>, Option<f64>, Option<f64>);
 fn vital_stat(per_night: &[Option<f64>]) -> VitalStat {
     let series: Vec<f64> = per_night.iter().filter_map(|x| *x).collect();
     let latest = per_night.last().copied().flatten();
-    let priors: Vec<f64> = per_night[..per_night.len().saturating_sub(1)].iter().filter_map(|x| *x).collect();
+    let priors: Vec<f64> = per_night[..per_night.len().saturating_sub(1)]
+        .iter()
+        .filter_map(|x| *x)
+        .collect();
     (series, latest, mean(&priors))
 }
 
@@ -218,16 +285,25 @@ pub fn build_summary(db: &Path, tz: i64) -> Result<Value> {
     // vitals from one file with sleep/activity/CVA from another. An absolute path
     // makes both sides open the same DB.
     let db_abs = std::fs::canonicalize(db).unwrap_or_else(|_| {
-        std::env::current_dir().map(|d| d.join(db)).unwrap_or_else(|_| db.to_path_buf())
+        std::env::current_dir()
+            .map(|d| d.join(db))
+            .unwrap_or_else(|_| db.to_path_buf())
     });
     let db = db_abs.as_path();
     let demo = read_profile(db);
     let store = Store::open(db).context("opening DB")?;
     let events = store.decoded_events().context("reading events")?;
     if events.is_empty() {
-        return Err(anyhow!("no decoded events in {} — run `oura sync` first", db.display()));
+        return Err(anyhow!(
+            "no decoded events in {} — run `oura sync` first",
+            db.display()
+        ));
     }
-    let (max_ds, anchor_unix) = events.iter().map(|(ds, _, _, cu)| (*ds, *cu)).max_by_key(|(ds, _)| *ds).unwrap();
+    let (max_ds, anchor_unix) = events
+        .iter()
+        .map(|(ds, _, _, cu)| (*ds, *cu))
+        .max_by_key(|(ds, _)| *ds)
+        .unwrap();
     let min_ds = events.iter().map(|(ds, _, _, _)| *ds).min().unwrap();
     let unix_s = |ds: i64| -> f64 { anchor_unix as f64 - (max_ds - ds) as f64 / 10.0 };
 
@@ -244,7 +320,9 @@ pub fn build_summary(db: &Path, tz: i64) -> Result<Value> {
         }
         if n == "bedtime_period" {
             if let Ok(v) = serde_json::from_str::<Value>(jstr) {
-                if let (Some(s), Some(e)) = (v["bedtime_start_ds"].as_i64(), v["bedtime_end_ds"].as_i64()) {
+                if let (Some(s), Some(e)) =
+                    (v["bedtime_start_ds"].as_i64(), v["bedtime_end_ds"].as_i64())
+                {
                     match beds.iter_mut().find(|(bs, _)| *bs == s) {
                         Some(b) => b.1 = b.1.max(e),
                         None => beds.push((s, e)),
@@ -256,10 +334,23 @@ pub fn build_summary(db: &Path, tz: i64) -> Result<Value> {
     beds.sort();
 
     // one pass: accumulate per-night HRV/HR/temp/SpO2
-    let mut nights: Vec<Night> = beds.iter().map(|&(s, e)| Night { start_ds: s, end_ds: e, ..Default::default() }).collect();
-    let find_night = |ds: i64, nights: &[Night]| nights.iter().position(|nt| nt.start_ds - 600 <= ds && ds <= nt.end_ds + 600);
+    let mut nights: Vec<Night> = beds
+        .iter()
+        .map(|&(s, e)| Night {
+            start_ds: s,
+            end_ds: e,
+            ..Default::default()
+        })
+        .collect();
+    let find_night = |ds: i64, nights: &[Night]| {
+        nights
+            .iter()
+            .position(|nt| nt.start_ds - 600 <= ds && ds <= nt.end_ds + 600)
+    };
     for (ds, tag, jstr, _) in &events {
-        let Some(idx) = find_night(*ds, &nights) else { continue };
+        let Some(idx) = find_night(*ds, &nights) else {
+            continue;
+        };
         let n = name_of(*tag);
         let v: Value = match serde_json::from_str(jstr) {
             Ok(v) => v,
@@ -268,20 +359,33 @@ pub fn build_summary(db: &Path, tz: i64) -> Result<Value> {
         match n {
             "hrv_event" => {
                 if let Some(a) = v["rmssd_ms"].as_array() {
-                    nights[idx].rmssd.extend(a.iter().filter_map(|x| x.as_f64()).filter(|&x| x > 0.0));
+                    nights[idx]
+                        .rmssd
+                        .extend(a.iter().filter_map(|x| x.as_f64()).filter(|&x| x > 0.0));
                 }
                 if let Some(a) = v["hr_bpm"].as_array() {
-                    nights[idx].hr.extend(a.iter().filter_map(|x| x.as_f64()).filter(|&x| x > 0.0));
+                    nights[idx]
+                        .hr
+                        .extend(a.iter().filter_map(|x| x.as_f64()).filter(|&x| x > 0.0));
                 }
             }
             "temp_event" | "sleep_temp_event" => {
-                if let Some(c) = v["temps_c"].as_array().and_then(|a| a.first()).and_then(|x| x.as_f64()) {
+                if let Some(c) = v["temps_c"]
+                    .as_array()
+                    .and_then(|a| a.first())
+                    .and_then(|x| x.as_f64())
+                {
                     nights[idx].temp.push(c);
                 }
             }
             "spo2_r_pi_event" => {
                 if let Some(a) = v["r"].as_array() {
-                    nights[idx].spo2.extend(a.iter().filter_map(|x| x.as_f64()).filter(|&x| x > 0.0).map(spo2_pct));
+                    nights[idx].spo2.extend(
+                        a.iter()
+                            .filter_map(|x| x.as_f64())
+                            .filter(|&x| x > 0.0)
+                            .map(spo2_pct),
+                    );
                 }
             }
             _ => {}
@@ -296,24 +400,45 @@ pub fn build_summary(db: &Path, tz: i64) -> Result<Value> {
 
     let sleep_ranges: Vec<[i64; 2]> = nights.iter().map(|nt| [nt.start_ds, nt.end_ds]).collect();
     let sleep_stdin = serde_json::to_vec(&sleep_ranges).unwrap_or_default();
-    let sleep_args = vec![db.display().to_string(), tz.to_string(), "--json".into(), "--batch".into()];
+    let sleep_args = vec![
+        db.display().to_string(),
+        tz.to_string(),
+        "--json".into(),
+        "--batch".into(),
+    ];
     let cva_args = vec![
         db.display().to_string(),
         "--json".into(),
-        "--sex".into(), demo.sex.to_string(),
-        "--age".into(), demo.age.to_string(),
-        "--height".into(), demo.height_m.to_string(),
-        "--weight".into(), demo.weight_kg.to_string(),
-        "--ring".into(), demo.ring_size.to_string(),
+        "--sex".into(),
+        demo.sex.to_string(),
+        "--age".into(),
+        demo.age.to_string(),
+        "--height".into(),
+        demo.height_m.to_string(),
+        "--weight".into(),
+        demo.weight_kg.to_string(),
+        "--ring".into(),
+        demo.ring_size.to_string(),
     ];
-    let act_args = vec![db.display().to_string(), "--tz".into(), tz.to_string(), "--json".into()];
+    let act_args = vec![
+        db.display().to_string(),
+        "--tz".into(),
+        tz.to_string(),
+        "--json".into(),
+    ];
 
     let (sleep_batch, cva, activity_raw) = match (root.as_deref(), py.as_deref()) {
         (Some(r), Some(p)) => std::thread::scope(|s| {
-            let sh = s.spawn(|| run_py_json_stdin(r, p, "tools/run_sleep_model.py", &sleep_args, &sleep_stdin));
+            let sh = s.spawn(|| {
+                run_py_json_stdin(r, p, "tools/run_sleep_model.py", &sleep_args, &sleep_stdin)
+            });
             let ch = s.spawn(|| run_py_json(r, p, "tools/run_cva_model.py", &cva_args));
             let ah = s.spawn(|| run_py_json(r, p, "tools/run_activity_model.py", &act_args));
-            (sh.join().ok().flatten(), ch.join().ok().flatten(), ah.join().ok().flatten())
+            (
+                sh.join().ok().flatten(),
+                ch.join().ok().flatten(),
+                ah.join().ok().flatten(),
+            )
         }),
         _ => (None, None, None),
     };
@@ -323,7 +448,11 @@ pub fn build_summary(db: &Path, tz: i64) -> Result<Value> {
     let hyps: std::collections::HashMap<i64, Value> = sleep_batch
         .as_ref()
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|h| Some((h["start_ds"].as_i64()?, h.clone()))).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|h| Some((h["start_ds"].as_i64()?, h.clone())))
+                .collect()
+        })
         .unwrap_or_default();
 
     // nights JSON (newest first), each enriched with the hypnogram from the model
@@ -331,7 +460,9 @@ pub fn build_summary(db: &Path, tz: i64) -> Result<Value> {
     for nt in &nights {
         let hyp = hyps.get(&nt.start_ds);
         // downsample the per-30s stage array to ~120 cells for the bar
-        let stage_cells = hyp.and_then(|h| h["stages"].as_array()).map(|s| downsample(s, 120));
+        let stage_cells = hyp
+            .and_then(|h| h["stages"].as_array())
+            .map(|s| downsample(s, 120));
         nights_json.push(json!({
             "date": date_label(unix_s(nt.start_ds), tz),
             "start": hm(unix_s(nt.start_ds), tz),
@@ -364,7 +495,7 @@ pub fn build_summary(db: &Path, tz: i64) -> Result<Value> {
     // per-day energy + steps: active kcal = Σ(MET-1)·weight/60; steps estimated from
     // MET cadence (the exact count needs the on-ring step-counter model).
     let mut daily: std::collections::BTreeMap<String, (f64, f64)> = Default::default(); // (active_kcal, steps)
-    // per-local-minute MET above rest, so we can sum active kcal over a session's window.
+                                                                                        // per-local-minute MET above rest, so we can sum active kcal over a session's window.
     let mut met_min: std::collections::BTreeMap<i64, f64> = Default::default();
     let weight = demo.weight_kg;
     for (ds, tag, jstr, _) in &events {
@@ -385,11 +516,18 @@ pub fn build_summary(db: &Path, tz: i64) -> Result<Value> {
                         .clamp(0.0, 95.0) as usize;
                     prof_sum.entry(key.clone()).or_insert([0.0; 96])[bucket] += (mv - 1.0).max(0.0);
                     prof_cnt.entry(key.clone()).or_insert([0; 96])[bucket] += 1;
-                    let step_rate = if mv >= 7.0 { 150.0 } else if mv >= 2.5 { 105.0 } else { 0.0 };
+                    let step_rate = if mv >= 7.0 {
+                        150.0
+                    } else if mv >= 2.5 {
+                        105.0
+                    } else {
+                        0.0
+                    };
                     let e = daily.entry(key).or_insert((0.0, 0.0));
                     e.0 += (mv - 1.0).max(0.0) * weight / 60.0; // active kcal this minute
                     e.1 += step_rate; // steps this minute
-                    *met_min.entry((local / 60.0).floor() as i64).or_insert(0.0) += (mv - 1.0).max(0.0);
+                    *met_min.entry((local / 60.0).floor() as i64).or_insert(0.0) +=
+                        (mv - 1.0).max(0.0);
                 }
             }
         }
@@ -397,7 +535,8 @@ pub fn build_summary(db: &Path, tz: i64) -> Result<Value> {
     // estimated active kcal per detected session: Σ(MET-1)·weight/60 over its minutes,
     // matched by local time. start is "YYYY-MM-DD HH:MM" (local); duration_min is its length.
     for sess in activity.iter_mut() {
-        let (Some(start), Some(dur)) = (sess["start"].as_str(), sess["duration_min"].as_f64()) else {
+        let (Some(start), Some(dur)) = (sess["start"].as_str(), sess["duration_min"].as_f64())
+        else {
             continue;
         };
         let parse = || -> Option<i64> {
@@ -424,11 +563,14 @@ pub fn build_summary(db: &Path, tz: i64) -> Result<Value> {
     let activity_daily: Value = daily
         .iter()
         .map(|(k, (act, steps))| {
-            (k.clone(), json!({
-                "active_kcal": act.round(),
-                "total_kcal": (weight * 24.0 + act).round(),
-                "steps": (steps / 100.0).round() * 100.0,
-            }))
+            (
+                k.clone(),
+                json!({
+                    "active_kcal": act.round(),
+                    "total_kcal": (weight * 24.0 + act).round(),
+                    "steps": (steps / 100.0).round() * 100.0,
+                }),
+            )
         })
         .collect::<serde_json::Map<_, _>>()
         .into();
@@ -439,7 +581,13 @@ pub fn build_summary(db: &Path, tz: i64) -> Result<Value> {
             let arr: Vec<f64> = sums
                 .iter()
                 .zip(cnt.iter())
-                .map(|(s, c)| if *c > 0 { (s / *c as f64 * 100.0).round() / 100.0 } else { 0.0 })
+                .map(|(s, c)| {
+                    if *c > 0 {
+                        (s / *c as f64 * 100.0).round() / 100.0
+                    } else {
+                        0.0
+                    }
+                })
                 .collect();
             (k.clone(), json!(arr))
         })
@@ -450,7 +598,10 @@ pub fn build_summary(db: &Path, tz: i64) -> Result<Value> {
     // the "latest" stays tied to the most recent night rather than silently sliding
     // to an older one).
     let hrv_by_night: Vec<Option<f64>> = nights.iter().map(|n| mean(&n.rmssd)).collect();
-    let rhr_by_night: Vec<Option<f64>> = nights.iter().map(|n| n.hr.iter().cloned().reduce(f64::min)).collect();
+    let rhr_by_night: Vec<Option<f64>> = nights
+        .iter()
+        .map(|n| n.hr.iter().cloned().reduce(f64::min))
+        .collect();
     let hrv_stat = vital_stat(&hrv_by_night);
     let rhr_stat = vital_stat(&rhr_by_night);
     let trend = |stat: &VitalStat| -> Value {
@@ -469,14 +620,40 @@ pub fn build_summary(db: &Path, tz: i64) -> Result<Value> {
     // last sync); fall back to "events seen recently" when we don't have a mode yet.
     let modes = read_feature_modes(db);
     let cap_on = |feature: &str, present: bool| -> bool {
-        modes.get(feature).and_then(Value::as_i64).map(|m| m != 0).unwrap_or(present)
+        modes
+            .get(feature)
+            .and_then(Value::as_i64)
+            .map(|m| m != 0)
+            .unwrap_or(present)
     };
     let measuring = json!([
-        feat("Daytime HR", cap_on("daytime_hr", has("ibi_and_amplitude_event") || has("green_ibi_quality_event")), "daytime_hr"),
+        feat(
+            "Daytime HR",
+            cap_on(
+                "daytime_hr",
+                has("ibi_and_amplitude_event") || has("green_ibi_quality_event")
+            ),
+            "daytime_hr"
+        ),
         feat("SpO2", cap_on("spo2", has("spo2_r_pi_event")), "spo2"),
-        feat("Exercise HR", cap_on("exercise_hr", has("ehr_trace_event")), "exercise_hr"),
-        feat("Real steps", cap_on("real_steps", has("real_step_event_feature_1") || has("real_step_event_feature_2")), "real_steps"),
-        feat("Cardio PPG (CVA)", cap_on("cva_ppg", has("cva_raw_ppg_data")), "cva_ppg"),
+        feat(
+            "Exercise HR",
+            cap_on("exercise_hr", has("ehr_trace_event")),
+            "exercise_hr"
+        ),
+        feat(
+            "Real steps",
+            cap_on(
+                "real_steps",
+                has("real_step_event_feature_1") || has("real_step_event_feature_2")
+            ),
+            "real_steps"
+        ),
+        feat(
+            "Cardio PPG (CVA)",
+            cap_on("cva_ppg", has("cva_raw_ppg_data")),
+            "cva_ppg"
+        ),
     ]);
 
     // data streams: how much of each biometric the ring is actually recording
@@ -498,7 +675,10 @@ pub fn build_summary(db: &Path, tz: i64) -> Result<Value> {
     }
     let mut sv: Vec<(&str, i64)> = sc.into_iter().collect();
     sv.sort_by(|a, b| b.1.cmp(&a.1));
-    let streams = json!(sv.iter().map(|(n, c)| json!({ "name": n, "count": c })).collect::<Vec<_>>());
+    let streams = json!(sv
+        .iter()
+        .map(|(n, c)| json!({ "name": n, "count": c }))
+        .collect::<Vec<_>>());
 
     // full per-type event breakdown (for the advanced/debug section)
     let mut allc: std::collections::BTreeMap<&str, i64> = Default::default();
@@ -507,12 +687,23 @@ pub fn build_summary(db: &Path, tz: i64) -> Result<Value> {
     }
     let mut allv: Vec<(&str, i64)> = allc.into_iter().collect();
     allv.sort_by(|a, b| b.1.cmp(&a.1));
-    let event_counts = json!(allv.iter().map(|(n, c)| json!({ "name": n, "count": c })).collect::<Vec<_>>());
+    let event_counts = json!(allv
+        .iter()
+        .map(|(n, c)| json!({ "name": n, "count": c }))
+        .collect::<Vec<_>>());
     let insight = |name: &str, live: bool, why: &str| json!({"name": name, "status": if live {"live"} else {"gated"}, "why": why});
     let insights = json!([
         insight("Sleep stages", true, ""),
-        insight("Apnea / breathing", has("ibi_and_amplitude_event"), "needs overnight IBI"),
-        insight("Cardiovascular age", has("cva_raw_ppg_data"), "enable cva_ppg"),
+        insight(
+            "Apnea / breathing",
+            has("ibi_and_amplitude_event"),
+            "needs overnight IBI"
+        ),
+        insight(
+            "Cardiovascular age",
+            has("cva_raw_ppg_data"),
+            "enable cva_ppg"
+        ),
         insight("SpO2", has("spo2_r_pi_event"), "enable spo2"),
         insight("Activity sessions", true, ""),
         insight("HRV / resting HR", true, ""),
@@ -540,7 +731,10 @@ pub fn build_summary(db: &Path, tz: i64) -> Result<Value> {
     let last_sync = dev.as_ref().map(|d| d.6).filter(|&t| t > 0);
     let synced_unix = last_sync.map(|t| t as f64);
 
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as f64).unwrap_or(anchor_unix as f64);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as f64)
+        .unwrap_or(anchor_unix as f64);
     let device = json!({
         "serial": dev.as_ref().map(|d| d.0.clone()),
         "hardware_id": dev.as_ref().map(|d| d.1.clone()).filter(|s| !s.is_empty()),
@@ -622,7 +816,11 @@ fn make_digest(hrv: &VitalStat, rhr: &VitalStat, nights: &[Night], cva: &Option<
         parts.push(format!("HRV {}{:.0}%", if p >= 0.0 { "+" } else { "" }, p));
     }
     if let Some(d) = rhr_delta {
-        parts.push(format!("resting HR {}{:.0} bpm", if d >= 0.0 { "+" } else { "" }, d));
+        parts.push(format!(
+            "resting HR {}{:.0} bpm",
+            if d >= 0.0 { "+" } else { "" },
+            d
+        ));
     }
     // recovery reads the actual signals: rising HRV is good; if HRV is unavailable,
     // fall back to resting HR *falling* being good (never the raw sign of an HR rise).
@@ -633,7 +831,11 @@ fn make_digest(hrv: &VitalStat, rhr: &VitalStat, nights: &[Night], cva: &Option<
     };
     let mut s = parts.join(", ");
     if !s.is_empty() {
-        s.push_str(if recovering { ". Recovering well." } else { ". Recovery dipping, take it easy." });
+        s.push_str(if recovering {
+            ". Recovering well."
+        } else {
+            ". Recovery dipping, take it easy."
+        });
     }
     let _ = (nights, cva);
     if s.is_empty() {
@@ -683,9 +885,16 @@ fn cached_summary(db: &Path, tz: i64) -> Result<Arc<Value>> {
         let mut guard = summary_cache().lock().unwrap();
         // don't clobber a fresher entry a concurrent build already stored (compare
         // the DB mtime, which a sync advances)
-        let newer_exists = guard.as_ref().is_some_and(|c| c.db == db && c.tz == tz && c.token.0 > token.0);
+        let newer_exists = guard
+            .as_ref()
+            .is_some_and(|c| c.db == db && c.tz == tz && c.token.0 > token.0);
         if !newer_exists {
-            *guard = Some(SummaryCache { db: db.to_path_buf(), tz, token, value: value.clone() });
+            *guard = Some(SummaryCache {
+                db: db.to_path_buf(),
+                tz,
+                token,
+                value: value.clone(),
+            });
         }
     }
     Ok(value)
@@ -704,7 +913,9 @@ pub async fn serve(
     if !profile_path(&db).exists() {
         let _ = write_profile(&db, &seed.to_json());
     }
-    let listener = TcpListener::bind(("127.0.0.1", port)).await.context("binding port")?;
+    let listener = TcpListener::bind(("127.0.0.1", port))
+        .await
+        .context("binding port")?;
     println!("open_oura dashboard running — open http://127.0.0.1:{port} in your browser");
     loop {
         let (sock, _) = listener.accept().await?;
@@ -745,7 +956,13 @@ async fn write_resp(sock: &mut TcpStream, status: &str, ctype: &str, body: &[u8]
 }
 
 async fn json_resp(sock: &mut TcpStream, v: &Value) -> Result<()> {
-    write_resp(sock, "200 OK", "application/json", serde_json::to_vec(v)?.as_slice()).await
+    write_resp(
+        sock,
+        "200 OK",
+        "application/json",
+        serde_json::to_vec(v)?.as_slice(),
+    )
+    .await
 }
 
 async fn handle(
@@ -774,7 +991,10 @@ async fn handle(
     // vendored SVG icons (Phosphor), served from disk
     if path.starts_with("/icons/") && path.ends_with(".svg") && !path.contains("..") {
         if let Some(root) = repo_root() {
-            if let Ok(bytes) = std::fs::read(root.join("dashboard/web").join(path.trim_start_matches('/'))) {
+            if let Ok(bytes) = std::fs::read(
+                root.join("dashboard/web")
+                    .join(path.trim_start_matches('/')),
+            ) {
                 return write_resp(&mut sock, "200 OK", "image/svg+xml", &bytes).await;
             }
         }
@@ -784,36 +1004,85 @@ async fn handle(
     // CSRF guard for mutating/action endpoints: a same-origin fetch can set this
     // header; an <img>/<form> or cross-origin fetch cannot (CORS preflight we never approve).
     let csrf_ok = header(&req, "x-oura-dash").is_some();
-    let forbid = matches!((method, path), ("POST", "/api/profile") | ("POST", "/api/sync") | ("POST", "/api/feature")) && !csrf_ok;
+    let forbid = matches!(
+        (method, path),
+        ("POST", "/api/profile")
+            | ("POST", "/api/sync")
+            | ("POST", "/api/feature")
+            | ("POST", "/api/ring-key")
+    ) && !csrf_ok;
     if forbid {
         return write_resp(&mut sock, "403 Forbidden", "text/plain", b"forbidden").await;
     }
 
     match (method, path) {
-        (_, "/") | (_, "/index.html") => write_resp(&mut sock, "200 OK", "text/html; charset=utf-8", &asset("index.html", INDEX_HTML)).await,
-        (_, "/styles.css") => write_resp(&mut sock, "200 OK", "text/css; charset=utf-8", &asset("styles.css", STYLES_CSS)).await,
-        (_, "/app.js") => write_resp(&mut sock, "200 OK", "text/javascript; charset=utf-8", &asset("app.js", APP_JS)).await,
+        (_, "/") | (_, "/index.html") => {
+            write_resp(
+                &mut sock,
+                "200 OK",
+                "text/html; charset=utf-8",
+                &asset("index.html", INDEX_HTML),
+            )
+            .await
+        }
+        (_, "/styles.css") => {
+            write_resp(
+                &mut sock,
+                "200 OK",
+                "text/css; charset=utf-8",
+                &asset("styles.css", STYLES_CSS),
+            )
+            .await
+        }
+        (_, "/app.js") => {
+            write_resp(
+                &mut sock,
+                "200 OK",
+                "text/javascript; charset=utf-8",
+                &asset("app.js", APP_JS),
+            )
+            .await
+        }
         ("GET", "/api/summary") => {
             // building the summary shells out to torch models → off the async
             // executor; cached so only the first load (or post-sync/edit) pays for it.
-            let body = tokio::task::spawn_blocking(move || cached_summary(&db, tz)).await.map_err(|e| anyhow!(e))?;
+            let body = tokio::task::spawn_blocking(move || cached_summary(&db, tz))
+                .await
+                .map_err(|e| anyhow!(e))?;
             match body {
                 Ok(v) => json_resp(&mut sock, &v).await,
                 Err(e) => json_resp(&mut sock, &json!({ "error": e.to_string() })).await,
             }
         }
         ("GET", "/api/profile") => json_resp(&mut sock, &read_profile(&db).to_json()).await,
-        ("POST", "/api/profile") => match serde_json::from_str::<Value>(body.trim_end_matches('\0')) {
-            Ok(v) => match write_profile(&db, &v) {
-                Ok(d) => json_resp(&mut sock, &d.to_json()).await,
+        ("POST", "/api/profile") => {
+            match serde_json::from_str::<Value>(body.trim_end_matches('\0')) {
+                Ok(v) => match write_profile(&db, &v) {
+                    Ok(d) => json_resp(&mut sock, &d.to_json()).await,
+                    Err(e) => json_resp(&mut sock, &json!({ "error": e.to_string() })).await,
+                },
                 Err(e) => json_resp(&mut sock, &json!({ "error": e.to_string() })).await,
-            },
-            Err(e) => json_resp(&mut sock, &json!({ "error": e.to_string() })).await,
+            }
+        }
+        ("GET", "/api/ring-key") => match read_ring_key(key_file.as_deref()) {
+            Ok(key) => json_resp(&mut sock, &json!({ "ok": true, "key": key })).await,
+            Err(e) => json_resp(&mut sock, &json!({ "ok": false, "message": e.to_string() })).await,
         },
+        ("POST", "/api/ring-key") => {
+            let req =
+                serde_json::from_str::<Value>(body.trim_end_matches('\0')).unwrap_or(Value::Null);
+            match write_ring_key(key_file.as_deref(), req["key"].as_str().unwrap_or("")) {
+                Ok(_) => json_resp(&mut sock, &json!({ "ok": true })).await,
+                Err(e) => {
+                    json_resp(&mut sock, &json!({ "ok": false, "message": e.to_string() })).await
+                }
+            }
+        }
         ("POST", "/api/sync") => {
-            let res = tokio::task::spawn_blocking(move || run_sync(&db, &name, key_file.as_deref()))
-                .await
-                .map_err(|e| anyhow!(e))?;
+            let res =
+                tokio::task::spawn_blocking(move || run_sync(&db, &name, key_file.as_deref()))
+                    .await
+                    .map_err(|e| anyhow!(e))?;
             let v = match res {
                 Ok(msg) => json!({ "ok": true, "message": msg }),
                 Err(e) => json!({ "ok": false, "message": e.to_string() }),
@@ -821,12 +1090,15 @@ async fn handle(
             json_resp(&mut sock, &v).await
         }
         ("POST", "/api/feature") => {
-            let req = serde_json::from_str::<Value>(body.trim_end_matches('\0')).unwrap_or(Value::Null);
+            let req =
+                serde_json::from_str::<Value>(body.trim_end_matches('\0')).unwrap_or(Value::Null);
             let feature = req["feature"].as_str().unwrap_or("").to_string();
             let mode = req["mode"].as_str().unwrap_or("").to_string();
-            let res = tokio::task::spawn_blocking(move || run_feature(&db, &name, key_file.as_deref(), &feature, &mode))
-                .await
-                .map_err(|e| anyhow!(e))?;
+            let res = tokio::task::spawn_blocking(move || {
+                run_feature(&db, &name, key_file.as_deref(), &feature, &mode)
+            })
+            .await
+            .map_err(|e| anyhow!(e))?;
             let v = match res {
                 Ok(msg) => json!({ "ok": true, "message": msg }),
                 Err(e) => json!({ "ok": false, "message": e.to_string() }),
@@ -849,8 +1121,12 @@ fn run_sync(db: &Path, name: &str, key_file: Option<&Path>) -> Result<String> {
     let mut last = String::from("sync failed");
     for attempt in 0..3 {
         let mut c = Command::new(&exe);
-        c.arg("--db").arg(db).arg("--name").arg(name)
-            .arg("--scan-timeout").arg("40"); // global flag; wider than the 25 s default
+        c.arg("--db")
+            .arg(db)
+            .arg("--name")
+            .arg(name)
+            .arg("--scan-timeout")
+            .arg("40"); // global flag; wider than the 25 s default
         if let Some(k) = key_file {
             c.arg("--key-file").arg(k);
         }
@@ -861,12 +1137,20 @@ fn run_sync(db: &Path, name: &str, key_file: Option<&Path>) -> Result<String> {
             return Ok(stdout.lines().last().unwrap_or("synced").trim().to_string());
         }
         let stderr = String::from_utf8_lossy(&out.stderr);
-        last = stderr.lines().last().unwrap_or("sync failed").trim().to_string();
+        last = stderr
+            .lines()
+            .last()
+            .unwrap_or("sync failed")
+            .trim()
+            .to_string();
         // only a scan miss is worth retrying; a real error (auth, etc.) is not
         let transient = {
             let l = last.to_lowercase();
-            l.contains("no matching") || l.contains("not found") || l.contains("no device")
-                || l.contains("timed out") || l.contains("timeout")
+            l.contains("no matching")
+                || l.contains("not found")
+                || l.contains("no device")
+                || l.contains("timed out")
+                || l.contains("timeout")
         };
         if !transient || attempt == 2 {
             break;
@@ -881,8 +1165,22 @@ fn run_sync(db: &Path, name: &str, key_file: Option<&Path>) -> Result<String> {
 /// the auth key, so we fail early (with a clear message) if the dashboard was launched
 /// without `--key-file`. Scan misses retry; the ring's "already in that mode" rejection
 /// (result `0x20`) is reported as a no-op success rather than an error.
-fn run_feature(db: &Path, name: &str, key_file: Option<&Path>, feature: &str, mode: &str) -> Result<String> {
-    const FEATS: &[&str] = &["daytime_hr", "spo2", "exercise_hr", "real_steps", "cva_ppg", "ambient", "resting_hr"];
+fn run_feature(
+    db: &Path,
+    name: &str,
+    key_file: Option<&Path>,
+    feature: &str,
+    mode: &str,
+) -> Result<String> {
+    const FEATS: &[&str] = &[
+        "daytime_hr",
+        "spo2",
+        "exercise_hr",
+        "real_steps",
+        "cva_ppg",
+        "ambient",
+        "resting_hr",
+    ];
     if !FEATS.contains(&feature) {
         return Err(anyhow!("unknown feature"));
     }
@@ -897,9 +1195,18 @@ fn run_feature(db: &Path, name: &str, key_file: Option<&Path>, feature: &str, mo
     let mut last = String::from("toggle failed");
     for attempt in 0..3 {
         let mut c = Command::new(&exe);
-        c.arg("--db").arg(db).arg("--name").arg(name)
-            .arg("--scan-timeout").arg("40").arg("--key-file").arg(key_file)
-            .arg("feature-mode").arg(feature).arg("--mode").arg(mode);
+        c.arg("--db")
+            .arg(db)
+            .arg("--name")
+            .arg(name)
+            .arg("--scan-timeout")
+            .arg("40")
+            .arg("--key-file")
+            .arg(key_file)
+            .arg("feature-mode")
+            .arg(feature)
+            .arg("--mode")
+            .arg(mode);
         let out = c.output().context("running `oura feature-mode`")?;
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -910,12 +1217,21 @@ fn run_feature(db: &Path, name: &str, key_file: Option<&Path>, feature: &str, mo
             // ring refuses to set a mode it's already in → it's already in that state
             return Ok(format!("{feature} is already {on} (no change needed)"));
         }
-        last = stdout.lines().chain(stderr.lines()).filter(|l| !l.trim().is_empty()).last()
-            .unwrap_or("toggle failed").trim().to_string();
+        last = stdout
+            .lines()
+            .chain(stderr.lines())
+            .filter(|l| !l.trim().is_empty())
+            .last()
+            .unwrap_or("toggle failed")
+            .trim()
+            .to_string();
         let transient = {
             let l = last.to_lowercase();
-            l.contains("no matching") || l.contains("not found") || l.contains("no device")
-                || l.contains("timed out") || l.contains("timeout")
+            l.contains("no matching")
+                || l.contains("not found")
+                || l.contains("no device")
+                || l.contains("timed out")
+                || l.contains("timeout")
         };
         if !transient || attempt == 2 {
             break;

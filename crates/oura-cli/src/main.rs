@@ -800,6 +800,31 @@ async fn cmd_sync(cli: &Cli, key: &Option<[u8; 16]>, sync_time: bool) -> Result<
         outcome.events_synced, inserted, outcome.next_cursor
     );
 
+    // While connected + authed, snapshot the real on-ring feature modes so the
+    // dashboard can show actual on/off (not just "events seen recently"). Best-effort:
+    // written next to the DB as feature_modes.json; a read failure never fails the sync.
+    {
+        let feats = [
+            (0x02u8, "daytime_hr"), (0x03, "exercise_hr"), (0x04, "spo2"),
+            (0x08, "resting_hr"), (0x0b, "real_steps"), (0x0c, "experimental"), (0x0d, "cva_ppg"),
+        ];
+        let mut modes = serde_json::Map::new();
+        for (id, name) in feats {
+            if let Ok(s) = client.feature_status(id).await {
+                modes.insert(name.to_string(), serde_json::json!(s.mode));
+            }
+        }
+        if !modes.is_empty() {
+            let at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            modes.insert("_at".into(), serde_json::json!(at));
+            let path = cli.db.parent().unwrap_or_else(|| std::path::Path::new(".")).join("feature_modes.json");
+            let _ = std::fs::write(path, serde_json::to_vec_pretty(&serde_json::Value::Object(modes)).unwrap_or_default());
+        }
+    }
+
     let _ = client.transport().disconnect().await;
     Ok(())
 }
