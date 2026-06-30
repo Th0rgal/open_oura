@@ -33,7 +33,7 @@ xcrun -sdk iphonesimulator swiftc \
     -import-objc-header "$APPDIR/TorchBridge.h" \
     -I "$GEN/headers" \
     "$GEN/oura_core.swift" "$APPDIR/Theme.swift" "$APPDIR/OuraApp.swift" \
-    "$APPDIR/SleepStaging.swift" "$APPDIR/CvaModel.swift" "$BUILD/TorchBridge.o" \
+    "$APPDIR/SleepStaging.swift" "$APPDIR/CvaModel.swift" "$APPDIR/ActivityModel.swift" "$BUILD/TorchBridge.o" \
     -L "$XCF" -loura_core \
     -lc++ -lsqlite3 \
     -L "$LT/lib" -ltorch -ltorch_cpu -lc10 \
@@ -47,6 +47,7 @@ cp "$LT/lib/libtorch.dylib" "$LT/lib/libtorch_cpu.dylib" \
    "$LT/lib/libc10.dylib" "$LT/lib/libtorch_global_deps.dylib" "$APP/Frameworks/"
 cp "$REPO/notes/models/mobile/sleepnet_moonstone_1_2_0.ptl" "$APP/sleepnet_moonstone_1_2_0.ptl"
 cp "$REPO/notes/models/mobile/cva_2_1_0.ptl" "$APP/cva_2_1_0.ptl"
+cp "$REPO/notes/models/mobile/automatic_activity_detection_3_1_11.ptl" "$APP/automatic_activity_detection_3_1_11.ptl"
 cp "$REPO/oura.db" "$APP/oura.db"
 # app icon (asset catalog) for completeness
 [ -d "$APPDIR/Assets.xcassets" ] && xcrun actool "$APPDIR/Assets.xcassets" \

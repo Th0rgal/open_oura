@@ -22,6 +22,13 @@ struct NightRow: Decodable, Identifiable {
 }
 struct DailyStat: Decodable { var active_kcal: Double?; var total_kcal: Double?; var steps: Double? }
 struct Profile: Decodable { var sex: String?; var age: Double?; var height_m: Double?; var weight_kg: Double?; var ring_size: Double? }
+// a detected activity session (on-device automatic_activity_detection)
+struct WorkoutSession: Identifiable {
+    let start: String; let end: String; let durationMin: Int; let label: String; let isWorkout: Double
+    var id: String { start + label }
+    var dayLabel: String { String(start.prefix(10)) }      // YYYY-MM-DD
+    var startHM: String { String(start.suffix(5)) }        // HH:MM
+}
 struct Cardio: Decodable { var vascular_age: Double?; var chronological_age: Double?; var pwv_ms: Double?; var segments: Int? }
 struct Stream: Decodable { let name: String; let count: Int }
 struct Device: Decodable {
@@ -40,7 +47,12 @@ struct Summary: Decodable {
     var activity_daily: [String: DailyStat] = [:]     // date → steps / active-kcal / total-kcal
     var profile: Profile?
     var cardio: Cardio?
+    var workouts: [WorkoutSession] = []   // on-device only (not in the JSON)
     var error: String?
+    // `workouts` is filled on-device (not in the FFI JSON), so keep it out of decoding.
+    enum CodingKeys: String, CodingKey {
+        case digest, device, nights, vitals, activity_profile, activity_daily, profile, cardio, error
+    }
     /// recent days (newest first) that have a movement profile.
     var activeDays: [String] { activity_profile.keys.sorted(by: >) }
 }
@@ -82,6 +94,8 @@ enum Core {
             s.cardio = Cardio(vascular_age: cva.vascularAge, chronological_age: s.profile?.age ?? 30,
                               pwv_ms: cva.pwv, segments: cva.segments)
         }
+        // detected activity sessions (automatic_activity_detection), on-device
+        s.workouts = ActivityModel.run()
         #endif
         return s
     }
@@ -429,6 +443,23 @@ struct RootView: View {
                         }
 
                         // activity — the movement ridge (MET) + steps / calories per day
+                        // detected workout sessions (on-device activity model)
+                        let workouts = s.workouts.filter { $0.isWorkout >= 0.5 }
+                        if !workouts.isEmpty {
+                            ObsTag("workouts")
+                            VStack(spacing: 10) {
+                                ForEach(workouts.prefix(8)) { w in
+                                    HStack {
+                                        Text(w.label.prefix(1).uppercased() + w.label.dropFirst())
+                                            .font(Obs.mono(13, .medium)).foregroundStyle(Obs.ink)
+                                        Spacer()
+                                        Text("\(w.durationMin) min").font(Obs.mono(12)).foregroundStyle(Obs.teal)
+                                        Text("\(w.dayLabel.suffix(5)) \(w.startHM)").font(Obs.mono(11)).foregroundStyle(Obs.ink2)
+                                    }
+                                }
+                            }
+                        }
+
                         if !s.activeDays.isEmpty {
                             ObsTag("activity")
                             VStack(spacing: 18) {

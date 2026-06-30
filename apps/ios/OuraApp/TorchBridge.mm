@@ -72,3 +72,42 @@ int oura_cva(const char *model_path, const float *ppg, int n_segs, const float *
         return -1;
     }
 }
+
+static at::Tensor mat(const float *p, int rows, int cols) {
+    return rows > 0 ? blobFloat2d(p, rows, cols) : at::empty({0, cols}, at::kFloat);
+}
+
+int oura_activity(const char *model_path, const float *context, const float *user,
+                  const float *met, int n_met, const float *motion, int n_motion,
+                  const float *temp, int n_temp, const float *hr, int n_hr,
+                  float threshold, float min_duration, float *out_workouts, int max_rows) {
+    try {
+        auto m = torch::jit::_load_for_mobile(std::string(model_path), c10::nullopt);
+        auto context_t = at::from_blob((void *)context, {4}, at::kFloat).clone();
+        auto user_t = at::from_blob((void *)user, {14}, at::kFloat).clone();
+        auto met_t = mat(met, n_met, 2);
+        auto motion_t = mat(motion, n_motion, 9);
+        auto temp_t = mat(temp, n_temp, 2);
+        auto hr_t = mat(hr, n_hr, 2);
+
+        // stepmotion stub [2,12]: NaN features spanning the met time range
+        auto step_t = at::full({2, 12}, std::nanf(""), at::kFloat);
+        auto sa = step_t.accessor<float, 2>();
+        sa[0][0] = n_met > 0 ? met[0] : 0.f;
+        sa[1][0] = n_met > 0 ? met[(n_met - 1) * 2] : 0.f;
+
+        auto thr = at::full({}, threshold, at::kFloat);   // 0-dim scalars
+        auto mind = at::full({}, min_duration, at::kFloat);
+        auto zero = at::full({}, 0.f, at::kFloat);
+        std::vector<c10::IValue> inputs{context_t, user_t, met_t, step_t, motion_t, temp_t, hr_t,
+                                        c10::IValue(), c10::IValue(), thr, mind, zero};
+        auto out = m.forward(inputs).toTuple();
+        auto workouts = out->elements()[0].toTensor().to(at::kFloat).contiguous();
+        int n = std::min<int>((int)workouts.size(0), max_rows);
+        const float *wp = workouts.data_ptr<float>();
+        for (int i = 0; i < n * 9; i++) out_workouts[i] = wp[i];
+        return n;
+    } catch (const std::exception &e) {
+        return -1;
+    }
+}
