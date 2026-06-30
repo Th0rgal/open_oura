@@ -66,9 +66,7 @@ enum Core {
     /// Fast, model-free summary (vitals, activity ridges, device) straight from the
     /// shared-core JSON — safe to compute on a background queue and show immediately.
     static func base() -> Summary {
-        guard let path = Bundle.main.path(forResource: "oura", ofType: "db") else {
-            return Summary(error: "oura.db not in bundle")
-        }
+        let path = DB.readPath()   // synced DB if present, else the bundled seed
         // the phone's actual UTC offset, so night labels / sleep windows / digest
         // timing match the wearer's local clock — not a hardcoded constant. The whole
         // stack (web --tz-offset, the Python model runners, this FFI) takes whole
@@ -466,11 +464,65 @@ struct DayDetailView: View {
     }
 }
 
+// Pair + sync from a real ring: paste the auth key (exported on the desktop), connect
+// over BLE, drain history into the writable DB. BLE only works on a physical device.
+struct SyncView: View {
+    @ObservedObject var ring: RingSync
+    let onSynced: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var key = Keychain.loadKey() ?? ""
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                Obs.black.ignoresSafeArea()
+                VStack(alignment: .leading, spacing: 18) {
+                    Text("Pair your ring").font(Obs.prose(20, .semibold)).foregroundStyle(Obs.ink)
+                    Text("Wear the ring (off the charger), then paste the auth key you exported on your computer.")
+                        .font(Obs.mono(12)).foregroundStyle(Obs.ink2).fixedSize(horizontal: false, vertical: true)
+                    TextField("32-hex auth key", text: $key)
+                        .font(Obs.mono(13)).foregroundStyle(Obs.ink)
+                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                        .padding(12)
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Obs.trace, lineWidth: 0.8))
+                    Button {
+                        Task {
+                            await ring.run(keyHex: key)
+                            if ring.lastReport != nil { onSynced() }
+                        }
+                    } label: {
+                        HStack(spacing: 8) {
+                            if ring.busy { ProgressView().tint(Obs.black) }
+                            Text(ring.busy ? "syncing…" : "Connect & Sync").font(Obs.mono(13, .medium))
+                        }
+                        .frame(maxWidth: .infinity).padding(.vertical, 12)
+                        .background(Obs.teal).foregroundStyle(Obs.black)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                    .disabled(ring.busy)
+                    if !ring.status.isEmpty {
+                        Text(ring.status).font(Obs.mono(12))
+                            .foregroundStyle(ring.lastReport != nil ? Obs.teal : Obs.ink2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer()
+                }
+                .padding(24)
+            }
+            .navigationTitle("sync").navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+            .toolbarColorScheme(.dark, for: .navigationBar)
+        }
+        .preferredColorScheme(.dark)
+    }
+}
+
 // ── root ─────────────────────────────────────────────────────────────────────
 struct RootView: View {
     @State private var s: Summary?
     @State private var sheetNight: NightRow?
     @State private var showAllDays = false
+    @State private var showSync = false
+    @StateObject private var ring = RingSync()
     private func f(_ v: Double?, _ fallback: String = "—") -> String {
         v.map { "\(Int($0))" } ?? fallback
     }
@@ -495,7 +547,14 @@ struct RootView: View {
         .preferredColorScheme(.dark)
         .sheet(item: $sheetNight) { SleepDetail(n: $0) }
         .sheet(isPresented: $showAllDays) { if let s { AllDaysView(s: s) } }
+        .sheet(isPresented: $showSync) { SyncView(ring: ring, onSynced: reload) }
         .onAppear(perform: load)
+    }
+
+    // re-read the DB after a sync brought in new events
+    private func reload() {
+        s = nil
+        load()
     }
 
     // The heavy on-device models run off the main thread (load): show the fast
@@ -524,6 +583,10 @@ struct RootView: View {
                             .padding(.horizontal, 6).padding(.vertical, 2)
                             .overlay(RoundedRectangle(cornerRadius: 5).stroke(Obs.trace, lineWidth: 0.8))
                         Spacer()
+                        Button { showSync = true } label: {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                                .font(.system(size: 16)).foregroundStyle(Obs.teal)
+                        }
                     }
 
                     if let err = s.error {

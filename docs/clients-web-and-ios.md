@@ -42,12 +42,21 @@ models are injected via the `ModelRunner` trait (web: `PythonRunner`; iOS: `NoMo
 | Device & data health | `renderDevice` | device section | `device`, `streams` | — |
 | Long-list capping + "show all" | `collapsibleList()` | `MoreButton` | — | — |
 
+## Where the two clients diverge
+
+- **Home layout**: the iOS app is intentionally more condensed — "last night" (one night),
+  a merged activity+workouts section, and a "show all days" page (`AllDaysView` →
+  `DayDetailView`) that combines a day's sleep + activity. The web keeps the actogram +
+  per-section lists. Match *data/features*, not pixel-for-pixel layout.
+- **BLE sync**: iOS syncs **natively** — `RingSync.swift` (CoreBluetooth `BLETransport`)
+  drives the Rust `RingSession` FFI (`oura-core`) to authenticate + drain into a writable
+  DB. The web dashboard has **no** BLE; it reads a DB produced by the desktop `oura sync`.
+  Both ultimately run the SAME `oura-link` `OuraClient<T: Transport>` over a different
+  transport (btleplug on desktop, CoreBluetooth-over-FFI on iOS).
+
 ## Known gaps (web-only, not yet on iOS)
 
-These exist on the web dashboard but **not** the iOS app — port them when iOS needs them:
+- **Advanced & debugging**: on-ring feature toggles (`/api/feature`), the per-type event
+  stream, profile editing.
 
-- **Advanced & debugging**: ring auth-key export/import (`/api/ring-key`), on-ring feature
-  toggles (`/api/feature`), the per-type event stream.
-- **Sync / profile editing** from the UI (iOS has no BLE-sync or profile editor yet).
-
-When you close one of these gaps, update this table.
+When you close one of these gaps, update this section.

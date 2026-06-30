@@ -20,8 +20,8 @@ enum ActivityModel {
     ]
 
     static func run() -> [WorkoutSession] {
-        guard let dbPath = Bundle.main.path(forResource: "oura", ofType: "db"),
-              let modelPath = Bundle.main.path(forResource: "automatic_activity_detection_3_1_11", ofType: "ptl")
+        let dbPath = DB.readPath()
+        guard let modelPath = Bundle.main.path(forResource: "automatic_activity_detection_3_1_11", ofType: "ptl")
         else { return [] }
 
         var db: OpaquePointer?

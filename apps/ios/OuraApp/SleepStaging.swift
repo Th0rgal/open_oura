@@ -10,8 +10,8 @@ enum SleepStaging {
     private struct Ev { let ds: Int64; let tag: Int; let json: [String: Any]; let cu: Int64 }
 
     static func run() -> [String: [Int]] {
-        guard let dbPath = Bundle.main.path(forResource: "oura", ofType: "db"),
-              let modelPath = Bundle.main.path(forResource: "sleepnet_moonstone_1_2_0", ofType: "ptl")
+        let dbPath = DB.readPath()
+        guard let modelPath = Bundle.main.path(forResource: "sleepnet_moonstone_1_2_0", ofType: "ptl")
         else { return [:] }
 
         var db: OpaquePointer?

@@ -13,8 +13,8 @@ enum CvaModel {
     struct Result { let vascularAge: Double; let pwv: Double; let segments: Int }
 
     static func run(sex: String, age: Double, heightM: Double, weightKg: Double, ringSize: Double) -> Result? {
-        guard let dbPath = Bundle.main.path(forResource: "oura", ofType: "db"),
-              let modelPath = Bundle.main.path(forResource: "cva_2_1_0", ofType: "ptl")
+        let dbPath = DB.readPath()
+        guard let modelPath = Bundle.main.path(forResource: "cva_2_1_0", ofType: "ptl")
         else { return nil }
 
         var db: OpaquePointer?
