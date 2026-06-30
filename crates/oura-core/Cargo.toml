@@ -15,7 +15,12 @@ crate-type = ["lib", "staticlib", "cdylib"]
 oura-analysis = { path = "../oura-analysis" }
 oura-store = { path = "../oura-store" }
 oura-summary = { path = "../oura-summary" }
-uniffi = { version = "0.28", features = ["cli"] }
+# the ring client + transport trait, WITHOUT btleplug (iOS supplies the transport)
+oura-link = { path = "../oura-link", default-features = false }
+uniffi = { version = "0.28", features = ["cli", "tokio"] }
+tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros", "time"] }
+async-trait = "0.1"
+thiserror = "1"
 serde_json = "1"
 
 [[bin]]

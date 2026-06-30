@@ -251,6 +251,51 @@ typedef void (*UniffiForeignFutureCompleteVoid)(uint64_t, UniffiForeignFutureStr
     );
 
 #endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_BLE_WRITER_METHOD0
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_BLE_WRITER_METHOD0
+typedef void (*UniffiCallbackInterfaceBleWriterMethod0)(uint64_t, RustBuffer, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_BLE_WRITER
+#define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_BLE_WRITER
+typedef struct UniffiVTableCallbackInterfaceBleWriter {
+    UniffiCallbackInterfaceBleWriterMethod0 _Nonnull write;
+    UniffiCallbackInterfaceFree _Nonnull uniffiFree;
+} UniffiVTableCallbackInterfaceBleWriter;
+
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OURA_CORE_FN_CLONE_RINGSESSION
+#define UNIFFI_FFIDEF_UNIFFI_OURA_CORE_FN_CLONE_RINGSESSION
+void*_Nonnull uniffi_oura_core_fn_clone_ringsession(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OURA_CORE_FN_FREE_RINGSESSION
+#define UNIFFI_FFIDEF_UNIFFI_OURA_CORE_FN_FREE_RINGSESSION
+void uniffi_oura_core_fn_free_ringsession(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OURA_CORE_FN_CONSTRUCTOR_RINGSESSION_NEW
+#define UNIFFI_FFIDEF_UNIFFI_OURA_CORE_FN_CONSTRUCTOR_RINGSESSION_NEW
+void*_Nonnull uniffi_oura_core_fn_constructor_ringsession_new(uint64_t writer, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OURA_CORE_FN_METHOD_RINGSESSION_PUSH_FRAME
+#define UNIFFI_FFIDEF_UNIFFI_OURA_CORE_FN_METHOD_RINGSESSION_PUSH_FRAME
+void uniffi_oura_core_fn_method_ringsession_push_frame(void*_Nonnull ptr, RustBuffer data, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OURA_CORE_FN_METHOD_RINGSESSION_SYNC
+#define UNIFFI_FFIDEF_UNIFFI_OURA_CORE_FN_METHOD_RINGSESSION_SYNC
+uint64_t uniffi_oura_core_fn_method_ringsession_sync(void*_Nonnull ptr, RustBuffer db_path, RustBuffer key_hex
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OURA_CORE_FN_INIT_CALLBACK_VTABLE_BLEWRITER
+#define UNIFFI_FFIDEF_UNIFFI_OURA_CORE_FN_INIT_CALLBACK_VTABLE_BLEWRITER
+void uniffi_oura_core_fn_init_callback_vtable_blewriter(UniffiVTableCallbackInterfaceBleWriter* _Nonnull vtable
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_OURA_CORE_FN_FUNC_CORE_VERSION
 #define UNIFFI_FFIDEF_UNIFFI_OURA_CORE_FN_FUNC_CORE_VERSION
 RustBuffer uniffi_oura_core_fn_func_core_version(RustCallStatus *_Nonnull out_status
@@ -573,6 +618,30 @@ uint16_t uniffi_oura_core_checksum_func_rmssd(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_OURA_CORE_CHECKSUM_FUNC_SUMMARY_JSON
 #define UNIFFI_FFIDEF_UNIFFI_OURA_CORE_CHECKSUM_FUNC_SUMMARY_JSON
 uint16_t uniffi_oura_core_checksum_func_summary_json(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OURA_CORE_CHECKSUM_METHOD_RINGSESSION_PUSH_FRAME
+#define UNIFFI_FFIDEF_UNIFFI_OURA_CORE_CHECKSUM_METHOD_RINGSESSION_PUSH_FRAME
+uint16_t uniffi_oura_core_checksum_method_ringsession_push_frame(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OURA_CORE_CHECKSUM_METHOD_RINGSESSION_SYNC
+#define UNIFFI_FFIDEF_UNIFFI_OURA_CORE_CHECKSUM_METHOD_RINGSESSION_SYNC
+uint16_t uniffi_oura_core_checksum_method_ringsession_sync(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OURA_CORE_CHECKSUM_CONSTRUCTOR_RINGSESSION_NEW
+#define UNIFFI_FFIDEF_UNIFFI_OURA_CORE_CHECKSUM_CONSTRUCTOR_RINGSESSION_NEW
+uint16_t uniffi_oura_core_checksum_constructor_ringsession_new(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OURA_CORE_CHECKSUM_METHOD_BLEWRITER_WRITE
+#define UNIFFI_FFIDEF_UNIFFI_OURA_CORE_CHECKSUM_METHOD_BLEWRITER_WRITE
+uint16_t uniffi_oura_core_checksum_method_blewriter_write(void
     
 );
 #endif
