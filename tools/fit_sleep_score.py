@@ -21,6 +21,7 @@ Usage: python tools/fit_sleep_score.py [CSV]
 """
 import csv
 import datetime as dt
+import json
 import sys
 from pathlib import Path
 
@@ -81,7 +82,15 @@ def engineer(rows):
         r["mid_hour"] = h
         r["mid_opt"] = -((h - 27.0) ** 2) if h is not None else None  # peak at 03:00
         prev = [x for x in mids[-7:] if x is not None]
-        r["mid_reg"] = (abs(h - np.mean(prev)) if (h is not None and prev) else 0.0)
+        if h is not None and prev:
+            # circular mean + distance on the 24h clock (matches tools/score_sleep.py),
+            # so a schedule that straddles a wrap isn't scored as wildly irregular.
+            ang = np.array(prev) * (np.pi / 12.0)
+            mh = (np.arctan2(np.sin(ang).mean(), np.cos(ang).mean()) % (2 * np.pi)) * (12.0 / np.pi)
+            reg = abs((h % 24) - mh)
+            r["mid_reg"] = min(reg, 24 - reg)
+        else:
+            r["mid_reg"] = 0.0
         mids.append(h)
         aw = num(r.get("Awake Time"))
         rs = num(r.get("Restless Sleep"))
@@ -139,6 +148,15 @@ class MonoCurve:
     def predict(self, x):
         return np.interp(self.sign * np.asarray(x, float), self.xs, self.ys)
 
+    def to_dict(self):
+        return {"kind": "mono", "sign": self.sign, "xs": self.xs.tolist(), "ys": self.ys.tolist()}
+
+    @classmethod
+    def _load(cls, d):
+        o = cls.__new__(cls)
+        o.sign, o.xs, o.ys = d["sign"], np.array(d["xs"]), np.array(d["ys"])
+        return o
+
 
 class EmpCurve:
     """Binned empirical curve for a single non-monotone driver (e.g. latency)."""
@@ -157,6 +175,15 @@ class EmpCurve:
     def predict(self, x):
         return np.interp(x, self.xs, self.ys)
 
+    def to_dict(self):
+        return {"kind": "emp", "xs": self.xs.tolist(), "ys": self.ys.tolist()}
+
+    @classmethod
+    def _load(cls, d):
+        o = cls.__new__(cls)
+        o.xs, o.ys = np.array(d["xs"]), np.array(d["ys"])
+        return o
+
 
 class LinFit:
     """Plain linear fit on >=1 drivers (for multi-input contributors whose true
@@ -167,6 +194,84 @@ class LinFit:
 
     def predict(self, X):
         return np.hstack([X, np.ones((len(X), 1))]) @ self.b
+
+    def to_dict(self):
+        return {"kind": "lin", "b": self.b.tolist()}
+
+    @classmethod
+    def _load(cls, d):
+        o = cls.__new__(cls)
+        o.b = np.array(d["b"])
+        return o
+
+
+class ConstCurve:
+    """Constant predictor (training mean) for near-saturated / unpredictable
+    contributors (e.g. training load, personalised activity goal)."""
+    def __init__(self, y):
+        self.v = float(np.mean(y))
+
+    def predict(self, x):
+        return np.full(len(np.atleast_1d(x)), self.v)
+
+    def to_dict(self):
+        return {"kind": "mean", "v": self.v}
+
+    @classmethod
+    def _load(cls, d):
+        o = cls.__new__(cls)
+        o.v = d["v"]
+        return o
+
+
+def load_curve(d):
+    """Reconstruct a fitted curve from its serialized dict (no refit)."""
+    return {"mono": MonoCurve, "emp": EmpCurve, "lin": LinFit, "mean": ConstCurve}[d["kind"]]._load(d)
+
+
+def load_params(path):
+    """Load persisted score calibration (tools/calibrate_scores.py output)."""
+    p = Path(path)
+    if not p.exists():
+        sys.exit(f"no calibration at {p} — run: python tools/calibrate_scores.py --csv <trends.csv>")
+    return json.loads(p.read_text())
+
+
+def score_from_params(params, score_name, metrics):
+    """Score one daily metric (Sleep/Readiness/…) from a metrics dict using the
+    persisted weights + contributor curves. Missing-driver contributors fall back
+    to their constant. Returns (final, sub_scores, contributions)."""
+    weights = params["weights"][score_name]
+    subs, contrib = {}, {}
+    for c, w in weights.items():
+        spec = params["contributors"].get(c)
+        if spec is None:
+            continue
+        curve = load_curve(spec["curve"])
+        kind = spec["curve"]["kind"]
+        drivers = spec["drivers"]
+        if kind == "mean":
+            x = np.array([0.0])
+        elif kind in ("mono", "emp"):
+            x = np.asarray(metrics[drivers[0]], float)
+        else:
+            x = np.array([[metrics[d] for d in drivers]])
+        subs[c] = float(np.clip(np.ravel(curve.predict(x))[0], 1, 100))
+        contrib[c] = w * subs[c] / 100.0
+    return round(sum(contrib.values())), subs, contrib
+
+
+def fit_curve(kind, X):
+    """Fit one curve. X = (driver_array, target) for mono/emp/mean, or
+    (driver_matrix, target) for lin."""
+    drv, y = X
+    if kind == "mean":
+        return ConstCurve(y)
+    if kind == "mono":
+        return MonoCurve(drv, y)
+    if kind == "emp":
+        return EmpCurve(drv, y)
+    return LinFit(drv, y)
 
 
 def getval(r, c):
