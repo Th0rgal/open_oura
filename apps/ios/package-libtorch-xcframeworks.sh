@@ -1,0 +1,29 @@
+#!/bin/bash
+# Package the device + simulator libtorch builds into xcframeworks (one per dylib),
+# so an Xcode archive links/embeds the right slice per SDK automatically.
+#
+# Prereq: build BOTH slices first —
+#   apps/ios/spike/build_libtorch_ios.sh          # simulator → build_ios/install
+#   apps/ios/spike/build_libtorch_ios.sh device   # device    → build_ios_device/install
+#
+# Output: apps/ios/libtorch-xcframeworks/<name>.xcframework (gitignored, local artifact).
+set -euo pipefail
+REPO="$HOME/work/open_oura"
+LT="$REPO/local/libtorch-ios/pytorch"
+SIM="$LT/build_ios/install/lib"
+DEV="$LT/build_ios_device/install/lib"
+OUT="$REPO/apps/ios/libtorch-xcframeworks"
+
+for d in "$SIM" "$DEV"; do
+    [ -d "$d" ] || { echo "missing $d — build that slice first"; exit 1; }
+done
+
+rm -rf "$OUT"; mkdir -p "$OUT"
+for dy in libtorch libtorch_cpu libc10 libtorch_global_deps; do
+    echo "==> $dy.xcframework"
+    xcodebuild -create-xcframework \
+        -library "$DEV/$dy.dylib" \
+        -library "$SIM/$dy.dylib" \
+        -output "$OUT/$dy.xcframework"
+done
+echo "==> done:"; ls "$OUT"
