@@ -315,10 +315,28 @@ struct SleepDetail: View {
     }
 }
 
+// "show all N · / show less" toggle used to cap long lists.
+struct MoreButton: View {
+    let expanded: Bool, count: Int, noun: String
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            Text(expanded ? "show less" : "show all \(count) \(noun)")
+                .font(Obs.mono(11, .medium)).foregroundStyle(Obs.teal)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .buttonStyle(.plain)
+        .padding(.top, 2)
+    }
+}
+
 // ── root ─────────────────────────────────────────────────────────────────────
 struct RootView: View {
     private let s = Core.summary()
     @State private var sheetNight: NightRow?
+    @State private var showAllNights = false
+    @State private var showAllActivity = false
+    private let previewCount = 3
     private func f(_ v: Double?, _ fallback: String = "—") -> String {
         v.map { "\(Int($0))" } ?? fallback
     }
@@ -395,13 +413,17 @@ struct RootView: View {
                             }
                         }
 
-                        // sleep — every night, tap for the hypnogram + breakdown + vitals
+                        // sleep — a few nights by default; expand for the rest. Tap a
+                        // night for the hypnogram + breakdown + vitals.
                         if !s.nights.isEmpty {
                             ObsTag("sleep · tap a night")
                             VStack(spacing: 14) {
-                                ForEach(s.nights) { n in
+                                ForEach(showAllNights ? s.nights : Array(s.nights.prefix(previewCount))) { n in
                                     Button { sheetNight = n } label: { SleepRow(n: n) }
                                         .buttonStyle(.plain)
+                                }
+                                if s.nights.count > previewCount {
+                                    MoreButton(expanded: showAllNights, count: s.nights.count, noun: "nights") { showAllNights.toggle() }
                                 }
                             }
                         }
@@ -410,7 +432,7 @@ struct RootView: View {
                         if !s.activeDays.isEmpty {
                             ObsTag("activity")
                             VStack(spacing: 18) {
-                                ForEach(s.activeDays.prefix(5), id: \.self) { day in
+                                ForEach(showAllActivity ? s.activeDays : Array(s.activeDays.prefix(previewCount)), id: \.self) { day in
                                     VStack(alignment: .leading, spacing: 6) {
                                         HStack {
                                             Text(day).font(Obs.mono(12, .medium)).foregroundStyle(Obs.ink2)
@@ -424,6 +446,9 @@ struct RootView: View {
                                         }
                                         MovementRidge(profile: s.activity_profile[day] ?? [])
                                     }
+                                }
+                                if s.activeDays.count > previewCount {
+                                    MoreButton(expanded: showAllActivity, count: s.activeDays.count, noun: "days") { showAllActivity.toggle() }
                                 }
                             }
                         }
