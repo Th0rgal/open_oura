@@ -45,7 +45,10 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
     private let nameContains: String
 
     private var notifyContinuation: AsyncStream<Data>.Continuation?
-    lazy var notifications: AsyncStream<Data> = AsyncStream { self.notifyContinuation = $0 }
+    // recreated per connect() so a reconnect gets a fresh, live stream — the previous
+    // one is finished on disconnect, and a single lazy stream would stay terminated,
+    // silently dropping all frames after the first link loss.
+    private(set) var notifications: AsyncStream<Data> = AsyncStream { _ in }
 
     private var connectCont: CheckedContinuation<Void, Error>?
     private var writeCont: CheckedContinuation<Void, Error>?
@@ -86,6 +89,9 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
             }
             connectTimeout = work
             lock.unlock()
+            // fresh notification stream for this connection (a reconnect must not hand
+            // back the previous, already-finished stream).
+            notifications = AsyncStream { self.notifyContinuation = $0 }
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: work)
             if poweredOn { startScan() }
         }
@@ -129,6 +135,10 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
 
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral,
                         advertisementData: [String: Any], rssi RSSI: NSNumber) {
+        // ignore a discovery that arrives after the attempt already resolved (e.g. a
+        // callback queued just past the timeout) — don't start a stray connection.
+        lock.lock(); let active = connectCont != nil; lock.unlock()
+        guard active else { central.stopScan(); return }
         let advName = (advertisementData[CBAdvertisementDataLocalNameKey] as? String)
             ?? peripheral.name ?? ""
         guard advName.lowercased().contains(nameContains.lowercased()) else { return }
