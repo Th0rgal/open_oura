@@ -343,18 +343,126 @@ struct SleepDetail: View {
     }
 }
 
-// "show all N · / show less" toggle used to cap long lists.
-struct MoreButton: View {
-    let expanded: Bool, count: Int, noun: String
-    let action: () -> Void
+extension Summary {
+    // a "day" is an activity date (YYYY-MM-DD); the matching night is found by MM-DD.
+    func night(forDay day: String) -> NightRow? {
+        let mmdd = String(day.suffix(5))
+        return nights.first { ($0.date ?? "").hasSuffix(mmdd) }
+    }
+    func workoutsOn(_ day: String) -> [WorkoutSession] {
+        workouts.filter { $0.isWorkout >= 0.5 && $0.dayLabel == day }
+    }
+}
+
+// One day's activity: movement ridge + steps/kcal + that day's workouts.
+struct DaySummaryView: View {
+    let s: Summary
+    let day: String
     var body: some View {
-        Button(action: action) {
-            Text(expanded ? "show less" : "show all \(count) \(noun)")
-                .font(Obs.mono(11, .medium)).foregroundStyle(Obs.teal)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text(day).font(Obs.mono(12, .medium)).foregroundStyle(Obs.ink2)
+                Spacer()
+                if let st = s.activity_daily[day] {
+                    Text("\(Int(st.steps ?? 0)) steps").font(Obs.mono(11)).foregroundStyle(Obs.ink2)
+                    Text("· \(Int(st.active_kcal ?? 0)) kcal").font(Obs.mono(11)).foregroundStyle(Obs.teal)
+                }
+            }
+            MovementRidge(profile: s.activity_profile[day] ?? [])
+            ForEach(s.workoutsOn(day)) { w in
+                HStack {
+                    Text(w.label.prefix(1).uppercased() + w.label.dropFirst())
+                        .font(Obs.mono(13, .medium)).foregroundStyle(Obs.ink)
+                    Spacer()
+                    Text("\(w.durationMin) min").font(Obs.mono(12)).foregroundStyle(Obs.teal)
+                    Text(w.startHM).font(Obs.mono(11)).foregroundStyle(Obs.ink2)
+                }
+            }
         }
-        .buttonStyle(.plain)
-        .padding(.top, 2)
+    }
+}
+
+// "show all days" → a page listing every day; tap one for its full detail.
+struct AllDaysView: View {
+    let s: Summary
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                Obs.black.ignoresSafeArea()
+                ScrollView {
+                    VStack(spacing: 14) {
+                        ForEach(s.activeDays, id: \.self) { day in
+                            NavigationLink {
+                                DayDetailView(s: s, day: day)
+                            } label: {
+                                HStack(spacing: 12) {
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(day).font(Obs.mono(13, .medium)).foregroundStyle(Obs.ink)
+                                        if let st = s.activity_daily[day] {
+                                            Text("\(Int(st.steps ?? 0)) steps · \(Int(st.active_kcal ?? 0)) kcal")
+                                                .font(Obs.mono(11)).foregroundStyle(Obs.ink2)
+                                        }
+                                    }
+                                    Spacer(minLength: 8)
+                                    if let n = s.night(forDay: day), n.hasHypnogram {
+                                        Hypnogram(stages: n.stages!, height: 20).frame(width: 96)
+                                    }
+                                    Image(systemName: "chevron.right").font(.system(size: 11)).foregroundStyle(Obs.trace)
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(24)
+                }
+            }
+            .navigationTitle("all days")
+            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+            .toolbarColorScheme(.dark, for: .navigationBar)
+        }
+        .preferredColorScheme(.dark)
+    }
+}
+
+// One day in full: that night's sleep (hypnogram + breakdown + vitals) and the day's
+// activity (ridge + workouts).
+struct DayDetailView: View {
+    let s: Summary
+    let day: String
+    var body: some View {
+        ZStack {
+            Obs.black.ignoresSafeArea()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    if let n = s.night(forDay: day) {
+                        ObsTag("sleep")
+                        Text("\(n.start ?? "—") → \(n.end ?? "—") · \(n.in_bed_h.map { String(format: "%.1f h", $0) } ?? "—")")
+                            .font(Obs.mono(12)).foregroundStyle(Obs.ink2)
+                        if n.hasHypnogram {
+                            Hypnogram(stages: n.stages!)
+                            StageBreakdown(deep: n.deep_pct ?? 0, light: n.light_pct ?? 0, rem: n.rem_pct ?? 0, wake: n.wake_pct ?? 0)
+                        }
+                        let cells: [(String, String)] = [
+                            ("hrv", n.hrv_ms.map { "\(Int($0)) ms" } ?? "—"),
+                            ("resting hr", n.rhr.map { "\(Int($0)) bpm" } ?? "—"),
+                            ("skin temp", n.skin_temp.map { String(format: "%.1f °c", $0) } ?? "—"),
+                            ("blood o₂", n.spo2_mean.map { "\(Int($0))%" } ?? "—"),
+                            ("efficiency", n.efficiency.map { "\(Int($0))%" } ?? "—"),
+                        ]
+                        VStack(spacing: 12) { ForEach(cells, id: \.0) { ObsStat(label: $0.0, value: $0.1) } }
+                    }
+                    ObsTag("activity")
+                    DaySummaryView(s: s, day: day)
+                }
+                .padding(24)
+            }
+        }
+        .navigationTitle(day)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbarColorScheme(.dark, for: .navigationBar)
+        .preferredColorScheme(.dark)
     }
 }
 
@@ -362,10 +470,7 @@ struct MoreButton: View {
 struct RootView: View {
     @State private var s: Summary?
     @State private var sheetNight: NightRow?
-    @State private var showAllNights = false
-    @State private var showAllActivity = false
-    @State private var showAllWorkouts = false
-    private let previewCount = 1   // last night / last day by default
+    @State private var showAllDays = false
     private func f(_ v: Double?, _ fallback: String = "—") -> String {
         v.map { "\(Int($0))" } ?? fallback
     }
@@ -389,6 +494,7 @@ struct RootView: View {
         }
         .preferredColorScheme(.dark)
         .sheet(item: $sheetNight) { SleepDetail(n: $0) }
+        .sheet(isPresented: $showAllDays) { if let s { AllDaysView(s: s) } }
         .onAppear(perform: load)
     }
 
@@ -473,66 +579,28 @@ struct RootView: View {
                             }
                         }
 
-                        // sleep — a few nights by default; expand for the rest. Tap a
-                        // night for the hypnogram + breakdown + vitals.
-                        if !s.nights.isEmpty {
-                            ObsTag("sleep · tap a night")
-                            VStack(spacing: 14) {
-                                ForEach(showAllNights ? s.nights : Array(s.nights.prefix(previewCount))) { n in
-                                    Button { sheetNight = n } label: { SleepRow(n: n) }
-                                        .buttonStyle(.plain)
-                                }
-                                if s.nights.count > previewCount {
-                                    MoreButton(expanded: showAllNights, count: s.nights.count, noun: "nights") { showAllNights.toggle() }
-                                }
-                            }
+                        // last night — tap for the hypnogram + breakdown + vitals
+                        if let n = s.nights.first {
+                            ObsTag("last night")
+                            Button { sheetNight = n } label: { SleepRow(n: n) }.buttonStyle(.plain)
                         }
 
-                        // detected workout sessions (on-device activity model) — default
-                        // to the most recent day's workouts, expand for the full history
-                        let workouts = s.workouts.filter { $0.isWorkout >= 0.5 }
-                        if !workouts.isEmpty {
-                            ObsTag("workouts")
-                            let lastDay = workouts.map(\.dayLabel).max() ?? ""
-                            let recent = workouts.filter { $0.dayLabel == lastDay }
-                            VStack(spacing: 10) {
-                                ForEach(showAllWorkouts ? workouts : recent) { w in
-                                    HStack {
-                                        Text(w.label.prefix(1).uppercased() + w.label.dropFirst())
-                                            .font(Obs.mono(13, .medium)).foregroundStyle(Obs.ink)
-                                        Spacer()
-                                        Text("\(w.durationMin) min").font(Obs.mono(12)).foregroundStyle(Obs.teal)
-                                        Text("\(w.dayLabel.suffix(5)) \(w.startHM)").font(Obs.mono(11)).foregroundStyle(Obs.ink2)
-                                    }
-                                }
-                                if workouts.count > recent.count {
-                                    MoreButton(expanded: showAllWorkouts, count: workouts.count, noun: "workouts") { showAllWorkouts.toggle() }
-                                }
-                            }
-                        }
-
-                        if !s.activeDays.isEmpty {
+                        // activity (movement ridge + steps/kcal + workouts) of the most
+                        // recent day, merged into one section
+                        if let day = s.activeDays.first {
                             ObsTag("activity")
-                            VStack(spacing: 18) {
-                                ForEach(showAllActivity ? s.activeDays : Array(s.activeDays.prefix(previewCount)), id: \.self) { day in
-                                    VStack(alignment: .leading, spacing: 6) {
-                                        HStack {
-                                            Text(day).font(Obs.mono(12, .medium)).foregroundStyle(Obs.ink2)
-                                            Spacer()
-                                            if let st = s.activity_daily[day] {
-                                                Text("\(Int((st.steps ?? 0))) steps")
-                                                    .font(Obs.mono(11)).foregroundStyle(Obs.ink2)
-                                                Text("· \(Int((st.active_kcal ?? 0))) kcal")
-                                                    .font(Obs.mono(11)).foregroundStyle(Obs.teal)
-                                            }
-                                        }
-                                        MovementRidge(profile: s.activity_profile[day] ?? [])
-                                    }
-                                }
-                                if s.activeDays.count > previewCount {
-                                    MoreButton(expanded: showAllActivity, count: s.activeDays.count, noun: "days") { showAllActivity.toggle() }
-                                }
-                            }
+                            DaySummaryView(s: s, day: day)
+                        }
+
+                        // browse every day → per-day detail (sleep + activity)
+                        if !s.activeDays.isEmpty {
+                            Button { showAllDays = true } label: {
+                                HStack {
+                                    Text("show all \(s.activeDays.count) days").font(Obs.mono(12, .medium)).foregroundStyle(Obs.teal)
+                                    Spacer()
+                                    Image(systemName: "chevron.right").font(.system(size: 11)).foregroundStyle(Obs.trace)
+                                }.contentShape(Rectangle())
+                            }.buttonStyle(.plain)
                         }
 
                         // device & data health
