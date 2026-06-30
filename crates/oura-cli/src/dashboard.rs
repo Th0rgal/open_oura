@@ -116,14 +116,31 @@ fn validate_ring_key(key: &str) -> Result<String> {
     Ok(key.to_ascii_lowercase())
 }
 
+fn feature_modes_path(db: &Path) -> PathBuf {
+    db.parent().unwrap_or(Path::new(".")).join("feature_modes.json")
+}
+
 /// Real on-ring feature modes snapshotted at the last sync (`feature_modes.json` next
 /// to the DB), as `{ feature_name: mode_int }`. `Value::Null` if not captured yet.
 fn read_feature_modes(db: &Path) -> Value {
-    db.parent()
-        .map(|p| p.join("feature_modes.json"))
-        .and_then(|p| std::fs::read_to_string(p).ok())
+    std::fs::read_to_string(feature_modes_path(db))
+        .ok()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
         .unwrap_or(Value::Null)
+}
+
+/// Record a feature's new mode into `feature_modes.json` right after a successful
+/// toggle, so the dashboard reflects it immediately instead of waiting for the next
+/// sync to re-snapshot. `mode_int`: 0 = off, 1 = automatic (matches `feature_mode`).
+fn write_feature_mode(db: &Path, feature: &str, mode_int: i64) {
+    let mut modes = match read_feature_modes(db) {
+        Value::Object(m) => m,
+        _ => serde_json::Map::new(),
+    };
+    modes.insert(feature.to_string(), json!(mode_int));
+    let at = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    modes.insert("_at".into(), json!(at));
+    let _ = std::fs::write(feature_modes_path(db), serde_json::to_vec_pretty(&Value::Object(modes)).unwrap_or_default());
 }
 
 // ── small date helpers (no chrono dep) ────────────────────────────────────────
@@ -854,8 +871,16 @@ fn make_digest(hrv: &VitalStat, rhr: &VitalStat, nights: &[Night], cva: &Option<
 struct SummaryCache {
     db: PathBuf,
     tz: i64,
-    token: (Option<SystemTime>, Option<SystemTime>), // (db mtime, profile mtime)
+    token: CacheToken, // (db, profile.json, feature_modes.json) mtimes
     value: Arc<Value>,
+}
+
+type CacheToken = (Option<SystemTime>, Option<SystemTime>, Option<SystemTime>);
+
+/// mtimes of every input the summary depends on — any change rebuilds it. Covers a
+/// sync (oura.db), a profile edit (profile.json), and a feature toggle (feature_modes.json).
+fn summary_token(db: &Path) -> CacheToken {
+    (mtime(db), mtime(&profile_path(db)), mtime(&feature_modes_path(db)))
 }
 
 fn summary_cache() -> &'static Mutex<Option<SummaryCache>> {
@@ -867,9 +892,10 @@ fn mtime(p: &Path) -> Option<SystemTime> {
     std::fs::metadata(p).and_then(|m| m.modified()).ok()
 }
 
-/// Cached `build_summary`: recompute only when oura.db or profile.json changes.
+/// Cached `build_summary`: recompute only when oura.db, profile.json, or
+/// feature_modes.json changes.
 fn cached_summary(db: &Path, tz: i64) -> Result<Arc<Value>> {
-    let token = (mtime(db), mtime(&profile_path(db)));
+    let token = summary_token(db);
     if let Some(c) = summary_cache().lock().unwrap().as_ref() {
         if c.db == db && c.tz == tz && c.token == token {
             return Ok(c.value.clone());
@@ -877,10 +903,10 @@ fn cached_summary(db: &Path, tz: i64) -> Result<Arc<Value>> {
     }
     // build outside the lock so concurrent first-loads don't serialise on it
     let value = Arc::new(build_summary(db, tz)?);
-    // re-stat the inputs: if oura.db / profile.json changed while we were building
-    // (e.g. a sync landed), the result may predate that change — don't cache it, so
-    // the next request rebuilds against the new state instead of serving stale data.
-    let token_after = (mtime(db), mtime(&profile_path(db)));
+    // re-stat the inputs: if any changed while we were building (e.g. a sync landed),
+    // the result may predate that change — don't cache it, so the next request
+    // rebuilds against the new state instead of serving stale data.
+    let token_after = summary_token(db);
     if token_after == token {
         let mut guard = summary_cache().lock().unwrap();
         // don't clobber a fresher entry a concurrent build already stored (compare
@@ -1213,11 +1239,16 @@ fn run_feature(
         let out = c.output().context("running `oura feature-mode`")?;
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
+        // 0 = off, 1 = automatic — keep feature_modes.json in step with the toggle so
+        // the dashboard shows the new state on the next reload, not only after a sync.
+        let mode_int = if mode == "off" { 0 } else { 1 };
         if stdout.contains("SUCCESS") {
+            write_feature_mode(db, feature, mode_int);
             return Ok(format!("{feature} turned {on}"));
         }
         if stdout.contains("result 0x20") {
             // ring refuses to set a mode it's already in → it's already in that state
+            write_feature_mode(db, feature, mode_int);
             return Ok(format!("{feature} is already {on} (no change needed)"));
         }
         last = stdout
