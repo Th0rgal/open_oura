@@ -68,3 +68,19 @@ change in `build_summary()` flows to iOS with no re-implementation.
 ## Non-goals (v1)
 Cloud sync · accounts · Apple Health export · Android · live realtime (`viz`/
 `game`) — all later. v1 is the offline dashboard, done beautifully.
+
+## Status (foundation built & verified on the iOS 26.4 simulator)
+- ✅ **`oura-core` UniFFI `.xcframework`** — `crates/oura-core` exposes `summary_json`/
+  `quick_summary_json`/`rmssd`; bindings generated, `apps/ios/OuraCore.xcframework` built.
+- ✅ **Shared summary** — `build_summary()` extracted to `crates/oura-summary` behind a
+  `ModelRunner` trait; web (`oura-cli`, `PythonRunner`) and iOS (`NoModelRunner`) share it.
+- ✅ **SwiftUI Observatory UI** (`apps/ios/OuraApp/`) — renders the real shared summary
+  (digest, vitals + sparklines, sleep timing, device health) from a bundled `oura.db`.
+- ✅ **CoreBluetooth Transport** — `oura-link` btleplug feature-gated so auth/sync compile
+  for iOS; `BLETransport.swift` implements the ring link (type-checks).
+- ⏳ **Remaining (needs a ring / larger):** UniFFI async `Transport` callback + `sync()`
+  entry to drive `OuraClient` on device; on-device torch `.ptl` as a UniFFI `ModelRunner`
+  (sleep stages / CVA / activity); multi-screen nav once model data lands.
+
+Build: `tools/export_mobile.py` (models) · `apps/ios/OuraApp/build_run.sh` (app on sim) ·
+`apps/ios/spike/build_libtorch_ios.sh` (on-device torch runtime).
