@@ -55,8 +55,23 @@ enum Core {
         let tzOffset = Int64((Double(secs) / 3600).rounded())
         let json = summaryJson(dbPath: path, tzOffset: tzOffset)
         guard let data = json.data(using: .utf8),
-              let s = try? JSONDecoder().decode(Summary.self, from: data)
+              var s = try? JSONDecoder().decode(Summary.self, from: data)
         else { return Summary(error: "decode failed") }
+        #if TORCH
+        // run SleepNet on-device and fold the hypnogram + stage breakdown into each
+        // night, so the app renders the same sleep diagrams as the web dashboard.
+        let staged = SleepStaging.run()
+        for i in s.nights.indices {
+            guard let date = s.nights[i].date, let stages = staged[date], !stages.isEmpty else { continue }
+            s.nights[i].stages = stages
+            let total = Double(stages.count)
+            let pct = { (code: Int) in (Double(stages.filter { $0 == code }.count) / total * 100).rounded() }
+            s.nights[i].deep_pct = pct(1); s.nights[i].light_pct = pct(2)
+            s.nights[i].rem_pct = pct(3); s.nights[i].wake_pct = pct(4)
+            let asleep = total - Double(stages.filter { $0 == 4 }.count)
+            s.nights[i].efficiency = (asleep / total * 100).rounded()
+        }
+        #endif
         return s
     }
 }
