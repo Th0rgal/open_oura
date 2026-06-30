@@ -553,7 +553,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         insight("SpO2", has("spo2_r_pi_event"), "enable spo2"),
         insight("Activity sessions", true, ""),
         insight("HRV / resting HR", true, ""),
-        insight("Steps", false, "RData entitlement (firmware-locked)"),
+        insight("Steps", has("real_step_event_feature_1") || has("real_step_event_feature_2"), "enable real_steps"),
         insight("Stress / resilience", false, "needs cloud scores"),
     ]);
     let mut battery: Option<(i64, i64)> = None;

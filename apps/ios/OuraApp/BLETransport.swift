@@ -101,7 +101,16 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
     func write(_ data: Data) async throws {
         guard let p = peripheral, let wc = writeChar else { throw BLEError.noWriteCharacteristic }
         try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
-            lock.lock(); writeCont = c; lock.unlock()
+            lock.lock()
+            // reject (don't strand) an overlapping write — the caller drives writes
+            // sequentially, so a second in-flight write is a misuse, not a queue.
+            if writeCont != nil {
+                lock.unlock()
+                c.resume(throwing: BLEError.busy)
+                return
+            }
+            writeCont = c
+            lock.unlock()
             p.writeValue(data, for: wc, type: .withResponse)
         }
     }
@@ -196,6 +205,15 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
         let timer = connectTimeout; connectTimeout = nil
         lock.unlock()
         timer?.cancel() // stop a still-pending timeout from firing on a finished attempt
+        if case .failure = result {
+            // tear down an abandoned/failed attempt: cancel the peripheral so iOS stops
+            // delivering its callbacks, and reset the per-attempt state so a stray late
+            // didUpdateNotificationStateFor can't bleed into a later connect's counter.
+            if let p = peripheral { central.cancelPeripheralConnection(p) }
+            peripheral = nil
+            writeChar = nil
+            lock.lock(); pendingNotify = 0; lock.unlock()
+        }
         c?.resume(with: result)
     }
 
