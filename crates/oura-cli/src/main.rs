@@ -152,6 +152,18 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Compute a Readiness Score for the latest night, live from ring data. Rebuilds
+    /// the daily-summary + rolling baselines (tools/build_daily.py) then scores via
+    /// the calibrated curves (tools/score_readiness.py). Baseline-relative
+    /// contributors are provisional until ~14 days of history accrue.
+    ReadinessScore {
+        /// Timezone offset (hours from UTC) for the bedtime clock.
+        #[arg(long, default_value_t = 0)]
+        tz_offset: i64,
+        /// Emit machine-readable JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
     /// Subscribe a feature capability (real_steps | atlas | ambient | raw_data |
     /// research_data) via SetFeatureSubscription, to make the ring emit its events.
     Subscribe {
@@ -325,6 +337,9 @@ async fn main() -> Result<()> {
         }
         Command::SleepScore { tz_offset, csv, json } => {
             cmd_sleep_score(&cli, *tz_offset, csv.clone(), *json)
+        }
+        Command::ReadinessScore { tz_offset, json } => {
+            cmd_readiness_score(&cli, *tz_offset, *json)
         }
         Command::Subscribe { feature, mode } => cmd_subscribe(&cli, &key, feature, mode).await,
         Command::FeatureMode { feature, mode } => cmd_feature_mode(&cli, &key, feature, mode).await,
@@ -585,6 +600,63 @@ fn cmd_sleep_score(cli: &Cli, tz_offset: i64, csv: Option<PathBuf>, json: bool) 
     })?;
     if !status.success() {
         return Err(anyhow!("sleep scorer exited with {status}"));
+    }
+    Ok(())
+}
+
+/// Readiness Score live from ring data: rebuild the daily_summary + rolling
+/// baselines (tools/build_daily.py), then score with the calibrated curves
+/// (tools/score_readiness.py). Both run via the Python venv with torch.
+fn cmd_readiness_score(cli: &Cli, tz_offset: i64, json: bool) -> Result<()> {
+    let marker = Path::new("tools/score_readiness.py");
+    let find_root = |start: &Path| -> Option<PathBuf> {
+        start.ancestors().find(|d| d.join(marker).is_file()).map(Path::to_path_buf)
+    };
+    let root = std::env::current_dir()
+        .ok()
+        .and_then(|d| find_root(&d))
+        .or_else(|| find_root(Path::new(env!("CARGO_MANIFEST_DIR"))))
+        .ok_or_else(|| {
+            anyhow!("could not locate tools/score_readiness.py — run from inside the open_oura checkout")
+        })?;
+
+    let db = cli
+        .db
+        .canonicalize()
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(&cli.db));
+    if !db.exists() {
+        return Err(anyhow!("database not found: {} (run `oura sync` first)", db.display()));
+    }
+
+    use std::process::Command as Proc;
+    let venv_py = root.join(".venv/bin/python");
+    let python = if venv_py.is_file() { venv_py } else { PathBuf::from("python3") };
+
+    // 1) refresh daily_summary + baselines (captured so it can't pollute --json)
+    let build = Proc::new(&python)
+        .current_dir(&root)
+        .arg(root.join("tools/build_daily.py"))
+        .arg(&db)
+        .arg("--tz")
+        .arg(tz_offset.to_string())
+        .output()
+        .with_context(|| "running tools/build_daily.py (is the Python venv with torch set up?)")?;
+    if !build.status.success() {
+        return Err(anyhow!(
+            "build_daily failed: {}",
+            String::from_utf8_lossy(&build.stderr).trim()
+        ));
+    }
+
+    // 2) score
+    let mut cmd = Proc::new(&python);
+    cmd.current_dir(&root).arg(root.join("tools/score_readiness.py")).arg(&db);
+    if json {
+        cmd.arg("--json");
+    }
+    let status = cmd.status().with_context(|| "running tools/score_readiness.py")?;
+    if !status.success() {
+        return Err(anyhow!("readiness scorer exited with {status}"));
     }
     Ok(())
 }

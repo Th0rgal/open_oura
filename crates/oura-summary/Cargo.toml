@@ -1,0 +1,13 @@
+[package]
+name = "oura-summary"
+description = "The dashboard summary computation, shared by the web (oura-cli) and native (oura-core) clients"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+oura-protocol = { path = "../oura-protocol" }
+oura-store = { path = "../oura-store" }
+serde_json = "1"
+anyhow = "1"

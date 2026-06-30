@@ -6,6 +6,9 @@ members = [
     "crates/oura-analysis",
     "crates/oura-store",
     "crates/oura-cli",
+    "crates/oura-ffi",
+    "crates/oura-core",
+    "crates/oura-summary",
 ]
 
 [workspace.package]
