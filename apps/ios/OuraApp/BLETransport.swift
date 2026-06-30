@@ -31,7 +31,7 @@ protocol RingTransport: AnyObject {
     var notifications: AsyncStream<Data> { get }
 }
 
-enum BLEError: Error { case poweredOff, notFound, noWriteCharacteristic, disconnected, timedOut }
+enum BLEError: Error { case poweredOff, notFound, noWriteCharacteristic, disconnected, timedOut, busy }
 
 /// Scans for an Oura ring advertising the service (filtered by case-insensitive
 /// name), connects, discovers the write + notify characteristics, and bridges them
@@ -66,6 +66,14 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
     /// and notifications are subscribed.
     func connect(timeout: TimeInterval = 20) async throws {
         try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
+            lock.lock()
+            // reject (rather than strand) a second connect while one is in flight — the
+            // earlier caller keeps its continuation and stays the active attempt.
+            if connectCont != nil {
+                lock.unlock()
+                c.resume(throwing: BLEError.busy)
+                return
+            }
             connectCont = c
             // fail rather than hang forever if the ring never advertises (off the
             // charger / not worn) or Bluetooth stays off. The work item is stored so
@@ -76,7 +84,8 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
                 self.central.stopScan()
                 self.finishConnect(.failure(BLEError.timedOut))
             }
-            lock.lock(); connectTimeout = work; lock.unlock()
+            connectTimeout = work
+            lock.unlock()
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: work)
             if poweredOn { startScan() }
         }
@@ -139,6 +148,7 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
 
     // ── CBPeripheralDelegate ──
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
+        if let error { return finishConnect(.failure(error)) }
         guard let svc = peripheral.services?.first(where: { $0.uuid == RingUUID.service }) else {
             return finishConnect(.failure(BLEError.notFound))
         }
@@ -147,6 +157,7 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService,
                     error: Error?) {
+        if let error { return finishConnect(.failure(error)) }
         var notifyChars: [CBCharacteristic] = []
         for c in service.characteristics ?? [] {
             if c.uuid == RingUUID.write { writeChar = c }

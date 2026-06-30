@@ -28,5 +28,9 @@
     <array><string>iPhoneSimulator</string></array>
     <key>UILaunchScreen</key>
     <dict/>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>open_oura connects to your Oura ring over Bluetooth to read your health data on-device.</string>
+    <key>NSBluetoothPeripheralUsageDescription</key>
+    <string>open_oura connects to your Oura ring over Bluetooth to read your health data on-device.</string>
 </dict>
 </plist>

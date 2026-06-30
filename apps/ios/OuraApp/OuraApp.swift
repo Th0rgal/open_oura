@@ -34,9 +34,13 @@ enum Core {
         guard let path = Bundle.main.path(forResource: "oura", ofType: "db") else {
             return Summary(error: "oura.db not in bundle")
         }
-        // the phone's actual UTC offset (whole hours), so night labels / sleep windows
-        // / digest timing match the wearer's local clock — not a hardcoded constant.
-        let tzOffset = Int64(TimeZone.current.secondsFromGMT() / 3600)
+        // the phone's actual UTC offset, so night labels / sleep windows / digest
+        // timing match the wearer's local clock — not a hardcoded constant. The whole
+        // stack (web --tz-offset, the Python model runners, this FFI) takes whole
+        // hours, so round to the nearest hour (best representable value for the rare
+        // sub-hour zones like IST +5:30).
+        let secs = TimeZone.current.secondsFromGMT()
+        let tzOffset = Int64((Double(secs) / 3600).rounded())
         let json = summaryJson(dbPath: path, tzOffset: tzOffset)
         guard let data = json.data(using: .utf8),
               let s = try? JSONDecoder().decode(Summary.self, from: data)
