@@ -1,10 +1,12 @@
-# xcodegen spec for a *device / TestFlight* build of OuraApp.
-#   1. ../build-xcframework.sh         # both device + sim slices of OuraCore
-#   2. xcodegen generate               # writes OuraApp.xcodeproj next to this file
-#   3. open OuraApp.xcodeproj, set your Team under Signing & Capabilities
-#      (or set DEVELOPMENT_TEAM below), then Product → Archive → Distribute → TestFlight
+# xcodegen spec for a *device / TestFlight* build of OuraApp — WITH the on-device
+# torch models (SleepNet / CVA / activity), mirroring build_run_torch.sh.
+#   1. ../build-xcframework.sh         # device + sim slices of OuraCore (Rust)
+#   2. ../spike/build_libtorch_ios.sh  # once: builds local/libtorch-ios (the .dylibs)
+#   3. xcodegen generate               # writes OuraApp.xcodeproj next to this file
+#   4. open OuraApp.xcodeproj, set your Team, then Product → Archive → TestFlight
 #
-# The simulator dev harness (build_run.sh) stays as-is for quick local runs.
+# Paths below are relative to this dir (apps/ios/OuraApp); ../../../ is the repo root.
+# libtorch dylibs, the .ptl models, and oura.db are gitignored local build inputs.
 name: OuraApp
 options:
   bundleIdPrefix: md.thomas
@@ -28,20 +30,55 @@ targets:
     platform: iOS
     settings:
       base:
-        # use the hand-written Info.plist verbatim (Bluetooth usage strings, the
-        # export-compliance flag) rather than letting xcodegen synthesise one.
         INFOPLIST_FILE: Info.plist
         GENERATE_INFOPLIST_FILE: NO
+        # on-device torch: bridging header + TORCH flag + C++ + libtorch headers
+        SWIFT_OBJC_BRIDGING_HEADER: TorchBridge.h
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: TORCH
+        CLANG_CXX_LANGUAGE_STANDARD: "c++17"
+        HEADER_SEARCH_PATHS:
+          - $(SRCROOT)/../../../local/libtorch-ios/pytorch/build_ios/install/include
+          - $(SRCROOT)/../../../local/libtorch-ios/pytorch/build_ios/install/include/torch/csrc/api/include
+        LIBRARY_SEARCH_PATHS:
+          - $(inherited)
+          - $(SRCROOT)/../../../local/libtorch-ios/pytorch/build_ios/install/lib
+        OTHER_LDFLAGS: [-lc++, -lsqlite3]
+        LD_RUNPATH_SEARCH_PATHS: [$(inherited), "@executable_path/Frameworks"]
     sources:
       - path: OuraApp.swift
       - path: Theme.swift
       - path: BLETransport.swift
+      - path: SleepStaging.swift
+      - path: CvaModel.swift
+      - path: ActivityModel.swift
+      - path: TorchBridge.mm
+      - path: TorchBridge.h
       - path: ../generated/oura_core.swift
       - path: Assets.xcassets
-      # NOTE: oura.db is deliberately NOT bundled — it is your personal health data.
-      # For a real beta, users sync their own ring over BLE. To make a personal-only
-      # build that shows data immediately, drop an oura.db here and add it as a resource.
+      # bundled models + data (gitignored local files). oura.db is temporary until the
+      # on-device BLE sync lands — then the app builds its own DB from your ring.
+      - path: ../../../notes/models/mobile/sleepnet_moonstone_1_2_0.ptl
+        buildPhase: resources
+      - path: ../../../notes/models/mobile/cva_2_1_0.ptl
+        buildPhase: resources
+      - path: ../../../notes/models/mobile/automatic_activity_detection_3_1_11.ptl
+        buildPhase: resources
+      - path: ../../../oura.db
+        buildPhase: resources
     dependencies:
-      # static lib packaged as an xcframework → link, don't embed
+      # Rust core (static lib in an xcframework) — link, don't embed
       - framework: ../OuraCore.xcframework
         embed: false
+      # libtorch lite interpreter (dynamic) — link AND embed+sign into Frameworks
+      - framework: ../../../local/libtorch-ios/pytorch/build_ios/install/lib/libtorch.dylib
+        embed: true
+        codeSign: true
+      - framework: ../../../local/libtorch-ios/pytorch/build_ios/install/lib/libtorch_cpu.dylib
+        embed: true
+        codeSign: true
+      - framework: ../../../local/libtorch-ios/pytorch/build_ios/install/lib/libc10.dylib
+        embed: true
+        codeSign: true
+      - framework: ../../../local/libtorch-ios/pytorch/build_ios/install/lib/libtorch_global_deps.dylib
+        embed: true
+        codeSign: true
