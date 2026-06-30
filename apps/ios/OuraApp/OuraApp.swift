@@ -1,5 +1,10 @@
 import SwiftUI
 
+// SIBLING CLIENT: the web dashboard (dashboard/web/app.js) renders the SAME summary
+// JSON. A user-facing change here usually belongs there too — see the feature map in
+// docs/clients-web-and-ios.md. New computed fields go in crates/oura-summary; new
+// models get an on-device path (TorchBridge.mm + *Model.swift) AND a Python runner.
+
 // ── the shared build_summary() JSON, decoded (same contract as the web client) ──
 struct Trend: Decodable {
     var series: [Double] = []
@@ -58,7 +63,9 @@ struct Summary: Decodable {
 }
 
 enum Core {
-    static func summary() -> Summary {
+    /// Fast, model-free summary (vitals, activity ridges, device) straight from the
+    /// shared-core JSON — safe to compute on a background queue and show immediately.
+    static func base() -> Summary {
         guard let path = Bundle.main.path(forResource: "oura", ofType: "db") else {
             return Summary(error: "oura.db not in bundle")
         }
@@ -71,9 +78,16 @@ enum Core {
         let tzOffset = Int64((Double(secs) / 3600).rounded())
         let json = summaryJson(dbPath: path, tzOffset: tzOffset)
         guard let data = json.data(using: .utf8),
-              var s = try? JSONDecoder().decode(Summary.self, from: data)
+              let s = try? JSONDecoder().decode(Summary.self, from: data)
         else { return Summary(error: "decode failed") }
-        #if TORCH
+        return s
+    }
+
+    #if TORCH
+    /// The slow part: run the three on-device torch models and fold their results into
+    /// the summary. Call off the main thread (see RootView.load); never on launch.
+    static func withModels(_ base: Summary) -> Summary {
+        var s = base
         // run SleepNet on-device and fold the hypnogram + stage breakdown into each
         // night, so the app renders the same sleep diagrams as the web dashboard.
         let staged = SleepStaging.run()
@@ -96,9 +110,9 @@ enum Core {
         }
         // detected activity sessions (automatic_activity_detection), on-device
         s.workouts = ActivityModel.run()
-        #endif
         return s
     }
+    #endif
 }
 
 // ── components ────────────────────────────────────────────────────────────────
@@ -346,7 +360,7 @@ struct MoreButton: View {
 
 // ── root ─────────────────────────────────────────────────────────────────────
 struct RootView: View {
-    private let s = Core.summary()
+    @State private var s: Summary?
     @State private var sheetNight: NightRow?
     @State private var showAllNights = false
     @State private var showAllActivity = false
@@ -361,10 +375,41 @@ struct RootView: View {
         return "in line"
     }
     var body: some View {
-        let latest = s.nights.first
         ZStack {
             Obs.black.ignoresSafeArea()
-            ScrollView {
+            if let s {
+                content(s)
+            } else {
+                VStack(spacing: 14) {
+                    ProgressView().tint(Obs.teal)
+                    Text("reading your ring…").font(Obs.mono(12)).foregroundStyle(Obs.ink2)
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
+        .sheet(item: $sheetNight) { SleepDetail(n: $0) }
+        .onAppear(perform: load)
+    }
+
+    // The heavy on-device models run off the main thread (load): show the fast
+    // model-free summary first, then fold in the hypnogram / CVA / activity results.
+    private func load() {
+        guard s == nil else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let base = Core.base()
+            DispatchQueue.main.async { if s == nil { s = base } }
+            #if TORCH
+            if base.error == nil {
+                let full = Core.withModels(base)
+                DispatchQueue.main.async { s = full }
+            }
+            #endif
+        }
+    }
+
+    @ViewBuilder private func content(_ s: Summary) -> some View {
+        let latest = s.nights.first
+        ScrollView {
                 VStack(alignment: .leading, spacing: 26) {
                     HStack {
                         Text("open_oura").font(Obs.prose(20, .semibold)).foregroundStyle(Obs.ink)
@@ -502,9 +547,6 @@ struct RootView: View {
                 }
                 .padding(24).padding(.top, 8)
             }
-        }
-        .preferredColorScheme(.dark)
-        .sheet(item: $sheetNight) { SleepDetail(n: $0) }
     }
 }
 
