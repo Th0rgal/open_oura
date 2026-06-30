@@ -121,7 +121,7 @@ function renderNights(d) {
     box.append(el("div", "error", "No overnight data yet. Wear the ring and sync."));
     return;
   }
-  d.nights.forEach((n) => {
+  const nightRow = (n) => {
     const row = el("div", "night");
     const meta = el("div", "meta");
     meta.append(el("div", "date", n.date));
@@ -144,10 +144,28 @@ function renderNights(d) {
     if (n.spo2_mean != null) bits.push(`O₂ <b>${n.spo2_mean}%</b>`);
     vit.innerHTML = bits.map((b) => `<span>${b}</span>`).join("");
     right.append(vit);
-
     row.append(right);
-    box.append(row);
+    return row;
+  };
+  // show a few nights; the rest live in an expandable, scrollable drawer so the
+  // panel never grows unbounded.
+  collapsibleList(box, d.nights, nightRow, 3, "nights");
+}
+
+// Render `items` into `box` capped at `preview`; any overflow goes into a
+// scrollable drawer toggled by a "Show all N <noun>" button.
+function collapsibleList(box, items, render, preview, noun) {
+  items.slice(0, preview).forEach((it) => box.append(render(it)));
+  if (items.length <= preview) return;
+  const drawer = el("div", "more-list");
+  items.slice(preview).forEach((it) => drawer.append(render(it)));
+  const btn = el("button", "more-toggle");
+  btn.textContent = `Show all ${items.length} ${noun}`;
+  btn.addEventListener("click", () => {
+    const open = drawer.classList.toggle("open");
+    btn.textContent = open ? "Show less" : `Show all ${items.length} ${noun}`;
   });
+  box.append(drawer, btn);
 }
 
 function renderCardio(d) {
@@ -302,7 +320,7 @@ function renderActivity(d) {
   const dVals = days.map((y) => dailyStats[y]).filter(Boolean);
   const maxSteps = Math.max(1, ...dVals.map((v) => v.steps || 0));
   const maxKcal = Math.max(1, ...dVals.map((v) => v.active_kcal || 0));
-  days.forEach((ymd) => {
+  const buildLane = (ymd) => {
     const p = ymd.split("-");
     const dt = new Date(+p[0], +p[1] - 1, +p[2]);
     const day = el("div", "acto-day");
@@ -345,8 +363,22 @@ function renderActivity(d) {
         mini("act-kcal", kc, Math.round(ds.active_kcal), `${Math.round(ds.active_kcal)} active · ${Math.round(ds.total_kcal)} total kcal`);
     }
     day.append(stat);
-    lanes.append(day);
-  });
+    return day;
+  };
+  // show a few days; the rest go in an expandable, scrollable drawer
+  const ACTO_PREVIEW = 3;
+  days.slice(0, ACTO_PREVIEW).forEach((ymd) => lanes.append(buildLane(ymd)));
+  if (days.length > ACTO_PREVIEW) {
+    const drawer = el("div", "more-list");
+    days.slice(ACTO_PREVIEW).forEach((ymd) => drawer.append(buildLane(ymd)));
+    const btn = el("button", "more-toggle");
+    btn.textContent = `Show all ${days.length} days`;
+    btn.addEventListener("click", () => {
+      const open = drawer.classList.toggle("open");
+      btn.textContent = open ? "Show less" : `Show all ${days.length} days`;
+    });
+    lanes.append(drawer, btn);
+  }
   acto.append(lanes);
 
   const axis = el("div", "acto-axis");

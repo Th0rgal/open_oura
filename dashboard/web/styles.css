@@ -270,6 +270,18 @@ body {
 .sw.deep { background: var(--deep); } .sw.light { background: var(--light); }
 .sw.rem { background: var(--rem); } .sw.wake { background: var(--wake); }
 
+/* expandable "show all" drawer for capped lists (nights, activity days) */
+.more-list { display: none; }
+.more-list.open { display: flex; flex-direction: column; gap: 16px; max-height: 60vh; overflow-y: auto; margin-top: 16px; }
+.more-toggle {
+  margin-top: 14px; padding: 6px 12px; cursor: pointer;
+  font-family: var(--mono); font-size: 12px; color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 8%, transparent);
+  border: 1px solid color-mix(in oklab, var(--accent) 28%, var(--line));
+  border-radius: 999px;
+}
+.more-toggle:hover { background: color-mix(in oklab, var(--accent) 14%, transparent); }
+
 /* ── nights / hypnogram ─────────────────────────────────── */
 .nights { display: flex; flex-direction: column; gap: 16px; }
 .night { display: grid; grid-template-columns: 96px 1fr; gap: 16px; align-items: center; }
