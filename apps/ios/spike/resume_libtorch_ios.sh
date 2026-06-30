@@ -4,7 +4,7 @@
 # and drive CMake directly. PyTorch 2.9 REMOVED scripts/build_ios.sh, so we use the
 # same kept cmake/iOS.cmake flow as build_libtorch_ios.sh. Tracked background job.
 set -uo pipefail
-REPO="$HOME/work/open_oura"
+REPO="$(cd "$(dirname "$0")/../../.." && pwd)"   # repo root from this script's location
 SRC="$REPO/local/libtorch-ios/pytorch"
 cd "$SRC"
 

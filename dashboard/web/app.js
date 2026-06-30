@@ -416,6 +416,7 @@ async function doFeature(feature, name, currentOn, row) {
     })).json();
     if (j.ok) {
       toast(`${name} turned ${turnOn ? "on" : "off"}. Wear the ring; data appears on the next sync.`, "ok");
+      load(); // refresh dev.measuring so a second tap toggles from the real state
     } else {
       toast(syncHint(j.message), "error");
       row.classList.toggle("on", currentOn); // revert

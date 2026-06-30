@@ -46,15 +46,25 @@ enum Keychain {
     }
 }
 
-/// Bridges the Rust BleWriter callback (fire-and-forget) onto BLETransport's async
-/// write. Rust waits for the response via push_frame, so one write is in flight at a
-/// time and ordering is preserved.
-final class RingWriter: BleWriter {
+/// Bridges the Rust BleWriter callback onto BLETransport's async write. The callback is
+/// synchronous (Rust's transact then waits for the response via push_frame), but a GATT
+/// write-with-response must complete before the next one or CoreBluetooth rejects it as
+/// busy. So writes are chained into a FIFO: each awaits the previous one's completion,
+/// guaranteeing strictly sequential, non-overlapping writes.
+final class RingWriter: BleWriter, @unchecked Sendable {
     private let transport: BLETransport
+    private let lock = NSLock()
+    private var tail: Task<Void, Never> = Task {}
     init(_ t: BLETransport) { transport = t }
     func write(data: Data) {
         let t = transport
-        Task { try? await t.write(data) }
+        lock.lock()
+        let prev = tail
+        tail = Task {
+            _ = await prev.value          // wait for the prior write to finish…
+            try? await t.write(data)      // …then perform (and await) this one
+        }
+        lock.unlock()
     }
 }
 

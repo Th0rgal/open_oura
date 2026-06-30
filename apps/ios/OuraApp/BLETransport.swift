@@ -70,9 +70,10 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
     func connect(timeout: TimeInterval = 20) async throws {
         try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
             lock.lock()
-            // reject (rather than strand) a second connect while one is in flight — the
-            // earlier caller keeps its continuation and stays the active attempt.
-            if connectCont != nil {
+            // reject (rather than strand) a second connect while one is in flight OR
+            // already connected — a re-entrant connect would swap the notifications
+            // stream and silently strand whoever is still draining the current one.
+            if connectCont != nil || writeChar != nil {
                 lock.unlock()
                 c.resume(throwing: BLEError.busy)
                 return
@@ -200,7 +201,10 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic,
                     error: Error?) {
-        if let v = characteristic.value { notifyContinuation?.yield(v) }
+        // drop the callback on a read/notify error — a stale payload must not be fed
+        // into the frame stream Rust drains as protocol responses.
+        guard error == nil, let v = characteristic.value else { return }
+        notifyContinuation?.yield(v)
     }
 
     /// GATT write-with-response acknowledgement (or error) for the in-flight `write`.

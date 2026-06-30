@@ -166,6 +166,13 @@ fn date_label(unix_s: f64, tz: i64) -> String {
     let wd = WD[(days + 3).rem_euclid(7) as usize];
     format!("{wd} {m:02}-{d:02}")
 }
+/// Full calendar date (`YYYY-MM-DD`) — an unambiguous key for matching a night to a
+/// day's activity (the weekday `date_label` collides across years).
+fn ymd_label(unix_s: f64, tz: i64) -> String {
+    let days = (unix_s as i64 + tz * 3600).div_euclid(86400);
+    let (y, m, d) = civil(days);
+    format!("{y:04}-{m:02}-{d:02}")
+}
 fn hm(unix_s: f64, tz: i64) -> String {
     let sod = (unix_s as i64 + tz * 3600).rem_euclid(86400);
     format!("{:02}:{:02}", sod / 3600, (sod % 3600) / 60)
@@ -379,6 +386,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         let stage_cells = hyp.and_then(|h| h["stages"].as_array()).map(|s| downsample(s, 120));
         nights_json.push(json!({
             "date": date_label(unix_s(nt.start_ds), tz),
+            "ymd": ymd_label(unix_s(nt.start_ds), tz),
             "start": hm(unix_s(nt.start_ds), tz),
             "end": hm(unix_s(nt.end_ds), tz),
             "in_bed_h": ((nt.end_ds - nt.start_ds) as f64 / 10.0 / 3600.0 * 10.0).round() / 10.0,

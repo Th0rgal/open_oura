@@ -12,7 +12,7 @@
 # compile is the long part (tens of minutes to ~1-2h).
 set -euo pipefail
 
-REPO="$HOME/work/open_oura"
+REPO="$(cd "$(dirname "$0")/../../.." && pwd)"   # repo root from this script's location
 ROOT="$REPO/local/libtorch-ios"
 SRC="$ROOT/pytorch"
 

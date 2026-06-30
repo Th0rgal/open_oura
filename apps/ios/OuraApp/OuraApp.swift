@@ -14,7 +14,7 @@ struct Trend: Decodable {
 }
 struct Vitals: Decodable { var hrv = Trend(); var rhr = Trend() }
 struct NightRow: Decodable, Identifiable {
-    var date: String?; var start: String?; var end: String?
+    var date: String?; var ymd: String?; var start: String?; var end: String?
     var in_bed_h: Double?; var hrv_ms: Double?; var rhr: Double?
     var skin_temp: Double?; var spo2_mean: Double?
     // model-derived (present once the hypnogram runner is wired): per-30s stage codes
@@ -342,10 +342,12 @@ struct SleepDetail: View {
 }
 
 extension Summary {
-    // a "day" is an activity date (YYYY-MM-DD); the matching night is found by MM-DD.
+    // a "day" is an activity date (YYYY-MM-DD); match the night by its exact ymd so a
+    // multi-year history can't attach the wrong year's night (fall back to MM-DD only
+    // for older data that predates the ymd field).
     func night(forDay day: String) -> NightRow? {
-        let mmdd = String(day.suffix(5))
-        return nights.first { ($0.date ?? "").hasSuffix(mmdd) }
+        nights.first { $0.ymd == day }
+            ?? nights.first { $0.ymd == nil && ($0.date ?? "").hasSuffix(String(day.suffix(5))) }
     }
     func workoutsOn(_ day: String) -> [WorkoutSession] {
         workouts.filter { $0.isWorkout >= 0.5 && $0.dayLabel == day }
