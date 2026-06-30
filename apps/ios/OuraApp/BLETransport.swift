@@ -102,6 +102,11 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
         central.scanForPeripherals(withServices: [RingUUID.service], options: nil)
     }
 
+    /// Finish the inbound frame stream so a Rust drain blocked on `recv` returns at once
+    /// (instead of waiting out the quiet-window) — used when a write fails so the sync
+    /// surfaces the error promptly rather than proceeding as if the frame was sent.
+    func abort() { notifyContinuation?.finish() }
+
     /// Write a request frame and await the ring's GATT acknowledgement, so the caller
     /// (Rust `OuraClient`, which drives requests sequentially) knows the frame landed
     /// before sending the next. Resolved in `didWriteValueFor`.

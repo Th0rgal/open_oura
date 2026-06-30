@@ -50,7 +50,6 @@ enum SleepStaging {
             }
         }
 
-        let tz = Int((Double(TimeZone.current.secondsFromGMT()) / 3600).rounded())
         var result: [String: [Int]] = [:]
         for (startDs, endDs) in beds.sorted(by: { $0.key > $1.key }) {
             let lo = startDs - 6000, hi = endDs + 6000
@@ -90,27 +89,13 @@ enum SleepStaging {
                                   &tempTs, &tempVal, Int32(temp.count),
                                   ms(startDs), ms(endDs), &out, 4096)
             if n > 0 {
-                result[dateLabel(startDs, anchor: anchor, maxDs: maxDs, tz: tz)] = out.prefix(Int(n)).map(Int.init)
+                // key by the exact bedtime start_ds (matches the summary's night.start_ds)
+                // so two sleeps on one calendar day stay distinct.
+                result[String(startDs)] = out.prefix(Int(n)).map(Int.init)
             }
         }
         return result
     }
 
-    // Howard Hinnant civil_from_days + the web's "WD MM-DD" label, so dates match
-    // the summary's night.date for injection.
-    private static func dateLabel(_ startDs: Int64, anchor: Int64, maxDs: Int64, tz: Int) -> String {
-        let unixS = Double(anchor) - Double(maxDs - startDs) / 10.0
-        let days = Int((unixS + Double(tz) * 3600) / 86400.0)
-        let z = days + 719468
-        let era = (z >= 0 ? z : z - 146096) / 146097
-        let doe = z - era * 146097
-        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
-        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
-        let mp = (5 * doy + 2) / 153
-        let d = doy - (153 * mp + 2) / 5 + 1
-        let m = mp < 10 ? mp + 3 : mp - 9
-        let wd = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][((days + 3) % 7 + 7) % 7]
-        return String(format: "%@ %02d-%02d", wd, m, d)
-    }
 }
 #endif

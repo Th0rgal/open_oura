@@ -14,7 +14,7 @@ struct Trend: Decodable {
 }
 struct Vitals: Decodable { var hrv = Trend(); var rhr = Trend() }
 struct NightRow: Decodable, Identifiable {
-    var date: String?; var ymd: String?; var start: String?; var end: String?
+    var date: String?; var ymd: String?; var start_ds: Int64?; var start: String?; var end: String?
     var in_bed_h: Double?; var hrv_ms: Double?; var rhr: Double?
     var skin_temp: Double?; var spo2_mean: Double?
     // model-derived (present once the hypnogram runner is wired): per-30s stage codes
@@ -90,7 +90,9 @@ enum Core {
         // night, so the app renders the same sleep diagrams as the web dashboard.
         let staged = SleepStaging.run()
         for i in s.nights.indices {
-            guard let date = s.nights[i].date, let stages = staged[date], !stages.isEmpty else { continue }
+            // key by the exact bedtime start_ds so two sleeps on one calendar day don't
+            // collide (the weekday date label would).
+            guard let sds = s.nights[i].start_ds, let stages = staged[String(sds)], !stages.isEmpty else { continue }
             s.nights[i].stages = stages
             let total = Double(stages.count)
             let pct = { (code: Int) in (Double(stages.filter { $0 == code }.count) / total * 100).rounded() }

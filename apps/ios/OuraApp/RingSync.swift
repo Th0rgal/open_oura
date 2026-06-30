@@ -62,7 +62,14 @@ final class RingWriter: BleWriter, @unchecked Sendable {
         let prev = tail
         tail = Task {
             _ = await prev.value          // wait for the prior write to finish…
-            try? await t.write(data)      // …then perform (and await) this one
+            do {
+                try await t.write(data)   // …then perform (and await) this one
+            } catch {
+                // a failed write means the ring never got the frame — close the inbound
+                // stream so the Rust drain stops waiting and the sync fails loudly
+                // instead of proceeding as if the request was sent.
+                t.abort()
+            }
         }
         lock.unlock()
     }

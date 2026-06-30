@@ -387,6 +387,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         nights_json.push(json!({
             "date": date_label(unix_s(nt.start_ds), tz),
             "ymd": ymd_label(unix_s(nt.start_ds), tz),
+            "start_ds": nt.start_ds, // exact bedtime key for on-device model injection
             "start": hm(unix_s(nt.start_ds), tz),
             "end": hm(unix_s(nt.end_ds), tz),
             "in_bed_h": ((nt.end_ds - nt.start_ds) as f64 / 10.0 / 3600.0 * 10.0).round() / 10.0,
