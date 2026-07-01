@@ -24,8 +24,7 @@ settings:
     TARGETED_DEVICE_FAMILY: "1"   # iPhone only (no iPad multitasking orientation reqs)
     CODE_SIGN_STYLE: Automatic
     CODE_SIGN_ENTITLEMENTS: OuraApp.entitlements
-    # Fill in your 10-char Apple Developer Team ID (or set it in Xcode's Signing tab).
-    DEVELOPMENT_TEAM: ""
+    DEVELOPMENT_TEAM: "BQ6Z84B8L5"
 
 targets:
   OuraApp:
