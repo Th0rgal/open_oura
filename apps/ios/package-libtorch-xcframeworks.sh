@@ -37,6 +37,10 @@ make_framework() {
     for dep in $LIBS; do
         install_name_tool -change "@rpath/$dep.dylib" "@rpath/$dep.framework/$dep" "$fw/$name" 2>/dev/null || true
     done
+    # a dSYM with the binary's UUID so archives ship symbols for these prebuilt
+    # frameworks (otherwise App Store reports "Upload Symbols Failed"). No DWARF in the
+    # binaries, but the UUID match is what the symbol-upload step checks.
+    dsymutil "$fw/$name" -o "$fw.dSYM" 2>/dev/null || true
     local bid="org.pytorch.${name//_/-}"
     cat > "$fw/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -64,8 +68,8 @@ for name in $LIBS; do
     make_framework "$DEV/$name.dylib" "$name" "$WORK/device" "iPhoneOS" 2
     make_framework "$SIM/$name.dylib" "$name" "$WORK/sim"    "iPhoneSimulator" 7
     xcodebuild -create-xcframework \
-        -framework "$WORK/device/$name.framework" \
-        -framework "$WORK/sim/$name.framework" \
+        -framework "$WORK/device/$name.framework" -debug-symbols "$WORK/device/$name.framework.dSYM" \
+        -framework "$WORK/sim/$name.framework"    -debug-symbols "$WORK/sim/$name.framework.dSYM" \
         -output "$OUT/$name.xcframework" >/dev/null
 done
 rm -rf "$WORK"
