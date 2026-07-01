@@ -30,6 +30,7 @@ targets:
       base:
         INFOPLIST_FILE: Info.plist
         GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1"   # iPhone-only (target-level, overrides xcodegen's 1,2 default)
         OTHER_LDFLAGS: [-lsqlite3]
     sources:
       - path: OuraApp.swift

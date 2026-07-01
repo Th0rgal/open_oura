@@ -34,6 +34,7 @@ targets:
       base:
         INFOPLIST_FILE: Info.plist
         GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1"   # iPhone-only (target-level, overrides xcodegen's 1,2 default)
         # on-device torch: bridging header + TORCH flag + C++ + libtorch headers
         SWIFT_OBJC_BRIDGING_HEADER: TorchBridge.h
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: TORCH
