@@ -21,6 +21,7 @@ settings:
     MARKETING_VERSION: "0.1"
     CURRENT_PROJECT_VERSION: "1"
     PRODUCT_BUNDLE_IDENTIFIER: md.thomas.openoura
+    TARGETED_DEVICE_FAMILY: "1"   # iPhone only (no iPad multitasking orientation reqs)
     CODE_SIGN_STYLE: Automatic
     CODE_SIGN_ENTITLEMENTS: OuraApp.entitlements
     # Fill in your 10-char Apple Developer Team ID (or set it in Xcode's Signing tab).

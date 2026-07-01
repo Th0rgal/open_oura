@@ -2,44 +2,45 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleDevelopmentRegion</key>
-    <string>en</string>
-    <key>CFBundleExecutable</key>
-    <string>OuraApp</string>
-    <key>CFBundleIdentifier</key>
-    <string>md.thomas.openoura</string>
-    <key>CFBundleName</key>
-    <string>open_oura</string>
-    <key>CFBundleDisplayName</key>
-    <string>open_oura</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>0.1</string>
-    <key>CFBundleVersion</key>
-    <string>1</string>
-    <key>LSRequiresIPhoneOS</key>
-    <true/>
-    <key>MinimumOSVersion</key>
-    <string>17.0</string>
-    <key>UIDeviceFamily</key>
-    <array><integer>1</integer></array>
-    <!-- CFBundleSupportedPlatforms intentionally omitted: the build (simctl harness or
-         xcodebuild archive) sets it for the right platform; pinning it to the simulator
-         would make a device/TestFlight archive invalid. -->
-    <key>UILaunchScreen</key>
-    <dict/>
-    <key>NSBluetoothAlwaysUsageDescription</key>
-    <string>open_oura connects to your Oura ring over Bluetooth to read your health data on-device.</string>
-    <key>NSBluetoothPeripheralUsageDescription</key>
-    <string>open_oura connects to your Oura ring over Bluetooth to read your health data on-device.</string>
-    <key>NSHealthShareUsageDescription</key>
-    <string>open_oura can read selected Apple Health data to compare it with your ring metrics on-device.</string>
-    <key>NSHealthUpdateUsageDescription</key>
-    <string>open_oura can write selected ring-derived metrics to Apple Health if you enable Health export.</string>
-    <!-- Only standard crypto (AES for ring auth) → exempt from export compliance.
-         Declared so App Store Connect doesn't prompt on every upload. -->
-    <key>ITSAppUsesNonExemptEncryption</key>
-    <false/>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>open_oura</string>
+	<key>CFBundleExecutable</key>
+	<string>OuraApp</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleName</key>
+	<string>open_oura</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1</string>
+	<key>CFBundleVersion</key>
+	<string>2</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>MinimumOSVersion</key>
+	<string>17.0</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>open_oura connects to your Oura ring over Bluetooth to read your health data on-device.</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>open_oura connects to your Oura ring over Bluetooth to read your health data on-device.</string>
+	<key>NSHealthShareUsageDescription</key>
+	<string>open_oura can read selected Apple Health data to compare it with your ring metrics on-device.</string>
+	<key>NSHealthUpdateUsageDescription</key>
+	<string>open_oura can write selected ring-derived metrics to Apple Health if you enable Health export.</string>
+	<key>UIDeviceFamily</key>
+	<array>
+		<integer>1</integer>
+	</array>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+	</array>
+	<key>UILaunchScreen</key>
+	<dict/>
 </dict>
 </plist>
