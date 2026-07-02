@@ -19,6 +19,24 @@ const cap = (s) => esc(s).replace(/^./, (c) => c.toUpperCase());
 const kfmt = (n) => (n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k" : String(Math.round(n)));
 
 let CURRENT_PROFILE = null;
+let LAST_DEVICE_SERIAL = null;
+
+// ── local dashboard fetch helpers ──────────────────────────────────────────
+// Every mutating endpoint is gated by the X-Oura-Dash header; these centralize it
+// (and the JSON POST envelope) so the call sites can't drift. They return the raw
+// Response, so each caller keeps its own r.ok / body / error handling.
+const DASH_HEADERS = { "X-Oura-Dash": "1" };
+function postDash(url, body) {
+  const opts = { method: "POST", headers: { ...DASH_HEADERS } };
+  if (body !== undefined) {
+    opts.headers["Content-Type"] = "application/json";
+    opts.body = JSON.stringify(body);
+  }
+  return fetch(url, opts);
+}
+function getDash(url) {
+  return fetch(url, { headers: { ...DASH_HEADERS } });
+}
 
 // Smooth curve THROUGH the points using a monotone cubic Hermite spline
 // (Fritsch–Carlson). Monotone = the curve never overshoots past a data point, so it
@@ -117,73 +135,160 @@ function hypnogram(stages) {
   return wrap;
 }
 
-function renderNights(d) {
-  const box = $("nights");
-  box.innerHTML = "";
-  $("sleep-legend").hidden = false;
-  if (!d.nights || !d.nights.length) {
-    box.append(el("div", "error", "No overnight data yet. Wear the ring and sync."));
-    return;
+// ── the unified "day" (night + activity of the same date) ──────────────────
+// A day is keyed by YYYY-MM-DD. The most recent one is the hero card; the rest
+// live behind "Show all N days". This mirrors the iOS app's home + AllDaysView.
+
+// The calendar date you WOKE from a night. Nights are labelled by onset date (the
+// evening you went to bed), so an overnight sleep that crosses midnight belongs to
+// the next day's "morning". Pairing a day with the sleep you woke from — not the
+// sleep you started that evening — is what makes "night + activity of the day" read
+// as one coherent day. Kept identical to the iOS Summary.wakeYmd.
+function wakeYmd(n) {
+  if (!n || !n.ymd) return null;
+  if (n.start && n.end && n.end < n.start) {
+    const [y, m, dd] = n.ymd.split("-").map(Number);
+    const t = new Date(y, m - 1, dd + 1);
+    return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`;
   }
-  const nightRow = (n) => {
-    const row = el("div", "night");
-    const meta = el("div", "meta");
-    meta.append(el("div", "date", n.date));
-    meta.append(el("div", "span", `${n.start}-${n.end} · ${num(n.in_bed_h)}h`));
-    row.append(meta);
+  return n.ymd;
+}
 
-    const right = el("div", "right");
-    if (n.stages && n.stages.length) right.append(hypnogram(n.stages));
-    else right.append(el("div", "hyp"));
+// every date that has a night (by wake date), a movement profile, daily totals, or a
+// session — newest first
+function dayKeys(d) {
+  const set = new Set();
+  (d.nights || []).forEach((n) => { const w = wakeYmd(n); if (w) set.add(w); });
+  Object.keys(d.activity_profile || {}).forEach((k) => set.add(k));
+  Object.keys(d.activity_daily || {}).forEach((k) => set.add(k));
+  (d.activity || []).forEach((s) => { const y = (s.start || "").split(" ")[0]; if (y) set.add(y); });
+  return [...set].filter(Boolean).sort().reverse();
+}
 
+// the primary sleep you woke from on the morning of `ymd` — the longest in-bed night
+// wins over same-morning naps. Falls back to a MM-DD match for older data lacking ymd.
+function nightForDay(d, ymd) {
+  const cands = (d.nights || []).filter((n) => wakeYmd(n) === ymd);
+  if (cands.length) return cands.reduce((a, b) => ((b.in_bed_h || 0) > (a.in_bed_h || 0) ? b : a));
+  return (d.nights || []).find((n) => n.ymd == null && (n.date || "").endsWith(ymd.slice(5))) || null;
+}
+
+// this day's sessions, start rewritten to minutes-past-midnight so openActDetail()
+// (which formats s.start with hhmm()) renders them correctly.
+function sessionsForDay(d, ymd) {
+  return (d.activity || [])
+    .filter((s) => (s.start || "").startsWith(ymd))
+    .map((s) => {
+      const [h, m] = ((s.start || "").split(" ")[1] || "0:0").split(":").map(Number);
+      return { ...s, start: (h || 0) * 60 + (m || 0) };
+    })
+    .sort((a, b) => a.start - b.start);
+}
+
+const dayTitle = (ymd) => {
+  const p = (ymd || "").split("-");
+  if (p.length !== 3) return ymd;
+  const dt = new Date(+p[0], +p[1] - 1, +p[2]);
+  return `${WD[dt.getDay()]} · ${fmtDay(ymd)}`;
+};
+
+// continuous movement ridge (96 × 15-min MET buckets) as a filled SVG area
+const RIDGE_H = 30;
+function ridgeSvg(profile) {
+  const prof = (profile || []).map((v) => v || 0);
+  if (prof.length < 2) return "";
+  const peak = Math.max(0.5, ...prof);
+  const pts = prof.map((v, i) => [(i / (prof.length - 1)) * 100, RIDGE_H - Math.min(1, v / peak) * RIDGE_H]);
+  const d = `${smoothPath(pts)} L100 ${RIDGE_H} L0 ${RIDGE_H} Z`;
+  return `<svg class="day-ridge" viewBox="0 0 100 ${RIDGE_H}" preserveAspectRatio="none"><path d="${d}"/></svg>`;
+}
+
+// the combined day card: a clickable Sleep region (→ sleep detail) above a clickable
+// Activity region (→ activity detail). Used as the hero on the home panel.
+function dayCard(d, ymd) {
+  const card = el("div", "day-card");
+  card.append(el("div", "day-date", dayTitle(ymd)));
+
+  const n = nightForDay(d, ymd);
+  if (n) {
+    const sp = el("button", "day-part");
+    sp.type = "button";
+    sp.append(el("div", "dp-head",
+      `<span class="dp-tag">Sleep</span><span class="dp-meta">${esc(n.start || "—")}–${esc(n.end || "—")} · ${num(n.in_bed_h)}h</span><span class="dp-chev"></span>`));
+    if (n.stages && n.stages.length) sp.append(hypnogram(n.stages));
     const comp = el("div", "breakdown");
     const seg = (l, v) => `<span>${l} <b>${num(v)}%</b></span>`;
     comp.innerHTML = seg("Deep", n.deep_pct) + seg("Light", n.light_pct) + seg("REM", n.rem_pct) + seg("Awake", n.wake_pct);
-    right.append(comp);
+    sp.append(comp);
+    sp.addEventListener("click", () => openSleepDetail(n));
+    card.append(sp);
+  }
 
-    const vit = el("div", "breakdown vitals-row");
-    const bits = [`Efficiency <b>${num(n.efficiency)}%</b>`];
-    if (n.hrv_ms != null) bits.push(`HRV <b>${n.hrv_ms}</b> ms`);
-    if (n.rhr != null) bits.push(`Resting HR <b>${n.rhr}</b>`);
-    if (n.spo2_mean != null) bits.push(`O₂ <b>${n.spo2_mean}%</b>`);
-    vit.innerHTML = bits.map((b) => `<span>${b}</span>`).join("");
-    right.append(vit);
-    row.append(right);
-    return row;
-  };
-  // show last night only; the rest live in an expandable, scrollable drawer.
-  collapsibleList(box, d.nights, nightRow, 1, "nights");
+  const ap = el("button", "day-part");
+  ap.type = "button";
+  const ds = (d.activity_daily || {})[ymd];
+  const stat = ds ? `${kfmt(ds.steps)} steps · ${Math.round(ds.active_kcal)} kcal` : "no activity totals";
+  ap.append(el("div", "dp-head",
+    `<span class="dp-tag">Activity</span><span class="dp-meta">${stat}</span><span class="dp-chev"></span>`));
+  const prof = (d.activity_profile || {})[ymd];
+  if (prof && prof.length > 1) ap.insertAdjacentHTML("beforeend", ridgeSvg(prof));
+  const sessions = sessionsForDay(d, ymd);
+  if (sessions.length) {
+    const chips = el("div", "day-sessions");
+    sessions.forEach((s) => {
+      const chip = el("span", "day-chip" + (s.is_workout >= 0.5 ? " workout" : ""));
+      const ico = el("span", "ic");
+      ico.style.setProperty("--i", `url(/icons/${actIcon(s.label)}.svg)`);
+      const nm = el("span", "day-chip-name");
+      nm.textContent = s.label || "activity";
+      chip.append(ico, nm);
+      chips.append(chip);
+    });
+    ap.append(chips);
+  }
+  ap.addEventListener("click", () => openActivityDetail(d, ymd));
+  card.append(ap);
+  return card;
 }
 
-// Render `items` into `box` capped at `preview`; any overflow goes into a
-// scrollable drawer toggled by a "Show all N <noun>" button.
-function collapsibleList(box, items, render, preview, noun) {
-  items.slice(0, preview).forEach((it) => box.append(render(it)));
-  if (items.length <= preview) return;
-  const drawer = el("div", "more-list");
-  items.slice(preview).forEach((it) => drawer.append(render(it)));
-  const btn = el("button", "more-toggle");
-  btn.textContent = `Show all ${items.length} ${noun}`;
-  btn.addEventListener("click", () => {
-    const open = drawer.classList.toggle("open");
-    btn.textContent = open ? "Show less" : `Show all ${items.length} ${noun}`;
-  });
-  box.append(drawer, btn);
+function renderDay(d) {
+  const box = $("day");
+  box.innerHTML = "";
+  const days = dayKeys(d);
+  if (!days.length) {
+    box.append(el("div", "error", "No days yet. Wear the ring and sync."));
+    $("sleep-legend").hidden = true;
+    return;
+  }
+  const top = days[0];
+  $("sleep-legend").hidden = !(nightForDay(d, top) || {}).stages;
+  box.append(dayCard(d, top));
+  if (days.length > 1) {
+    const btn = el("button", "more-toggle");
+    btn.textContent = `Show all ${days.length} days`;
+    btn.addEventListener("click", () => openDaysBrowser(d, days));
+    box.append(btn);
+  }
 }
 
 function renderCardio(d) {
   const box = $("cardio");
   const cv = d.cardio;
+  const vo2 = d.fitness?.vo2max;
   box.innerHTML = "";
+  // VO₂max is model-free (from demographics), so it shows even without the CVA model.
+  const vo2Kv = vo2 != null ? el("div", "kv", `<div class="k">VO₂max estimate</div><div class="v">${vo2} ml/kg/min</div>`) : null;
   if (!cv || cv.vascular_age == null) {
     box.append(el("div", "error", "Cardiovascular age needs the cva_ppg feature on. Enable it, then sync overnight."));
+    if (vo2Kv) { const kvs = el("div", "kvs"); kvs.append(vo2Kv); box.append(kvs); }
     return;
   }
   box.append(el("div", "big-metric", `<span class="n">${cv.vascular_age}</span><span class="u">years vascular age</span>`));
   box.append(el("div", "sub", `${relAge(cv.vascular_age - cv.chronological_age).long} your age (${cv.chronological_age})`));
   const kvs = el("div", "kvs");
-  kvs.append(el("div", "kv", `<div class="k">Pulse-wave velocity</div><div class="v">${cv.pwv_ms} m/s</div>`));
-  kvs.append(el("div", "kv", `<div class="k">Segments analysed</div><div class="v">${cv.segments}</div>`));
+  kvs.append(el("div", "kv", `<div class="k">Pulse-wave velocity</div><div class="v">${cv.pwv_ms != null ? cv.pwv_ms + " m/s" : "—"}</div>`));
+  kvs.append(el("div", "kv", `<div class="k">Segments analysed</div><div class="v">${num(cv.segments)}</div>`));
+  if (vo2Kv) kvs.append(vo2Kv);
   box.append(kvs);
 }
 
@@ -195,15 +300,17 @@ function renderSpo2(d) {
     box.append(el("div", "error", "Blood oxygen needs the spo2 feature on overnight."));
     return;
   }
+  // SpO2 gauge scale: clamp the reading into [SPO2_MIN, 100] and map to 0–100% fill.
+  const SPO2_MIN = 85, SPO2_HEALTHY = 95;
   box.append(el("div", "big-metric", `<span class="n">${n0.spo2_mean}</span><span class="u">% avg, last night</span>`));
   box.append(el("div", "sub", "Calibrated from the ring's R-ratio (Oura's own curve)."));
-  const pct = Math.max(0, Math.min(100, ((n0.spo2_mean - 85) / 15) * 100));
+  const pct = Math.max(0, Math.min(100, ((n0.spo2_mean - SPO2_MIN) / (100 - SPO2_MIN)) * 100));
   const g = el("div", "gauge");
   const fill = el("i");
   fill.style.width = pct + "%";
   g.append(fill);
   box.append(g);
-  box.append(el("div", "scale", `<span>85</span><span>healthy ≥ 95</span><span>100</span>`));
+  box.append(el("div", "scale", `<span>${SPO2_MIN}</span><span>healthy ≥ ${SPO2_HEALTHY}</span><span>100</span>`));
 }
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -223,7 +330,7 @@ const ACT_ICON = {
 };
 const actIcon = (label) => ACT_ICON[(label || "").toLowerCase()] || "act-default";
 
-// session detail popover (opened by clicking an actogram mark)
+// session detail popover (opened from a day's session row)
 function openActDetail(s) {
   let dlg = $("act-dialog");
   if (!dlg) {
@@ -260,140 +367,160 @@ function openActDetail(s) {
   dlg.showModal();
 }
 
-// Actogram: each day is a 24h time axis, sessions plotted as marks — you read the
-// circadian rhythm at a glance. Monochrome; accent reserved for workouts.
-function renderActivity(d) {
-  const box = $("activity");
-  box.innerHTML = "";
-  const all = d.activity || [];
-  if (!all.length) {
-    box.append(el("div", "error", "No activity sessions detected."));
-    return;
+// ── day-detail dialogs (sleep / activity / combined) ───────────────────────
+
+// the night's hypnogram + stage breakdown + that night's vitals, as a detachable
+// block shared by the sleep-only and the combined day detail.
+function sleepDetailBody(n) {
+  const wrap = el("div", "dd-section");
+  wrap.append(el("div", "dd-sub", `${esc(n.start || "—")}–${esc(n.end || "—")} · ${num(n.in_bed_h)} h in bed`));
+  if (n.stages && n.stages.length) {
+    wrap.append(hypnogram(n.stages));
+    const comp = el("div", "breakdown");
+    const seg = (l, v) => `<span>${l} <b>${num(v)}%</b></span>`;
+    comp.innerHTML = seg("Deep", n.deep_pct) + seg("Light", n.light_pct) + seg("REM", n.rem_pct) + seg("Awake", n.wake_pct);
+    wrap.append(comp);
+  } else {
+    wrap.append(el("div", "ad-muted", "No hypnogram for this night yet — the SleepNet model runs on sync."));
   }
-  const toMin = (s) => { const [h, m] = (s || "0:0").split(":").map(Number); return (h || 0) * 60 + (m || 0); };
-  const byDay = new Map();
-  let minStart = 1440, maxEnd = 0;
-  for (const s of all) {
-    const [ymd, hm] = (s.start || "").split(" ");
-    if (!ymd) continue;
-    // endMin is the day-clamped end (minutes) for the bar geometry; the API's `s.end`
-    // string is the correct wall-clock end (already wraps past midnight) for display.
-    const start = toMin(hm), endMin = Math.min(1440, start + (s.duration_min || 0));
-    minStart = Math.min(minStart, start); maxEnd = Math.max(maxEnd, endMin);
-    if (!byDay.has(ymd)) byDay.set(ymd, []);
-    byDay.get(ymd).push({ ...s, start, endMin });
+  const grid = el("div", "ad-grid");
+  const kv = (k, v) => `<div class="kv"><div class="k">${k}</div><div class="v">${v}</div></div>`;
+  grid.innerHTML =
+    kv("Efficiency", n.efficiency != null ? n.efficiency + "%" : "—") +
+    kv("HRV", n.hrv_ms != null ? n.hrv_ms + " ms" : "—") +
+    kv("Resting HR", n.rhr != null ? n.rhr + " bpm" : "—") +
+    kv("Skin temp", n.skin_temp != null ? n.skin_temp.toFixed(1) + " °C" : "—") +
+    kv("Blood O₂", n.spo2_mean != null ? n.spo2_mean + "%" : "—");
+  wrap.append(grid);
+  return wrap;
+}
+
+// the day's movement ridge + step/kcal totals + a clickable session list (each row
+// opens the per-session model detail). Shared by the activity-only + combined detail.
+function activityDetailBody(d, ymd) {
+  const wrap = el("div", "dd-section");
+  const prof = (d.activity_profile || {})[ymd];
+  if (prof && prof.length > 1) wrap.insertAdjacentHTML("beforeend", ridgeSvg(prof));
+  const ds = (d.activity_daily || {})[ymd];
+  if (ds) {
+    const grid = el("div", "ad-grid");
+    const kv = (k, v) => `<div class="kv"><div class="k">${k}</div><div class="v">${v}</div></div>`;
+    grid.innerHTML =
+      kv("Steps", Math.round(ds.steps || 0).toLocaleString()) +
+      (ds.distance_m != null ? kv("Distance", (ds.distance_m / 1000).toFixed(1) + " km") : "") +
+      kv("Active energy", Math.round(ds.active_kcal || 0) + " kcal") +
+      kv("Total energy", Math.round(ds.total_kcal || 0) + " kcal");
+    wrap.append(grid);
   }
-  const days = [...byDay.keys()].sort().reverse().slice(0, 8);
-
-  // shared whole-hour window (≥ 9h span) so days are comparable
-  let h0 = Math.floor(minStart / 60), h1 = Math.ceil(maxEnd / 60);
-  if (h1 - h0 < 9) { h0 = Math.max(0, h0 - Math.ceil((9 - (h1 - h0)) / 2)); h1 = Math.min(24, h0 + 9); }
-  const winStart = h0 * 60, span = (h1 - h0) * 60;
-  const pct = (min) => ((min - winStart) / span) * 100;
-  const step = h1 - h0 <= 12 ? 2 : 3;
-  const ticks = [];
-  for (let h = h0; h <= h1; h += step) ticks.push(h);
-
-  // continuous movement ridge (15-min MET buckets), shared scale across days
-  const profiles = d.activity_profile || {};
-  const RH = 28; // ridge SVG height units
-  let maxMet = 2;
-  days.forEach((y) => (profiles[y] || []).forEach((v, b) => {
-    const c = b * 15 + 7.5;
-    if (c >= winStart && c <= winStart + span) maxMet = Math.max(maxMet, v);
-  }));
-  const ridgeArea = (prof) => {
-    const pts = [];
-    (prof || []).forEach((v, b) => {
-      const c = b * 15 + 7.5;
-      if (c < winStart || c > winStart + span) return;
-      pts.push([((c - winStart) / span) * 100, RH - Math.min(1, (v || 0) / maxMet) * RH]);
-    });
-    if (pts.length < 2) return "";
-    return `${smoothPath(pts)} L${pts[pts.length - 1][0].toFixed(1)} ${RH} L${pts[0][0].toFixed(1)} ${RH} Z`;
-  };
-
-  const acto = el("div", "acto");
-  const lanes = el("div", "acto-lanes");
-  const grid = el("div", "acto-grid");
-  ticks.forEach((h) => { const i = el("i"); i.style.left = pct(h * 60) + "%"; grid.append(i); });
-  lanes.append(grid);
-
-  const dailyStats = d.activity_daily || {};
-  const dVals = days.map((y) => dailyStats[y]).filter(Boolean);
-  const maxSteps = Math.max(1, ...dVals.map((v) => v.steps || 0));
-  const maxKcal = Math.max(1, ...dVals.map((v) => v.active_kcal || 0));
-  const buildLane = (ymd) => {
-    const p = ymd.split("-");
-    const dt = new Date(+p[0], +p[1] - 1, +p[2]);
-    const day = el("div", "acto-day");
-    day.append(el("div", "acto-label", `${WD[dt.getDay()]} ${fmtDay(ymd)}`));
-    const track = el("div", "acto-track");
-    const area = ridgeArea(profiles[ymd]);
-    track.innerHTML =
-      (area ? `<svg class="acto-ridge" viewBox="0 0 100 ${RH}" preserveAspectRatio="none"><path d="${area}"/></svg>` : "") +
-      `<i class="acto-base"></i>`;
-    byDay.get(ymd).sort((a, b) => a.start - b.start).forEach((s) => {
-      const work = s.is_workout >= 0.5;
-      const bar = el("div", "acto-bar" + (work ? " workout" : ""));
-      bar.style.left = pct(s.start) + "%";
-      // width tracks the visible (day-clamped) segment so a past-midnight session
-      // isn't drawn wider than its lane; the tooltip still reports the true duration.
-      bar.style.width = Math.max(0.5, ((s.endMin - s.start) / span) * 100) + "%";
-      bar.title = `${s.label || "activity"} · ${s.duration_min} min · ${hhmm(s.start)}–${s.end} · tap for details`;
-      // build via DOM (textContent) so the label can't inject markup; actIcon()
-      // only ever returns a fixed basename, so the icon URL is safe.
+  const sessions = sessionsForDay(d, ymd);
+  if (sessions.length) {
+    wrap.append(el("p", "subhead", "Sessions"));
+    const list = el("div", "dd-sessions");
+    sessions.forEach((s) => {
+      const row = el("button", "dd-session" + (s.is_workout >= 0.5 ? " workout" : ""));
+      row.type = "button";
       const ico = el("span", "ic");
       ico.style.setProperty("--i", `url(/icons/${actIcon(s.label)}.svg)`);
-      const name = el("span", "acto-name");
-      name.textContent = s.label || "";
-      bar.append(ico, name);
-      bar.addEventListener("click", () => openActDetail(s));
-      track.append(bar);
+      const nm = el("span", "dd-s-name");
+      nm.textContent = s.label || "activity";
+      const meta = el("span", "dd-s-meta");
+      meta.textContent = `${s.duration_min} min · ${hhmm(s.start)}`;
+      row.append(ico, nm, meta);
+      row.addEventListener("click", () => openActDetail(s));
+      list.append(row);
     });
-    day.append(track);
-
-    // subtle per-day totals: steps (est.) + active calories
-    const ds = dailyStats[ymd];
-    const stat = el("div", "acto-stats");
-    if (ds) {
-      const sp = Math.max(4, (ds.steps / maxSteps) * 100);
-      const kc = Math.max(4, (ds.active_kcal / maxKcal) * 100);
-      const mini = (iconf, w, val, tip) =>
-        `<span class="astat" title="${tip}"><span class="ic" style="--i:url(/icons/${iconf}.svg)"></span><span class="ab"><i style="width:${w}%"></i></span><b>${val}</b></span>`;
-      stat.innerHTML =
-        mini("act-walking", sp, kfmt(ds.steps), `${Math.round(ds.steps).toLocaleString()} estimated steps`) +
-        mini("act-kcal", kc, Math.round(ds.active_kcal), `${Math.round(ds.active_kcal)} active · ${Math.round(ds.total_kcal)} total kcal`);
-    }
-    day.append(stat);
-    return day;
-  };
-  // show the last day only (its sessions/workouts included); the rest go in an
-  // expandable, scrollable drawer.
-  const ACTO_PREVIEW = 1;
-  days.slice(0, ACTO_PREVIEW).forEach((ymd) => lanes.append(buildLane(ymd)));
-  if (days.length > ACTO_PREVIEW) {
-    const drawer = el("div", "more-list");
-    days.slice(ACTO_PREVIEW).forEach((ymd) => drawer.append(buildLane(ymd)));
-    const btn = el("button", "more-toggle");
-    btn.textContent = `Show all ${days.length} days`;
-    btn.addEventListener("click", () => {
-      const open = drawer.classList.toggle("open");
-      btn.textContent = open ? "Show less" : `Show all ${days.length} days`;
-    });
-    lanes.append(drawer, btn);
+    wrap.append(list);
+  } else {
+    wrap.append(el("div", "ad-muted", "No sessions detected this day."));
   }
-  acto.append(lanes);
+  return wrap;
+}
 
-  const axis = el("div", "acto-axis");
-  axis.append(el("div", "acto-label", ""));
-  const ticksEl = el("div", "acto-ticks");
-  ticks.forEach((h) => { const t = el("span", null, String(h).padStart(2, "0")); t.style.left = pct(h * 60) + "%"; ticksEl.append(t); });
-  axis.append(ticksEl);
-  axis.append(el("div", "acto-stats-head", "steps · kcal"));
-  acto.append(axis);
+// a reusable detail dialog (id-scoped so the days browser can stack on top of a day
+// detail without a showModal() clash). `bodies` are pre-built DOM nodes.
+function openDetail(id, title, bodies) {
+  let dlg = $(id);
+  if (!dlg) {
+    dlg = el("dialog", "dialog day-dialog");
+    dlg.id = id;
+    dlg.addEventListener("click", (e) => { if (e.target === dlg) dlg.close(); });
+    document.body.append(dlg);
+  }
+  const form = el("form");
+  form.method = "dialog";
+  const head = el("div", "dd-head");
+  const h = el("h3");
+  h.textContent = title;
+  const close = el("button", "dd-close", "✕");
+  close.type = "button";
+  close.setAttribute("aria-label", "Close");
+  close.addEventListener("click", () => dlg.close());
+  head.append(h, close);
+  form.append(head, ...bodies.filter(Boolean));
+  dlg.replaceChildren(form);
+  dlg.showModal();
+}
 
-  box.append(acto);
+function openSleepDetail(n) {
+  const w = wakeYmd(n);
+  openDetail("day-dialog", `Sleep · ${w ? dayTitle(w) : (n.date || "")}`, [sleepDetailBody(n)]);
+}
+function openActivityDetail(d, ymd) {
+  openDetail("day-dialog", `Activity · ${dayTitle(ymd)}`, [activityDetailBody(d, ymd)]);
+}
+function openDayDetail(d, ymd) {
+  const n = nightForDay(d, ymd);
+  const bodies = [];
+  if (n) bodies.push(el("p", "subhead", "Sleep"), sleepDetailBody(n));
+  bodies.push(el("p", "subhead", "Activity"), activityDetailBody(d, ymd));
+  openDetail("day-dialog", dayTitle(ymd), bodies);
+}
+
+// the "previous days" page: every day as a row (date, mini-hypnogram, totals) that
+// opens its combined night+activity detail. Uses its own dialog id so opening a
+// day's detail stacks on top instead of clobbering this list.
+function openDaysBrowser(d, days) {
+  let dlg = $("days-dialog");
+  if (!dlg) {
+    dlg = el("dialog", "dialog day-dialog");
+    dlg.id = "days-dialog";
+    dlg.addEventListener("click", (e) => { if (e.target === dlg) dlg.close(); });
+    document.body.append(dlg);
+  }
+  const form = el("form");
+  form.method = "dialog";
+  const head = el("div", "dd-head");
+  const h = el("h3");
+  h.textContent = `All ${days.length} days`;
+  const close = el("button", "dd-close", "✕");
+  close.type = "button";
+  close.setAttribute("aria-label", "Close");
+  close.addEventListener("click", () => dlg.close());
+  head.append(h, close);
+  form.append(head);
+
+  const list = el("div", "daylist");
+  days.forEach((ymd) => {
+    const n = nightForDay(d, ymd);
+    const ds = (d.activity_daily || {})[ymd];
+    const row = el("button", "daylist-row");
+    row.type = "button";
+    const left = el("div", "dl-left");
+    left.append(el("div", "dl-date", dayTitle(ymd)));
+    left.append(el("div", "dl-sub", ds ? `${kfmt(ds.steps)} steps · ${Math.round(ds.active_kcal)} kcal` : (n ? "sleep only" : "—")));
+    row.append(left);
+    if (n && n.stages && n.stages.length) {
+      const hyp = hypnogram(n.stages);
+      hyp.classList.add("dl-hyp");
+      row.append(hyp);
+    }
+    row.append(el("span", "dp-chev"));
+    row.addEventListener("click", () => openDayDetail(d, ymd));
+    list.append(row);
+  });
+  form.append(list);
+  dlg.replaceChildren(form);
+  dlg.showModal();
 }
 
 // capability → glyph (mix of vendored phosphor + hugeicons)
@@ -409,11 +536,7 @@ async function doFeature(feature, name, currentOn, row) {
   row.classList.add("busy");
   row.classList.toggle("on", turnOn); // optimistic
   try {
-    const j = await (await fetch("/api/feature", {
-      method: "POST",
-      headers: { "X-Oura-Dash": "1", "Content-Type": "application/json" },
-      body: JSON.stringify({ feature, mode: turnOn ? "automatic" : "off" }),
-    })).json();
+    const j = await (await postDash("/api/feature", { feature, mode: turnOn ? "automatic" : "off" })).json();
     if (j.ok) {
       toast(`${name} turned ${turnOn ? "on" : "off"}. Wear the ring; data appears on the next sync.`, "ok");
       load(); // refresh dev.measuring so a second tap toggles from the real state
@@ -566,7 +689,7 @@ function renderDevice(d) {
 }
 
 function ringKeyFilename() {
-  const serial = (window.__lastDeviceSerial || "oura-ring").replace(/[^A-Za-z0-9_.-]+/g, "-");
+  const serial = (LAST_DEVICE_SERIAL || "oura-ring").replace(/[^A-Za-z0-9_.-]+/g, "-");
   return `${serial}.key`;
 }
 
@@ -585,7 +708,7 @@ async function exportRingKey() {
 }
 
 async function fetchRingKey() {
-  const r = await fetch("/api/ring-key", { headers: { "X-Oura-Dash": "1" } });
+  const r = await getDash("/api/ring-key");
   if (!r.ok) {
     toast("Restart the dashboard server to enable key export.", "error");
     return null;
@@ -738,11 +861,7 @@ async function importRingKeyText(text) {
     return;
   }
   try {
-    const j = await (await fetch("/api/ring-key", {
-      method: "POST",
-      headers: { "X-Oura-Dash": "1", "Content-Type": "application/json" },
-      body: JSON.stringify({ key }),
-    })).json();
+    const j = await (await postDash("/api/ring-key", { key })).json();
     if (j.ok) {
       closeImportKeyDialog();
       toast("Ring auth key imported.", "ok");
@@ -883,7 +1002,7 @@ async function saveProfile(e) {
   };
   $("profile-save").disabled = true;
   try {
-    const r = await fetch("/api/profile", { method: "POST", headers: { "X-Oura-Dash": "1", "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const r = await postDash("/api/profile", body);
     const j = await r.json().catch(() => ({}));
     // the server replies 200 with an { error } body on write failures — surface it
     // and keep the dialog open instead of pretending the save succeeded.
@@ -934,7 +1053,7 @@ async function doSync() {
   $("sync-label").textContent = "Syncing";
   btn.title = "Connecting to the ring over Bluetooth…";
   try {
-    const j = await (await fetch("/api/sync", { method: "POST", headers: { "X-Oura-Dash": "1" } })).json();
+    const j = await (await postDash("/api/sync")).json();
     if (j.ok) {
       $("sync-label").textContent = "Synced";
       toast(j.message && !/^synced$/i.test(j.message) ? j.message : "Ring synced.", "ok");
@@ -983,16 +1102,15 @@ async function load() {
     return;
   }
   CURRENT_PROFILE = d.profile || null;
-  window.__lastDeviceSerial = d.device && d.device.serial;
+  LAST_DEVICE_SERIAL = d.device && d.device.serial;
   $("digest").classList.remove("skeleton", "skeleton-text");
   $("digest").classList.add("reveal");
   $("digest").innerHTML = (d.digest || "").replace(/([+-]?\d[\d.]*\s?(?:%|bpm|ms|m\/s))/g, '<span class="metric">$1</span>');
   renderActions(d);
   renderTiles(d);
-  renderNights(d);
+  renderDay(d);
   renderCardio(d);
   renderSpo2(d);
-  renderActivity(d);
   renderDevice(d);
   document.querySelectorAll(".panel").forEach((p, i) => {
     p.classList.add("reveal");

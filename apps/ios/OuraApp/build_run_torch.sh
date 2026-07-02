@@ -33,8 +33,9 @@ xcrun -sdk iphonesimulator swiftc \
     -import-objc-header "$APPDIR/TorchBridge.h" \
     -I "$GEN/headers" \
     "$GEN/oura_core.swift" "$APPDIR/Theme.swift" "$APPDIR/OuraApp.swift" \
+    "$APPDIR/Models.swift" "$APPDIR/Core.swift" "$APPDIR/Components.swift" \
     "$APPDIR/BLETransport.swift" "$APPDIR/RingSync.swift" \
-    "$APPDIR/SleepStaging.swift" "$APPDIR/CvaModel.swift" "$APPDIR/ActivityModel.swift" "$BUILD/TorchBridge.o" \
+    "$APPDIR/EventStore.swift" "$APPDIR/SleepStaging.swift" "$APPDIR/CvaModel.swift" "$APPDIR/ActivityModel.swift" "$BUILD/TorchBridge.o" \
     -L "$XCF" -loura_core \
     -lc++ -lsqlite3 \
     -L "$LT/lib" -ltorch -ltorch_cpu -lc10 \

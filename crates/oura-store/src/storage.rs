@@ -9,8 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use oura_protocol::device::{Battery, DeviceInfo};
 use crate::error::Result;
+use oura_protocol::device::{Battery, DeviceInfo};
 use oura_protocol::events::RingEvent;
 
 const SCHEMA: &str = r#"
@@ -112,7 +112,9 @@ impl Store {
     /// row joined with its sync state.
     /// Returns `(serial, hardware_id, firmware, api_version, mac, updated_unix, last_sync_unix, next_cursor)`.
     #[allow(clippy::type_complexity)]
-    pub fn device_info(&self) -> Result<Option<(String, String, String, String, String, i64, i64, i64)>> {
+    pub fn device_info(
+        &self,
+    ) -> Result<Option<(String, String, String, String, String, i64, i64, i64)>> {
         let row = self
             .conn
             .query_row(
@@ -124,9 +126,14 @@ impl Store {
                 [],
                 |r| {
                     Ok((
-                        r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?,
-                        r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, i64>(5)?,
-                        r.get::<_, i64>(6)?, r.get::<_, i64>(7)?,
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
+                        r.get::<_, i64>(5)?,
+                        r.get::<_, i64>(6)?,
+                        r.get::<_, i64>(7)?,
                     ))
                 },
             )

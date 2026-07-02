@@ -19,33 +19,19 @@ enum ActivityModel {
         65537: "sleep", 65538: "pause", 70937: "meditation", 71201: "eating", 71227: "relax", 71239: "transport",
     ]
 
-    static func run() -> [WorkoutSession] {
-        let dbPath = DB.readPath()
+    // Returns detected sessions, plus a non-nil `error` only for genuine failures
+    // (bundled model missing). An empty list with `error == nil` means no activity data.
+    static func run() -> (sessions: [WorkoutSession], error: String?) {
         guard let modelPath = Bundle.main.path(forResource: "automatic_activity_detection_3_1_11", ofType: "ptl")
-        else { return [] }
+        else { return ([], "activity model file missing from the app bundle") }
 
-        var db: OpaquePointer?
-        guard sqlite3_open(dbPath, &db) == SQLITE_OK else { return [] }
-        defer { sqlite3_close(db) }
+        let events = EventStore.decodedEvents(dbPath: DB.readPath())
+        guard !events.isEmpty else { return ([], nil) }
 
-        struct Ev { let ds: Int64; let tag: Int; let json: [String: Any]; let cu: Int64 }
-        var events: [Ev] = []
-        var stmt: OpaquePointer?
-        if sqlite3_prepare_v2(db, "SELECT ring_timestamp, tag, decoded_json, captured_unix FROM events WHERE decoded_json IS NOT NULL ORDER BY ring_timestamp", -1, &stmt, nil) == SQLITE_OK {
-            while sqlite3_step(stmt) == SQLITE_ROW {
-                guard let c = sqlite3_column_text(stmt, 2),
-                      let data = String(cString: c).data(using: .utf8),
-                      let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { continue }
-                events.append(Ev(ds: sqlite3_column_int64(stmt, 0), tag: Int(sqlite3_column_int(stmt, 1)), json: obj, cu: sqlite3_column_int64(stmt, 3)))
-            }
-        }
-        sqlite3_finalize(stmt)
-        guard !events.isEmpty else { return [] }
-
-        var maxDs = events[0].ds, anchor = events[0].cu, minDs = events[0].ds
-        for e in events { if e.ds > maxDs { maxDs = e.ds; anchor = e.cu }; if e.ds < minDs { minDs = e.ds } }
-        func unixMin(_ ds: Int64) -> Double { (Double(anchor) - Double(maxDs - ds) / 10.0) / 60.0 }
-        let offset = Int((unixMin(minDs) / 1440).rounded(.down)) * 1440
+        let a = EventStore.anchor(events)
+        let anchor = a.unix
+        func unixMin(_ ds: Int64) -> Double { (Double(a.unix) - Double(a.maxDs - ds) / 10.0) / 60.0 }
+        let offset = Int((unixMin(a.minDs) / 1440).rounded(.down)) * 1440
         func tmin(_ ds: Int64) -> Int { Int(unixMin(ds).rounded()) - offset }
         let nan = Float.nan
         func num(_ v: Any?) -> Float { (v as? NSNumber)?.floatValue ?? 0 }
@@ -72,7 +58,7 @@ enum ActivityModel {
             default: break
             }
         }
-        guard !metD.isEmpty else { return [] }
+        guard !metD.isEmpty else { return ([], nil) }  // no MET data — benign
         var metFlat: [Float] = []
         for (_, v) in metD.sorted(by: { $0.value.0 < $1.value.0 }) { metFlat.append(v.0); metFlat.append(v.1) }
         let nMet = metD.count
@@ -92,7 +78,7 @@ enum ActivityModel {
         let n = oura_activity(modelPath, &context, &user, &metFlat, Int32(nMet),
                               &motionFlat, Int32(motion.count), &tempFlat, Int32(temp.count),
                               &hrFlat, Int32(hr.count), 0.5, 5.0, &out, 256)
-        guard n > 0 else { return [] }
+        guard n > 0 else { return ([], nil) }  // no sessions detected — benign
 
         let fmt = DateFormatter(); fmt.timeZone = TimeZone(identifier: "UTC"); fmt.dateFormat = "yyyy-MM-dd HH:mm"
         let hm = DateFormatter(); hm.timeZone = TimeZone(identifier: "UTC"); hm.dateFormat = "HH:mm"
@@ -105,7 +91,7 @@ enum ActivityModel {
             sessions.append(WorkoutSession(start: fmt.string(from: local(start)), end: hm.string(from: local(end)),
                                            durationMin: Int((end - start).rounded()), label: label, isWorkout: Double(w[2])))
         }
-        return sessions
+        return (sessions, nil)
     }
 }
 #endif

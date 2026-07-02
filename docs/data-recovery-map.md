@@ -32,11 +32,15 @@ Three channels, used at different times (see `sync-orchestration.md`).
 
 ### A. History events (the main channel)
 
-Fetched with `GetEvent` (tag `0x10`/`0x11`, legacy) or `ExtGetEvent`
-(tag `0x2f`, extended), NORMAL buffer. Each event is `tag | length | payload`,
-payload starting with a 4-byte LE timestamp. Tag -> type map is in
-`tools/oura_protocol.py` `EVENT_TAGS` and the protobuf schema
+Fetched with `GetEvent` (tag `0x10`/`0x11`, legacy) or Ring 5's Android-style
+`ExtGetEvent` (`0x2f`, buffer id 0), NORMAL buffer. Stored events are normalized
+to `tag | length | payload`, payload starting with a 4-byte LE timestamp. Tag ->
+type map is in `tools/oura_protocol.py` `EVENT_TAGS` and the protobuf schema
 `com/ouraring/ringeventparser/Ringeventparser.java`.
+
+`ExtGetEvent` returns `0x43` length-prefixed bundled events. The decoder expands
+them back into the same normal packets as legacy `GetEvent` before inserting
+rows, so downstream storage and body decoding are shared.
 
 **Raw sensor sample events** (genuine measurements):
 

@@ -9,6 +9,8 @@ pub enum Error {
     Ble(String),
     #[error("no matching Oura ring found")]
     DeviceNotFound,
+    #[error("timed out connecting to the ring (is it still linked to a phone? take it off/on the charger and retry)")]
+    ConnectTimeout,
     #[error("characteristic not found: {0}")]
     CharacteristicNotFound(String),
     #[error("authentication failed: {0}")]

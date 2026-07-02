@@ -9,5 +9,6 @@ repository.workspace = true
 [dependencies]
 oura-protocol = { path = "../oura-protocol" }
 oura-store = { path = "../oura-store" }
+oura-analysis = { path = "../oura-analysis" }
 serde_json = "1"
 anyhow = "1"

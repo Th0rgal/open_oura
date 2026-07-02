@@ -38,7 +38,11 @@ impl Baseline {
 
         // --- mean step ---
         if age_days > 14 {
-            let bias = if delta != 0 && self.mean_x8 <= sample_x8 { 16 } else { -16 };
+            let bias = if delta != 0 && self.mean_x8 <= sample_x8 {
+                16
+            } else {
+                -16
+            };
             self.mean_x8 += ashr_round(delta + bias, 5);
         } else if age_days >= 4 {
             let bias = if delta > 0 { 4 } else { -4 };
@@ -57,7 +61,11 @@ impl Baseline {
         } else {
             (4, 3)
         };
-        let bias2 = if absd != self.dev_x8 && self.dev_x8 <= absd { mag } else { -mag };
+        let bias2 = if absd != self.dev_x8 && self.dev_x8 <= absd {
+            mag
+        } else {
+            -mag
+        };
         self.dev_x8 += ashr_round((absd - self.dev_x8) + bias2, shift);
     }
 

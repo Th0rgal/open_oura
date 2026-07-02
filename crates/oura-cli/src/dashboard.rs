@@ -54,28 +54,13 @@ fn validate_ring_key(key: &str) -> Result<String> {
     Ok(key.to_ascii_lowercase())
 }
 
-// ── python model orchestration (same pattern as `oura sessions`) ──────────────
+// ── python model orchestration (shared with `oura sessions` via `pyrunner`) ────
 fn repo_root() -> Option<PathBuf> {
-    let marker = Path::new("tools/run_activity_model.py");
-    let find = |start: &Path| {
-        start
-            .ancestors()
-            .find(|d| d.join(marker).is_file())
-            .map(Path::to_path_buf)
-    };
-    std::env::current_dir()
-        .ok()
-        .and_then(|d| find(&d))
-        .or_else(|| find(Path::new(env!("CARGO_MANIFEST_DIR"))))
+    crate::pyrunner::repo_root(Path::new("tools/run_activity_model.py"))
 }
 
 fn python_bin(root: &Path) -> PathBuf {
-    let venv = root.join(".venv/bin/python");
-    if venv.is_file() {
-        venv
-    } else {
-        PathBuf::from("python3")
-    }
+    crate::pyrunner::venv_python(root)
 }
 
 /// Run a python runner and parse its `--json` stdout. Returns None on any failure
@@ -121,29 +106,46 @@ fn run_py_json_stdin(
     serde_json::from_slice(&out.stdout).ok()
 }
 
-
-
 /// The web dashboard's [`ModelRunner`]: shells out to the Python torch runners,
 /// exactly as before. The native client supplies an on-device `.ptl` runner.
 struct PythonRunner;
 impl ModelRunner for PythonRunner {
     fn run(&self, input: ModelInputs) -> ModelOutputs {
-        let ModelInputs { db, tz, demo, sleep_ranges } = input;
+        let ModelInputs {
+            db,
+            tz,
+            demo,
+            sleep_ranges,
+        } = input;
         let root = repo_root();
         let py = root.as_deref().map(python_bin);
         let sleep_stdin = serde_json::to_vec(sleep_ranges).unwrap_or_default();
-        let sleep_args =
-            vec![db.display().to_string(), tz.to_string(), "--json".into(), "--batch".into()];
-        let cva_args = vec![
-            db.display().to_string(), "--json".into(),
-            "--sex".into(), demo.sex.to_string(),
-            "--age".into(), demo.age.to_string(),
-            "--height".into(), demo.height_m.to_string(),
-            "--weight".into(), demo.weight_kg.to_string(),
-            "--ring".into(), demo.ring_size.to_string(),
+        let sleep_args = vec![
+            db.display().to_string(),
+            tz.to_string(),
+            "--json".into(),
+            "--batch".into(),
         ];
-        let act_args =
-            vec![db.display().to_string(), "--tz".into(), tz.to_string(), "--json".into()];
+        let cva_args = vec![
+            db.display().to_string(),
+            "--json".into(),
+            "--sex".into(),
+            demo.sex.to_string(),
+            "--age".into(),
+            demo.age.to_string(),
+            "--height".into(),
+            demo.height_m.to_string(),
+            "--weight".into(),
+            demo.weight_kg.to_string(),
+            "--ring".into(),
+            demo.ring_size.to_string(),
+        ];
+        let act_args = vec![
+            db.display().to_string(),
+            "--tz".into(),
+            tz.to_string(),
+            "--json".into(),
+        ];
 
         let (sleep_batch, cva, activity) = match (root.as_deref(), py.as_deref()) {
             (Some(r), Some(p)) => std::thread::scope(|s| {
@@ -152,11 +154,19 @@ impl ModelRunner for PythonRunner {
                 });
                 let ch = s.spawn(|| run_py_json(r, p, "tools/run_cva_model.py", &cva_args));
                 let ah = s.spawn(|| run_py_json(r, p, "tools/run_activity_model.py", &act_args));
-                (sh.join().ok().flatten(), ch.join().ok().flatten(), ah.join().ok().flatten())
+                (
+                    sh.join().ok().flatten(),
+                    ch.join().ok().flatten(),
+                    ah.join().ok().flatten(),
+                )
             }),
             _ => (None, None, None),
         };
-        ModelOutputs { sleep_batch, cva, activity }
+        ModelOutputs {
+            sleep_batch,
+            cva,
+            activity,
+        }
     }
 }
 
@@ -183,7 +193,11 @@ type CacheToken = (Option<SystemTime>, Option<SystemTime>, Option<SystemTime>);
 /// mtimes of every input the summary depends on — any change rebuilds it. Covers a
 /// sync (oura.db), a profile edit (profile.json), and a feature toggle (feature_modes.json).
 fn summary_token(db: &Path) -> CacheToken {
-    (mtime(db), mtime(&profile_path(db)), mtime(&feature_modes_path(db)))
+    (
+        mtime(db),
+        mtime(&profile_path(db)),
+        mtime(&feature_modes_path(db)),
+    )
 }
 
 fn summary_cache() -> &'static Mutex<Option<SummaryCache>> {
@@ -557,8 +571,7 @@ fn run_feature(
         last = stdout
             .lines()
             .chain(stderr.lines())
-            .filter(|l| !l.trim().is_empty())
-            .last()
+            .rfind(|l| !l.trim().is_empty())
             .unwrap_or("toggle failed")
             .trim()
             .to_string();

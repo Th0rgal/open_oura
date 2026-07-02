@@ -34,7 +34,11 @@ const SENTINEL: i32 = i32::MAX;
 pub fn sleep_debt(actual_s: &[i32], need_s: &[i32], cfg: &SleepDebtConfig) -> SleepDebt {
     let n = actual_s.len().min(need_s.len());
     if n == 0 {
-        return SleepDebt { debt_s: SENTINEL, recent_shortfall_s: SENTINEL, valid: false };
+        return SleepDebt {
+            debt_s: SENTINEL,
+            recent_shortfall_s: SENTINEL,
+            valid: false,
+        };
     }
     let shortfall = |d: usize| -> Option<f64> {
         let (a, need) = (actual_s[d], need_s[d]);
@@ -56,7 +60,13 @@ pub fn sleep_debt(actual_s: &[i32], need_s: &[i32], cfg: &SleepDebtConfig) -> Sl
     }
     let recent = match shortfall(0) {
         Some(v) => v as i32,
-        None => return SleepDebt { debt_s: 0, recent_shortfall_s: SENTINEL, valid: false },
+        None => {
+            return SleepDebt {
+                debt_s: 0,
+                recent_shortfall_s: SENTINEL,
+                valid: false,
+            }
+        }
     };
     debt = debt.max(0.0).min(cfg.max_debt_s as f64);
     if cfg.rounding_step_s != 0 {

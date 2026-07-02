@@ -12,13 +12,15 @@ enum CvaModel {
 
     struct Result { let vascularAge: Double; let pwv: Double; let segments: Int }
 
-    static func run(sex: String, age: Double, heightM: Double, weightKg: Double, ringSize: Double) -> Result? {
+    // Returns the CVA result (nil when there's simply no usable PPG), plus a non-nil
+    // `error` only for genuine failures (model missing / inference failed despite data).
+    static func run(sex: String, age: Double, heightM: Double, weightKg: Double, ringSize: Double) -> (result: Result?, error: String?) {
         let dbPath = DB.readPath()
         guard let modelPath = Bundle.main.path(forResource: "cva_2_1_0", ofType: "ptl")
-        else { return nil }
+        else { return (nil, "cardiovascular model file missing from the app bundle") }
 
         var db: OpaquePointer?
-        guard sqlite3_open(dbPath, &db) == SQLITE_OK else { return nil }
+        guard sqlite3_open(dbPath, &db) == SQLITE_OK else { return (nil, "couldn't open the database for CVA") }
         defer { sqlite3_close(db) }
 
         // raw PPG bodies in time order (tag 129)
@@ -34,7 +36,7 @@ enum CvaModel {
             }
         }
         sqlite3_finalize(stmt)
-        guard !bodies.isEmpty else { return nil }
+        guard !bodies.isEmpty else { return (nil, nil) }  // no PPG captured — benign
 
         // split into contiguous measurement runs, decode + chunk into 1500-sample segments
         var segments: [Float] = []   // flattened n_segs × 1500
@@ -50,13 +52,14 @@ enum CvaModel {
             run.append(bodies[i])
         }
         flush(run)
-        guard nSegs > 0 else { return nil }
+        guard nSegs > 0 else { return (nil, nil) }  // PPG present but no full segment — benign
 
         let sexVal: Float = sex.uppercased() == "F" ? -1 : (sex.uppercased() == "O" ? 0 : 1)
         var demo: [Float] = [sexVal, Float(heightM), Float(age), Float(ringSize), Float(weightKg)]
         var vage = 0.0, pwv = 0.0
         let rc = oura_cva(modelPath, &segments, Int32(nSegs), &demo, &vage, &pwv)
-        return rc == 0 ? Result(vascularAge: (vage * 10).rounded() / 10, pwv: (pwv * 100).rounded() / 100, segments: nSegs) : nil
+        guard rc == 0 else { return (nil, "cardiovascular model failed on \(nSegs) PPG segments") }
+        return (Result(vascularAge: (vage * 10).rounded() / 10, pwv: (pwv * 100).rounded() / 100, segments: nSegs), nil)
     }
 
     // PPG delta stream: 0x80 marks the next 3 bytes as an absolute 24-bit sample;

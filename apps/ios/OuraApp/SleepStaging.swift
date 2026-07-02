@@ -7,39 +7,18 @@ import Foundation
 // preprocessing), and run sleepnet_moonstone via the LibTorch lite bridge. Returns
 // date-label → per-30s stage codes, matching the web dashboard's `nights[].stages`.
 enum SleepStaging {
-    private struct Ev { let ds: Int64; let tag: Int; let json: [String: Any]; let cu: Int64 }
-
-    static func run() -> [String: [Int]] {
-        let dbPath = DB.readPath()
+    // Returns date-key → stage codes, plus a non-nil `error` only for genuine failures
+    // (bundled model missing). An empty map with `error == nil` just means no sleep data.
+    static func run() -> (staged: [String: [Int]], error: String?) {
         guard let modelPath = Bundle.main.path(forResource: "sleepnet_moonstone_1_2_0", ofType: "ptl")
-        else { return [:] }
+        else { return ([:], "sleep model file missing from the app bundle") }
 
-        var db: OpaquePointer?
-        guard sqlite3_open(dbPath, &db) == SQLITE_OK else { return [:] }
-        defer { sqlite3_close(db) }
-
-        var events: [Ev] = []
-        var stmt: OpaquePointer?
-        let sql = "SELECT ring_timestamp, tag, decoded_json, captured_unix FROM events WHERE decoded_json IS NOT NULL ORDER BY ring_timestamp"
-        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
-            while sqlite3_step(stmt) == SQLITE_ROW {
-                let ds = sqlite3_column_int64(stmt, 0)
-                let tag = Int(sqlite3_column_int(stmt, 1))
-                guard let cText = sqlite3_column_text(stmt, 2) else { continue }
-                let cu = sqlite3_column_int64(stmt, 3)
-                if let data = String(cString: cText).data(using: .utf8),
-                   let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
-                    events.append(Ev(ds: ds, tag: tag, json: obj, cu: cu))
-                }
-            }
-        }
-        sqlite3_finalize(stmt)
-        guard !events.isEmpty else { return [:] }
+        let events = EventStore.decodedEvents(dbPath: DB.readPath())
+        guard !events.isEmpty else { return ([:], nil) }
 
         // anchor = (ds, captured_unix) at the largest ds; ms(ds) → absolute epoch ms
-        var maxDs = events[0].ds, anchor = events[0].cu
-        for e in events where e.ds > maxDs { maxDs = e.ds; anchor = e.cu }
-        func ms(_ ds: Int64) -> Int64 { Int64(Double(anchor) * 1000 - Double(maxDs - ds) * 100) }
+        let a = EventStore.anchor(events)
+        func ms(_ ds: Int64) -> Int64 { Int64(Double(a.unix) * 1000 - Double(a.maxDs - ds) * 100) }
 
         // distinct bedtime periods (dedup by start, keep longest), newest first
         var beds: [Int64: Int64] = [:]
@@ -94,7 +73,7 @@ enum SleepStaging {
                 result[String(startDs)] = out.prefix(Int(n)).map(Int.init)
             }
         }
-        return result
+        return (result, nil)
     }
 
 }

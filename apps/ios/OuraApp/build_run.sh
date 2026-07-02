@@ -22,6 +22,7 @@ xcrun -sdk iphonesimulator swiftc \
     -target "$TRIPLE" -parse-as-library \
     -I "$GEN/headers" \
     "$GEN/oura_core.swift" "$APPDIR/Theme.swift" "$APPDIR/OuraApp.swift" \
+    "$APPDIR/Models.swift" "$APPDIR/Core.swift" "$APPDIR/Components.swift" \
     "$APPDIR/BLETransport.swift" "$APPDIR/RingSync.swift" \
     -L "$XCF" -loura_core \
     -o "$APP/OuraApp"

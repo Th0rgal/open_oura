@@ -53,7 +53,13 @@ impl Demographics {
 }
 impl Default for Demographics {
     fn default() -> Self {
-        Demographics { sex: 'M', age: 30.0, height_m: 1.78, weight_kg: 75.0, ring_size: 10.0 }
+        Demographics {
+            sex: 'M',
+            age: 30.0,
+            height_m: 1.78,
+            weight_kg: 75.0,
+            ring_size: 10.0,
+        }
     }
 }
 
@@ -103,13 +109,18 @@ pub fn read_profile(db: &Path) -> Demographics {
 }
 pub fn write_profile(db: &Path, v: &Value) -> Result<Demographics> {
     let demo = Demographics::from_json(v);
-    std::fs::write(profile_path(db), serde_json::to_vec_pretty(&demo.to_json())?)
-        .context("writing profile.json")?;
+    std::fs::write(
+        profile_path(db),
+        serde_json::to_vec_pretty(&demo.to_json())?,
+    )
+    .context("writing profile.json")?;
     Ok(demo)
 }
 
 pub fn feature_modes_path(db: &Path) -> PathBuf {
-    db.parent().unwrap_or(Path::new(".")).join("feature_modes.json")
+    db.parent()
+        .unwrap_or(Path::new("."))
+        .join("feature_modes.json")
 }
 /// Real on-ring feature modes snapshotted at the last sync, as `{ feature: mode }`.
 pub fn read_feature_modes(db: &Path) -> Value {
@@ -118,6 +129,19 @@ pub fn read_feature_modes(db: &Path) -> Value {
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
         .unwrap_or(Value::Null)
 }
+/// Persist a snapshot of on-ring feature modes as `{ feature: mode, …, _at: unix_secs }`.
+/// Stamps `_at` and writes atomically next to the DB; best-effort (never panics/errs).
+pub fn write_feature_modes(db: &Path, mut modes: serde_json::Map<String, Value>) {
+    let at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    modes.insert("_at".into(), json!(at));
+    let _ = std::fs::write(
+        feature_modes_path(db),
+        serde_json::to_vec_pretty(&Value::Object(modes)).unwrap_or_default(),
+    );
+}
 /// Record a feature's new mode (0 = off, 1 = automatic) right after a toggle.
 pub fn write_feature_mode(db: &Path, feature: &str, mode_int: i64) {
     let mut modes = match read_feature_modes(db) {
@@ -125,12 +149,7 @@ pub fn write_feature_mode(db: &Path, feature: &str, mode_int: i64) {
         _ => serde_json::Map::new(),
     };
     modes.insert(feature.to_string(), json!(mode_int));
-    let at = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    modes.insert("_at".into(), json!(at));
-    let _ = std::fs::write(
-        feature_modes_path(db),
-        serde_json::to_vec_pretty(&Value::Object(modes)).unwrap_or_default(),
-    );
+    write_feature_modes(db, modes);
 }
 
 // ── small date helpers (no chrono dep) ────────────────────────────────────────
@@ -177,13 +196,28 @@ fn hm(unix_s: f64, tz: i64) -> String {
     let sod = (unix_s as i64 + tz * 3600).rem_euclid(86400);
     format!("{:02}:{:02}", sod / 3600, (sod % 3600) / 60)
 }
-/// Oura "SpO2 Simple" calibration (gen4/oreo coefficients), clamped 85–100.
+/// Oura "SpO2 Simple" calibration → percent, clamped to the 85–100 display range.
+/// The quadratic itself is ecore's `spo2_simple_calculate` (see `oura_analysis`);
+/// these are the gen4/oreo coefficients (`a + b·r + c·r²`).
 fn spo2_pct(r: f64) -> f64 {
-    (-13.4 * r * r - 5.1 * r + 105.2).clamp(85.0, 100.0)
+    oura_analysis::ported::spo2::spo2_simple(r, 105.2, -5.1, -13.4).clamp(85.0, 100.0)
 }
 
 fn mean(v: &[f64]) -> Option<f64> {
     (!v.is_empty()).then(|| v.iter().sum::<f64>() / v.len() as f64)
+}
+
+/// Nightly skin temperature (°C) via ecore's `nightly_temperature` (7-sample median
+/// → 30-sample windows → minimum of the window maxima). Falls back to the plain mean
+/// when there aren't enough valid windows, so sparse nights still report a value.
+fn nightly_skin_temp(temps_c: &[f64]) -> Option<f64> {
+    let centi: Vec<u16> = temps_c
+        .iter()
+        .map(|&c| (c * 100.0).round().clamp(0.0, u16::MAX as f64) as u16)
+        .collect();
+    oura_analysis::ported::temperature::nightly_temperature(&centi)
+        .map(|t| t as f64 / 100.0)
+        .or_else(|| mean(temps_c))
 }
 
 // ── per-night signal accumulation ────────────────────────────────────────────
@@ -197,16 +231,34 @@ struct Night {
     spo2: Vec<f64>,
 }
 
+/// Personal baseline for a vital via ecore's annealing-EMA `Baseline`, over the nights
+/// before the latest one. ecore anneals from zero over long history; the dashboard only
+/// has a short window, so we prime the EMA at the first observed value (its mature
+/// result is unchanged) and age it one "day" per night. `None` with < 2 valid nights.
+fn ema_baseline(per_night: &[Option<f64>]) -> Option<f64> {
+    use oura_analysis::ported::baseline::Baseline;
+    let n = per_night.len();
+    if n < 2 {
+        return None;
+    }
+    let priors: Vec<f64> = per_night[..n - 1].iter().filter_map(|x| *x).collect();
+    let (first, rest) = priors.split_first()?;
+    let mut b = Baseline {
+        mean_x8: (first.round() as i32) << 3,
+        dev_x8: 0,
+    };
+    for (i, v) in rest.iter().enumerate() {
+        b.update(v.round() as i32, (i + 1) as u32);
+    }
+    Some(b.mean())
+}
+
 /// `(sparkline series, latest, baseline)` for a per-night vital.
 type VitalStat = (Vec<f64>, Option<f64>, Option<f64>);
 fn vital_stat(per_night: &[Option<f64>]) -> VitalStat {
     let series: Vec<f64> = per_night.iter().filter_map(|x| *x).collect();
     let latest = per_night.last().copied().flatten();
-    let priors: Vec<f64> = per_night[..per_night.len().saturating_sub(1)]
-        .iter()
-        .filter_map(|x| *x)
-        .collect();
-    (series, latest, mean(&priors))
+    (series, latest, ema_baseline(per_night))
 }
 /// Percent change of `latest` vs `baseline`, guarding a zero/absent baseline.
 fn vital_delta_pct(stat: &VitalStat) -> Option<f64> {
@@ -242,7 +294,7 @@ fn downsample(arr: &[Value], n: usize) -> Vec<i64> {
         .collect()
 }
 
-fn make_digest(hrv: &VitalStat, rhr: &VitalStat, nights: &[Night], cva: &Option<Value>) -> String {
+fn make_digest(hrv: &VitalStat, rhr: &VitalStat) -> String {
     let mut parts: Vec<String> = Vec::new();
     let hrv_pct = vital_delta_pct(hrv);
     let rhr_delta = match (rhr.1, rhr.2) {
@@ -253,7 +305,11 @@ fn make_digest(hrv: &VitalStat, rhr: &VitalStat, nights: &[Night], cva: &Option<
         parts.push(format!("HRV {}{:.0}%", if p >= 0.0 { "+" } else { "" }, p));
     }
     if let Some(d) = rhr_delta {
-        parts.push(format!("resting HR {}{:.0} bpm", if d >= 0.0 { "+" } else { "" }, d));
+        parts.push(format!(
+            "resting HR {}{:.0} bpm",
+            if d >= 0.0 { "+" } else { "" },
+            d
+        ));
     }
     let recovering = match (hrv_pct, rhr_delta) {
         (Some(p), _) => p >= 0.0,
@@ -268,7 +324,6 @@ fn make_digest(hrv: &VitalStat, rhr: &VitalStat, nights: &[Night], cva: &Option<
             ". Recovery dipping, take it easy."
         });
     }
-    let _ = (nights, cva);
     if s.is_empty() {
         s = "Synced. Not enough history yet for trends.".into();
     }
@@ -279,14 +334,19 @@ fn make_digest(hrv: &VitalStat, rhr: &VitalStat, nights: &[Night], cva: &Option<
 /// supplied by `runner` (Python subprocess on desktop, `.ptl` on-device).
 pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Value> {
     let db_abs = std::fs::canonicalize(db).unwrap_or_else(|_| {
-        std::env::current_dir().map(|d| d.join(db)).unwrap_or_else(|_| db.to_path_buf())
+        std::env::current_dir()
+            .map(|d| d.join(db))
+            .unwrap_or_else(|_| db.to_path_buf())
     });
     let db = db_abs.as_path();
     let demo = read_profile(db);
     let store = Store::open(db).context("opening DB")?;
     let events = store.decoded_events().context("reading events")?;
     if events.is_empty() {
-        return Err(anyhow!("no decoded events in {} — run `oura sync` first", db.display()));
+        return Err(anyhow!(
+            "no decoded events in {} — run `oura sync` first",
+            db.display()
+        ));
     }
     let (max_ds, anchor_unix) = events
         .iter()
@@ -322,10 +382,16 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
 
     let mut nights: Vec<Night> = beds
         .iter()
-        .map(|&(s, e)| Night { start_ds: s, end_ds: e, ..Default::default() })
+        .map(|&(s, e)| Night {
+            start_ds: s,
+            end_ds: e,
+            ..Default::default()
+        })
         .collect();
     let find_night = |ds: i64, nights: &[Night]| {
-        nights.iter().position(|nt| nt.start_ds - 600 <= ds && ds <= nt.end_ds + 600)
+        nights
+            .iter()
+            .position(|nt| nt.start_ds - 600 <= ds && ds <= nt.end_ds + 600)
     };
     for (ds, tag, jstr, _) in &events {
         let Some(idx) = find_night(*ds, &nights) else {
@@ -350,16 +416,22 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
                 }
             }
             "temp_event" | "sleep_temp_event" => {
-                if let Some(c) =
-                    v["temps_c"].as_array().and_then(|a| a.first()).and_then(|x| x.as_f64())
-                {
-                    nights[idx].temp.push(c);
+                // Keep every in-window sample (not just the first): the ecore nightly
+                // algorithm needs a dense series. `find_night` already restricts these
+                // to the bedtime window, so they're all nocturnal skin-temp readings.
+                if let Some(a) = v["temps_c"].as_array() {
+                    nights[idx]
+                        .temp
+                        .extend(a.iter().filter_map(|x| x.as_f64()).filter(|&c| c > 0.0));
                 }
             }
             "spo2_r_pi_event" => {
                 if let Some(a) = v["r"].as_array() {
                     nights[idx].spo2.extend(
-                        a.iter().filter_map(|x| x.as_f64()).filter(|&x| x > 0.0).map(spo2_pct),
+                        a.iter()
+                            .filter_map(|x| x.as_f64())
+                            .filter(|&x| x > 0.0)
+                            .map(spo2_pct),
                     );
                 }
             }
@@ -369,21 +441,33 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
 
     // the model seam — sleep / cva / activity (Python subprocess or on-device .ptl)
     let sleep_ranges: Vec<[i64; 2]> = nights.iter().map(|nt| [nt.start_ds, nt.end_ds]).collect();
-    let ModelOutputs { sleep_batch, cva, activity: activity_raw } =
-        runner.run(ModelInputs { db, tz, demo: &demo, sleep_ranges: &sleep_ranges });
+    let ModelOutputs {
+        sleep_batch,
+        cva,
+        activity: activity_raw,
+    } = runner.run(ModelInputs {
+        db,
+        tz,
+        demo: &demo,
+        sleep_ranges: &sleep_ranges,
+    });
 
     let hyps: std::collections::HashMap<i64, Value> = sleep_batch
         .as_ref()
         .and_then(|v| v.as_array())
         .map(|arr| {
-            arr.iter().filter_map(|h| Some((h["start_ds"].as_i64()?, h.clone()))).collect()
+            arr.iter()
+                .filter_map(|h| Some((h["start_ds"].as_i64()?, h.clone())))
+                .collect()
         })
         .unwrap_or_default();
 
     let mut nights_json = Vec::new();
     for nt in &nights {
         let hyp = hyps.get(&nt.start_ds);
-        let stage_cells = hyp.and_then(|h| h["stages"].as_array()).map(|s| downsample(s, 120));
+        let stage_cells = hyp
+            .and_then(|h| h["stages"].as_array())
+            .map(|s| downsample(s, 120));
         nights_json.push(json!({
             "date": date_label(unix_s(nt.start_ds), tz),
             "ymd": ymd_label(unix_s(nt.start_ds), tz),
@@ -393,7 +477,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
             "in_bed_h": ((nt.end_ds - nt.start_ds) as f64 / 10.0 / 3600.0 * 10.0).round() / 10.0,
             "hrv_ms": mean(&nt.rmssd).map(|x| x.round()),
             "rhr": nt.hr.iter().cloned().fold(f64::INFINITY, f64::min).is_finite().then(|| nt.hr.iter().cloned().fold(f64::INFINITY, f64::min).round()),
-            "skin_temp": mean(&nt.temp).map(|x| (x * 10.0).round() / 10.0),
+            "skin_temp": nightly_skin_temp(&nt.temp).map(|x| (x * 10.0).round() / 10.0),
             "spo2_mean": mean(&nt.spo2).map(|x| x.round()),
             "deep_pct": hyp.map(|h| h["deep_pct"].clone()),
             "light_pct": hyp.map(|h| h["light_pct"].clone()),
@@ -415,6 +499,16 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
     let mut daily: std::collections::BTreeMap<String, (f64, f64)> = Default::default();
     let mut met_min: std::collections::BTreeMap<i64, f64> = Default::default();
     let weight = demo.weight_kg;
+    // Resting daily expenditure via ecore's Schofield BMR (by age band + sex), instead
+    // of the old flat `weight × 24` approximation. Added to active kcal for total kcal.
+    let sex_code = match demo.sex {
+        'F' => 1u8,
+        'M' => 0,
+        _ => 2, // unknown → the male/female average (bmr_schofield's fallback)
+    };
+    let bmr_kcal_day = oura_analysis::ported::metabolic::bmr_schofield(demo.age, sex_code, weight);
+    // Anthropometric VO2max (Jackson non-exercise estimate), ecore's own formula.
+    let vo2max = oura_analysis::ported::metabolic::vo2max_jackson(demo.age, demo.sex == 'F', weight);
     for (ds, tag, jstr, _) in &events {
         if name_of(*tag) != "activity_information" || !jstr.contains("\"met\"") {
             continue;
@@ -477,12 +571,16 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
     let activity_daily: Value = daily
         .iter()
         .map(|(k, (act, steps))| {
+            let steps_r = (steps / 100.0).round() * 100.0;
+            // walking distance from steps via ecore's actinfo_steps_to_meters (0.762 m/step)
+            let distance_m = oura_analysis::ported::metabolic::steps_to_meters(steps_r as u32);
             (
                 k.clone(),
                 json!({
                     "active_kcal": act.round(),
-                    "total_kcal": (weight * 24.0 + act).round(),
-                    "steps": (steps / 100.0).round() * 100.0,
+                    "total_kcal": (bmr_kcal_day + act).round(),
+                    "steps": steps_r,
+                    "distance_m": distance_m,
                 }),
             )
         })
@@ -495,7 +593,13 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
             let arr: Vec<f64> = sums
                 .iter()
                 .zip(cnt.iter())
-                .map(|(s, c)| if *c > 0 { (s / *c as f64 * 100.0).round() / 100.0 } else { 0.0 })
+                .map(|(s, c)| {
+                    if *c > 0 {
+                        (s / *c as f64 * 100.0).round() / 100.0
+                    } else {
+                        0.0
+                    }
+                })
                 .collect();
             (k.clone(), json!(arr))
         })
@@ -503,8 +607,10 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         .into();
 
     let hrv_by_night: Vec<Option<f64>> = nights.iter().map(|n| mean(&n.rmssd)).collect();
-    let rhr_by_night: Vec<Option<f64>> =
-        nights.iter().map(|n| n.hr.iter().cloned().reduce(f64::min)).collect();
+    let rhr_by_night: Vec<Option<f64>> = nights
+        .iter()
+        .map(|n| n.hr.iter().cloned().reduce(f64::min))
+        .collect();
     let hrv_stat = vital_stat(&hrv_by_night);
     let rhr_stat = vital_stat(&rhr_by_night);
     let trend = |stat: &VitalStat| -> Value {
@@ -520,14 +626,40 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
     let has = |evname: &str| present_recent.contains(evname);
     let modes = read_feature_modes(db);
     let cap_on = |feature: &str, present: bool| -> bool {
-        modes.get(feature).and_then(Value::as_i64).map(|m| m != 0).unwrap_or(present)
+        modes
+            .get(feature)
+            .and_then(Value::as_i64)
+            .map(|m| m != 0)
+            .unwrap_or(present)
     };
     let measuring = json!([
-        feat("Daytime HR", cap_on("daytime_hr", has("ibi_and_amplitude_event") || has("green_ibi_quality_event")), "daytime_hr"),
+        feat(
+            "Daytime HR",
+            cap_on(
+                "daytime_hr",
+                has("ibi_and_amplitude_event") || has("green_ibi_quality_event")
+            ),
+            "daytime_hr"
+        ),
         feat("SpO2", cap_on("spo2", has("spo2_r_pi_event")), "spo2"),
-        feat("Exercise HR", cap_on("exercise_hr", has("ehr_trace_event")), "exercise_hr"),
-        feat("Real steps", cap_on("real_steps", has("real_step_event_feature_1") || has("real_step_event_feature_2")), "real_steps"),
-        feat("Cardio PPG (CVA)", cap_on("cva_ppg", has("cva_raw_ppg_data")), "cva_ppg"),
+        feat(
+            "Exercise HR",
+            cap_on("exercise_hr", has("ehr_trace_event")),
+            "exercise_hr"
+        ),
+        feat(
+            "Real steps",
+            cap_on(
+                "real_steps",
+                has("real_step_event_feature_1") || has("real_step_event_feature_2")
+            ),
+            "real_steps"
+        ),
+        feat(
+            "Cardio PPG (CVA)",
+            cap_on("cva_ppg", has("cva_raw_ppg_data")),
+            "cva_ppg"
+        ),
     ]);
 
     let mut sc: std::collections::BTreeMap<&str, i64> = Default::default();
@@ -547,26 +679,43 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         }
     }
     let mut sv: Vec<(&str, i64)> = sc.into_iter().collect();
-    sv.sort_by(|a, b| b.1.cmp(&a.1));
-    let streams = json!(sv.iter().map(|(n, c)| json!({ "name": n, "count": c })).collect::<Vec<_>>());
+    sv.sort_by_key(|b| std::cmp::Reverse(b.1));
+    let streams = json!(sv
+        .iter()
+        .map(|(n, c)| json!({ "name": n, "count": c }))
+        .collect::<Vec<_>>());
 
     let mut allc: std::collections::BTreeMap<&str, i64> = Default::default();
     for (_ds, tag, _j, _) in &events {
         *allc.entry(name_of(*tag)).or_insert(0) += 1;
     }
     let mut allv: Vec<(&str, i64)> = allc.into_iter().collect();
-    allv.sort_by(|a, b| b.1.cmp(&a.1));
-    let event_counts =
-        json!(allv.iter().map(|(n, c)| json!({ "name": n, "count": c })).collect::<Vec<_>>());
+    allv.sort_by_key(|b| std::cmp::Reverse(b.1));
+    let event_counts = json!(allv
+        .iter()
+        .map(|(n, c)| json!({ "name": n, "count": c }))
+        .collect::<Vec<_>>());
     let insight = |name: &str, live: bool, why: &str| json!({"name": name, "status": if live {"live"} else {"gated"}, "why": why});
     let insights = json!([
         insight("Sleep stages", true, ""),
-        insight("Apnea / breathing", has("ibi_and_amplitude_event"), "needs overnight IBI"),
-        insight("Cardiovascular age", has("cva_raw_ppg_data"), "enable cva_ppg"),
+        insight(
+            "Apnea / breathing",
+            has("ibi_and_amplitude_event"),
+            "needs overnight IBI"
+        ),
+        insight(
+            "Cardiovascular age",
+            has("cva_raw_ppg_data"),
+            "enable cva_ppg"
+        ),
         insight("SpO2", has("spo2_r_pi_event"), "enable spo2"),
         insight("Activity sessions", true, ""),
         insight("HRV / resting HR", true, ""),
-        insight("Steps", has("real_step_event_feature_1") || has("real_step_event_feature_2"), "enable real_steps"),
+        insight(
+            "Steps",
+            has("real_step_event_feature_1") || has("real_step_event_feature_2"),
+            "enable real_steps"
+        ),
         insight("Stress / resilience", false, "needs cloud scores"),
     ]);
     let mut battery: Option<(i64, i64)> = None;
@@ -609,7 +758,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         "insights": insights,
     });
 
-    let digest = make_digest(&hrv_stat, &rhr_stat, &nights, &cva);
+    let digest = make_digest(&hrv_stat, &rhr_stat);
 
     Ok(json!({
         "generated_at": now,
@@ -619,6 +768,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         "profile": demo.to_json(),
         "nights": nights_json,
         "cardio": cva,
+        "fitness": { "vo2max": (vo2max * 10.0).round() / 10.0 },
         "activity": activity,
         "activity_profile": activity_profile,
         "activity_daily": activity_daily,

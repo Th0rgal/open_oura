@@ -854,6 +854,144 @@ impl EventBatchSummary {
     }
 }
 
+/// Extended `ExtGetEvent` confirmation (`0x2f` ext `0x42`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExtEventBatchSummary {
+    pub events_received: u16,
+    pub sleep_analysis_progress: u8,
+    pub bytes_left: u32,
+    pub buffer_id: u8,
+    pub result_code: u8,
+}
+
+impl ExtEventBatchSummary {
+    pub fn parse(packet: &Packet) -> Option<ExtEventBatchSummary> {
+        if packet.tag != 0x2f || packet.payload.first().copied() != Some(0x42) {
+            return None;
+        }
+        let p = &packet.payload[1..];
+        if p.len() < 9 {
+            return None;
+        }
+        Some(ExtEventBatchSummary {
+            events_received: u16::from_le_bytes([p[0], p[1]]),
+            sleep_analysis_progress: p[2],
+            bytes_left: u32::from_le_bytes([p[3], p[4], p[5], p[6]]),
+            buffer_id: p[7],
+            result_code: p[8],
+        })
+    }
+}
+
+/// Reassembles `ExtGetEvent` envelope chunks (`0x2f` ext `0x43`) into normal
+/// history-event packets.
+///
+/// Android accumulates each `0x43` chunk into length-prefixed envelopes. Each
+/// completed envelope contains bundled events encoded as
+/// `control | tag | ext_len | timestamp_varint | body`. The body bytes are the
+/// same bytes returned by legacy `GetEvent`; the timestamp is absolute
+/// milliseconds for the first bundled event and then millisecond deltas.
+#[derive(Default, Debug)]
+pub struct ExtEventEnvelopeParser {
+    len_buf: Vec<u8>,
+    expected: Option<usize>,
+    payload: Vec<u8>,
+    last_ms: Option<u64>,
+    last_timestamp: Option<u32>,
+}
+
+impl ExtEventEnvelopeParser {
+    pub fn push_packet(&mut self, packet: &Packet) -> Vec<Packet> {
+        if packet.tag != 0x2f || packet.payload.first().copied() != Some(0x43) {
+            return Vec::new();
+        }
+
+        let mut out = Vec::new();
+        let mut data = &packet.payload[1..];
+        while !data.is_empty() {
+            if self.expected.is_none() {
+                let need = 2usize.saturating_sub(self.len_buf.len());
+                let take = need.min(data.len());
+                self.len_buf.extend_from_slice(&data[..take]);
+                data = &data[take..];
+                if self.len_buf.len() < 2 {
+                    continue;
+                }
+                let len = u16::from_le_bytes([self.len_buf[0], self.len_buf[1]]) as usize;
+                self.len_buf.clear();
+                self.expected = Some(len);
+                self.payload.clear();
+                if len == 0 {
+                    self.expected = None;
+                }
+            }
+
+            if let Some(expected) = self.expected {
+                let need = expected.saturating_sub(self.payload.len());
+                let take = need.min(data.len());
+                self.payload.extend_from_slice(&data[..take]);
+                data = &data[take..];
+                if self.payload.len() == expected {
+                    out.extend(self.parse_bundle());
+                    self.payload.clear();
+                    self.expected = None;
+                }
+            }
+        }
+        out
+    }
+
+    fn parse_bundle(&mut self) -> Vec<Packet> {
+        let mut out = Vec::new();
+        let mut i = 0usize;
+        while i + 3 <= self.payload.len() {
+            let _control = self.payload[i];
+            let tag = self.payload[i + 1];
+            let ext_len = self.payload[i + 2] as usize;
+            let start = i + 3;
+            let end = start + ext_len;
+            if tag < crate::protocol::HISTORY_EVENT_PREFIX || end > self.payload.len() {
+                break;
+            }
+
+            let Some((encoded_ts, used)) = read_varint(&self.payload[start..end]) else {
+                break;
+            };
+            let ms = match self.last_ms {
+                Some(prev) if encoded_ts < 100_000_000 => prev.saturating_add(encoded_ts),
+                _ => encoded_ts,
+            };
+            self.last_ms = Some(ms);
+
+            let mut timestamp = (ms / 100) as u32;
+            if let Some(prev_ts) = self.last_timestamp {
+                if encoded_ts > 0 && timestamp <= prev_ts {
+                    timestamp = prev_ts.saturating_add(1);
+                }
+            }
+            self.last_timestamp = Some(timestamp);
+
+            let mut payload = Vec::with_capacity(4 + end.saturating_sub(start + used));
+            payload.extend_from_slice(&timestamp.to_le_bytes());
+            payload.extend_from_slice(&self.payload[start + used..end]);
+            out.push(Packet::new(tag, payload));
+            i = end;
+        }
+        out
+    }
+}
+
+fn read_varint(data: &[u8]) -> Option<(u64, usize)> {
+    let mut value = 0u64;
+    for (i, b) in data.iter().copied().take(10).enumerate() {
+        value |= ((b & 0x7f) as u64) << (7 * i);
+        if b & 0x80 == 0 {
+            return Some((value, i + 1));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -927,6 +1065,71 @@ mod tests {
         let s = EventBatchSummary::parse(&p).unwrap();
         assert_eq!(s.events_received, 8);
         assert_eq!(s.bytes_left, 3742);
+    }
+
+    #[test]
+    fn parses_ext_batch_summary() {
+        // 2f 0a 42 events=8 sleep=3 bytes_left=3742 buffer=0 result=0
+        let p = Packet::parse(&hex::decode("2f0a420800039e0e00000000").unwrap()).unwrap();
+        let s = ExtEventBatchSummary::parse(&p).unwrap();
+        assert_eq!(s.events_received, 8);
+        assert_eq!(s.sleep_analysis_progress, 3);
+        assert_eq!(s.bytes_left, 3742);
+        assert_eq!(s.buffer_id, 0);
+        assert_eq!(s.result_code, 0);
+    }
+
+    #[test]
+    fn parses_split_ext_envelope() {
+        let mut parser = ExtEventEnvelopeParser::default();
+        // One split envelope containing one extended-bundled debug event:
+        // control=0xaa, tag=0x43, ext_len=3, timestamp_ms=100, body=0xbb 0xcc.
+        let p1 = Packet::parse(&hex::decode("2f04430600aa").unwrap()).unwrap();
+        assert!(parser.push_packet(&p1).is_empty());
+        let p2 = Packet::parse(&hex::decode("2f0643430364bbcc").unwrap()).unwrap();
+        let out = parser.push_packet(&p2);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].tag, 0x43);
+        let ev = RingEvent::from_packet(&out[0]);
+        assert_eq!(ev.timestamp, 1);
+        assert_eq!(ev.body, vec![0xbb, 0xcc]);
+    }
+
+    #[test]
+    fn parses_real_ring5_ext_bundle_like_legacy() {
+        let mut parser = ExtEventEnvelopeParser::default();
+        let ext = Packet::parse(
+            &hex::decode(concat!(
+                "2fa343a000",
+                "e57e13b4afb6c604ca0000d32c00a243b63b27ce5400",
+                "217f0f01cc16b71956f3385f8533c75a5425",
+                "5d4708bdbe013daf114d15",
+                "f47e10e72eac9555133d255451a806516b3f00",
+                "117f0f01a82ead954f9b3f59874fc8656449",
+                "114608fd0bcf0bb80bdd0c",
+                "d74709e1af013ab8054f1002",
+                "9d7e10c22d8c1e30db572ac21bcb055f963c6c",
+                "bf7f0f014755b44b5102544b4150cd5a6b24",
+                "50470983bd013cd0ec600b01"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let out = parser.push_packet(&ext);
+        let got: Vec<String> = out.iter().map(|p| hex::encode(p.encode())).collect();
+        let expected = [
+            "7e123c60ba00ca0000d32c00a243b63b27ce5400",
+            "7f123d60ba00cc16b71956f3385f8533c75a5425",
+            "47093061ba003daf114d15",
+            "7e126c61ba00ac9555133d255451a806516b3f00",
+            "7f126d61ba00a82ead954f9b3f59874fc8656449",
+            "460a7b61ba00cf0bb80bdd0c",
+            "470a5c62ba003ab8054f1002",
+            "7e129662ba008c1e30db572ac21bcb055f963c6c",
+            "7f129762ba004755b44b5102544b4150cd5a6b24",
+            "470a8863ba003cd0ec600b01",
+        ];
+        assert_eq!(got, expected);
     }
 
     #[test]

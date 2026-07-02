@@ -24,7 +24,7 @@ APP_LEVEL_AUTHENTICATING -> FOREGROUND_SYNC | BACKGROUND_SYNC):
 
 1. CONNECT (BLE connect + bond)
 2. AUTHENTICATE (nonce -> AES -> `Authenticate`)
-3. GET_CAPABILITIES (decides extended vs legacy event sync)
+3. GET_CAPABILITIES (records whether the ring supports extended event sync)
 4. APP_LEVEL_AUTHENTICATE
 5. STREAM_REGISTER (`16 01 02`) and per-category event subscriptions (`0x18`)
 6. PARAM_SWEEP (`2f 02 20 ...` reads plus app setup writes)
@@ -76,11 +76,46 @@ loop:
         done
 ```
 
-The ring reports `bytes_left` in the `0x11` / extended confirmation packet; loop
+The ring reports `bytes_left` in the `0x11` / `0x42` confirmation packet; loop
 until it reaches 0. Ring 5 can concatenate multiple `tag|len|payload` event
-frames into one BLE notification, so the parser must walk the whole notification.
-The persisted cursor (`nextEventToSync`) makes sync incremental.
+frames into one BLE notification on legacy sync, and returns length-prefixed
+bundled events on extended sync. The parser must walk the whole notification or
+bundle. The persisted cursor (`nextEventToSync`) makes sync incremental.
 `sleepAnalysisProgress` is surfaced as progress only, not a block.
+
+### Extended event sync status
+
+Ring 5 responds to Android's newer `ExtGetEvent` request:
+
+```
+2f 0c 41 <bufferId> <start_ms:u64 LE> <max_events:u16 LE>
+```
+
+The `0x42` confirmation layout is confirmed:
+
+```
+events_received:u16, sleep_progress:u8, bytes_left:u32, buffer_id:u8, result:u8
+```
+
+The `0x43` data path is confirmed on Ring 5. Android accumulates length-prefixed
+envelopes into `GetEventSummary.Extended.rawBuffer`; each completed envelope is
+a bundle of:
+
+```
+control:u8, tag:u8, ext_len:u8, timestamp_varint, body...
+```
+
+The first timestamp varint in a bundle is absolute milliseconds; later varints
+are millisecond deltas. The body bytes match the corresponding legacy `GetEvent`
+event body. The Rust decoder expands these bundled events into normal
+`tag|length|timestamp|body` packets before storing them.
+
+Validation on 2026-07-01:
+
+- `ExtGetEvent(max_events=10)` returned the same 10 events as legacy `GetEvent`
+  from cursor `12214277`, in the same order.
+- Full fast sync inserted `40063` new rows into `oura.db`, advancing the cursor
+  to `13151168`, with no impossible timestamps.
 
 ## Scheduling
 

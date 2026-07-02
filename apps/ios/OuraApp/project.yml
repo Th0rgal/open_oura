@@ -46,9 +46,13 @@ targets:
         LD_RUNPATH_SEARCH_PATHS: [$(inherited), "@executable_path/Frameworks"]
     sources:
       - path: OuraApp.swift
+      - path: Models.swift
+      - path: Core.swift
+      - path: Components.swift
       - path: Theme.swift
       - path: BLETransport.swift
       - path: RingSync.swift
+      - path: EventStore.swift
       - path: SleepStaging.swift
       - path: CvaModel.swift
       - path: ActivityModel.swift

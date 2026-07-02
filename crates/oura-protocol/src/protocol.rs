@@ -221,6 +221,19 @@ pub fn req_get_event_ack(cursor: u32) -> Vec<u8> {
     req_get_event(cursor, 0, -1)
 }
 
+/// Extended history event fetch used by the Android app on newer rings.
+///
+/// `start_ms` is the history cursor in milliseconds. Buffer `0` is the normal
+/// history-event buffer; buffer `1` is the raw/RData buffer.
+pub fn req_ext_get_event(start_ms: u64, max_events: u16, buffer_id: u8) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(12);
+    payload.push(0x41);
+    payload.push(buffer_id);
+    payload.extend_from_slice(&start_ms.to_le_bytes());
+    payload.extend_from_slice(&max_events.to_le_bytes());
+    Packet::new(0x2f, payload).encode()
+}
+
 /// Release flash-buffered data into the notification stream (`28 01 00`).
 /// Ring 5 accepts this shape and responds on `0x29`; older docs also label the
 /// same opcode as the sleep-analysis check without force.
@@ -421,6 +434,10 @@ mod tests {
             "10090000000008ffffffff"
         );
         assert_eq!(hex::encode(req_get_event_ack(0)), "10090000000000ffffffff");
+        assert_eq!(
+            hex::encode(req_ext_get_event(123_400, u16::MAX, 0)),
+            "2f0c410008e2010000000000ffff"
+        );
     }
 
     #[test]

@@ -15,9 +15,9 @@ use tokio::sync::broadcast;
 
 use oura_link::ble::BleTransport;
 use oura_link::client::AcmSample;
-use oura_protocol::protocol;
 use oura_link::transport::Transport;
 use oura_link::OuraClient;
+use oura_protocol::protocol;
 
 type Client = Arc<OuraClient<BleTransport>>;
 
@@ -43,7 +43,8 @@ pub async fn run(
             match raw_rx.recv().await {
                 Ok(frame) => {
                     for s in AcmSample::parse_frame(&frame) {
-                        let _ = tx_parse.send(format!("{{\"x\":{},\"y\":{},\"z\":{}}}", s.x, s.y, s.z));
+                        let _ =
+                            tx_parse.send(format!("{{\"x\":{},\"y\":{},\"z\":{}}}", s.x, s.y, s.z));
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -100,9 +101,8 @@ async fn handle(
     // Defend the local server against DNS-rebinding and cross-site (CSRF) calls:
     // require a loopback Host on every request, and a same-origin Origin on the
     // control endpoints (browsers attach Origin to cross-site fetches).
-    let host_ok = header(&req, "host").is_some_and(|h| {
-        h == format!("127.0.0.1:{port}") || h == format!("localhost:{port}")
-    });
+    let host_ok = header(&req, "host")
+        .is_some_and(|h| h == format!("127.0.0.1:{port}") || h == format!("localhost:{port}"));
     if !host_ok {
         return forbidden(&mut sock).await;
     }
@@ -148,18 +148,28 @@ async fn handle(
             }
             // This client is gone; if it was the last one, stop the ring stream.
             if clients.fetch_sub(1, Ordering::SeqCst) == 1 {
-                let _ = client.transport().write(&protocol::req_realtime_off()).await;
+                let _ = client
+                    .transport()
+                    .write(&protocol::req_realtime_off())
+                    .await;
             }
         }
         "/start" => {
             let _ = client
                 .transport()
-                .write(&protocol::req_set_realtime(protocol::realtime::ACM, minutes, 0))
+                .write(&protocol::req_set_realtime(
+                    protocol::realtime::ACM,
+                    minutes,
+                    0,
+                ))
                 .await;
             ok(&mut sock, "started").await?;
         }
         "/stop" => {
-            let _ = client.transport().write(&protocol::req_realtime_off()).await;
+            let _ = client
+                .transport()
+                .write(&protocol::req_realtime_off())
+                .await;
             ok(&mut sock, "stopped").await?;
         }
         _ => {

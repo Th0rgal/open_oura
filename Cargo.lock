@@ -1223,6 +1223,7 @@ name = "oura-summary"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "oura-analysis",
  "oura-protocol",
  "oura-store",
  "serde_json",

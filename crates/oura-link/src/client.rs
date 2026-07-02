@@ -6,7 +6,9 @@ use crate::error::{Error, Result};
 use crate::transport::{transact, Transport};
 use oura_protocol::auth::{encrypt_nonce, AuthResult};
 use oura_protocol::device::{self, Battery, Capability, DeviceInfo};
-use oura_protocol::events::{EventBatchSummary, RingEvent};
+use oura_protocol::events::{
+    EventBatchSummary, ExtEventBatchSummary, ExtEventEnvelopeParser, RingEvent,
+};
 use oura_protocol::protocol::{self, feature, feature_mode, Packet};
 
 /// Default quiet window for collecting responses to a request.
@@ -287,21 +289,59 @@ impl<T: Transport> OuraClient<T> {
     {
         let mut start = cursor;
         let mut total = 0u32;
+        // Prefer Ring 5's Android-style extended event drain. It falls back to
+        // legacy GetEvent if the ring explicitly reports the extended API as
+        // unsupported.
+        let mut use_extended = true;
         // Safety bound against a misbehaving ring that never reports drained.
         for _ in 0..100_000 {
             let mut packets = self.request(&protocol::req_data_flush()).await?;
-            packets.extend(
-                self
-                    .request(&protocol::req_get_event(start, 255, -1))
-                    .await?,
-            );
+            if use_extended {
+                let ext = self
+                    .request(&protocol::req_ext_get_event(
+                        (start as u64) * 100,
+                        u16::MAX,
+                        0,
+                    ))
+                    .await?;
+                let unsupported = ext
+                    .iter()
+                    .any(|p| p.tag == 0x2f && p.payload.first().copied() == Some(0x00));
+                if unsupported {
+                    use_extended = false;
+                    packets.extend(
+                        self.request(&protocol::req_get_event(start, 255, -1))
+                            .await?,
+                    );
+                } else {
+                    packets.extend(ext);
+                }
+            } else {
+                packets.extend(
+                    self.request(&protocol::req_get_event(start, 255, -1))
+                        .await?,
+                );
+            }
 
-            let mut summary: Option<EventBatchSummary> = None;
+            let mut summary: Option<u32> = None;
             let mut max_ts = start;
             let mut batch_events = 0u32;
+            let mut ext_envelopes = ExtEventEnvelopeParser::default();
             for p in &packets {
                 if p.tag == 0x11 {
-                    summary = EventBatchSummary::parse(p);
+                    summary = EventBatchSummary::parse(p).map(|s| s.bytes_left);
+                } else if p.tag == 0x2f && p.payload.first().copied() == Some(0x42) {
+                    summary = ExtEventBatchSummary::parse(p).map(|s| s.bytes_left);
+                } else if p.tag == 0x2f && p.payload.first().copied() == Some(0x43) {
+                    for ep in ext_envelopes.push_packet(p) {
+                        if ep.tag >= protocol::HISTORY_EVENT_PREFIX {
+                            let ev = RingEvent::from_packet(&ep);
+                            max_ts = max_ts.max(ev.timestamp);
+                            batch_events += 1;
+                            total += 1;
+                            on_event(&ev);
+                        }
+                    }
                 } else if p.tag >= protocol::HISTORY_EVENT_PREFIX {
                     let ev = RingEvent::from_packet(p);
                     max_ts = max_ts.max(ev.timestamp);
@@ -311,7 +351,7 @@ impl<T: Transport> OuraClient<T> {
                 }
             }
 
-            let bytes_left = summary.map(|s| s.bytes_left).unwrap_or(0);
+            let bytes_left = summary.unwrap_or(0);
             // Advance the cursor past the newest event seen.
             let next = max_ts.saturating_add(1);
             let progressed = batch_events > 0 && next > start;

@@ -60,7 +60,16 @@ fn quick_summary(db_path: &str) -> Result<serde_json::Value, String> {
     let primary = serials.first().cloned().unwrap_or_default();
 
     let device = store.device_info().map_err(|e| e.to_string())?.map(
-        |(serial, hardware_id, firmware, api_version, mac, updated_unix, last_sync_unix, cursor)| {
+        |(
+            serial,
+            hardware_id,
+            firmware,
+            api_version,
+            mac,
+            updated_unix,
+            last_sync_unix,
+            cursor,
+        )| {
             json!({ "serial": serial, "hardware_id": hardware_id, "firmware": firmware,
                     "api_version": api_version, "mac": mac, "updated_unix": updated_unix,
                     "last_sync_unix": last_sync_unix, "next_cursor": cursor })
@@ -147,7 +156,10 @@ impl RingSession {
     #[uniffi::constructor]
     pub fn new(writer: Box<dyn BleWriter>) -> Arc<Self> {
         let (tx, _) = broadcast::channel(8192);
-        Arc::new(Self { tx, writer: Arc::from(writer) })
+        Arc::new(Self {
+            tx,
+            writer: Arc::from(writer),
+        })
     }
 
     /// Swift pushes each inbound BLE notification frame here.
@@ -159,20 +171,38 @@ impl RingSession {
     /// `db_path`. `key_hex` is the 32-char ring auth key. Returns the sync counts.
     pub async fn sync(&self, db_path: String, key_hex: String) -> Result<SyncReport, SyncError> {
         let fail = |e: String| SyncError::Failed(e);
-        let key = parse_key(&key_hex).ok_or_else(|| fail("auth key must be 32 hex chars".into()))?;
-        let transport = FfiTransport { tx: self.tx.clone(), writer: self.writer.clone() };
+        let key =
+            parse_key(&key_hex).ok_or_else(|| fail("auth key must be 32 hex chars".into()))?;
+        let transport = FfiTransport {
+            tx: self.tx.clone(),
+            writer: self.writer.clone(),
+        };
         let client = OuraClient::new(transport);
 
-        client.authenticate(&key).await.map_err(|e| fail(e.to_string()))?;
-        client.setup_app_stream().await.map_err(|e| fail(e.to_string()))?;
+        client
+            .authenticate(&key)
+            .await
+            .map_err(|e| fail(e.to_string()))?;
+        client
+            .setup_app_stream()
+            .await
+            .map_err(|e| fail(e.to_string()))?;
         let serial = client.serial().await.unwrap_or_else(|_| "unknown".into());
         let info = client.firmware().await.ok();
 
         // Mutex<Store> keeps the future Send across the drain's awaits (rusqlite's
         // Connection is !Sync), while still writing incrementally (no buffering).
         let store = Mutex::new(Store::open(&db_path).map_err(|e| fail(e.to_string()))?);
-        store.lock().unwrap().upsert_device(&serial, None, info.as_ref()).map_err(|e| fail(e.to_string()))?;
-        let cursor = store.lock().unwrap().cursor(&serial).map_err(|e| fail(e.to_string()))?;
+        store
+            .lock()
+            .unwrap()
+            .upsert_device(&serial, None, info.as_ref())
+            .map_err(|e| fail(e.to_string()))?;
+        let cursor = store
+            .lock()
+            .unwrap()
+            .cursor(&serial)
+            .map_err(|e| fail(e.to_string()))?;
 
         let inserted = AtomicU32::new(0);
         let db_err: Mutex<Option<String>> = Mutex::new(None);
@@ -184,7 +214,9 @@ impl RingSession {
                         return;
                     }
                     match store.lock().unwrap().insert_event(&serial, ev) {
-                        Ok(true) => { inserted.fetch_add(1, Ordering::Relaxed); }
+                        Ok(true) => {
+                            inserted.fetch_add(1, Ordering::Relaxed);
+                        }
                         Ok(false) => {}
                         Err(e) => *db_err.lock().unwrap() = Some(e.to_string()),
                     }

@@ -18,6 +18,12 @@ calls it in `dashboard.rs`; iOS calls it through `oura-core`'s `summary_json()` 
 models are injected via the `ModelRunner` trait (web: `PythonRunner`; iOS: `NoModelRunner`
 + the on-device torch code).
 
+The non-model math is the **ported ecore ground truth** from `crates/oura-analysis`
+(`ported::{spo2, temperature, metabolic, baseline}`): SpO₂ calibration, nightly skin
+temperature, Schofield BMR (→ `total_kcal`), Jackson VO₂max, steps→distance, and the
+annealing-EMA personal baseline behind each vital's `delta_pct`. Add a new derived
+metric there once and both clients receive it in the JSON.
+
 **So the rule of thumb:**
 
 - **A new computed metric / field** → add it once in `oura-summary` (`build_summary`). Both
@@ -33,21 +39,38 @@ models are injected via the `ModelRunner` trait (web: `PythonRunner`; iOS: `NoMo
 | --- | --- | --- | --- | --- |
 | Digest headline | `load()` digest | `RootView` digest | `digest` | — |
 | Vitals (HRV/RHR/temp/SpO₂) | `renderTiles` / `VitalCell`-like | `VitalCell` | `vitals`, `nights[]` | — |
-| Sleep nights + **hypnogram** | `renderNights`, `hypnogram()` | `SleepRow`, `Hypnogram`, `SleepDetail` | `nights[].stages` | SleepNet (web: Python · iOS: `SleepStaging`) |
-| Stage breakdown | `renderNights` breakdown | `StageBreakdown` | `nights[].{deep,light,rem,wake}_pct` | SleepNet |
+| **Unified day (night + activity)** | `renderDay`, `dayCard` | `TodayCard` | `nights[]`, `activity*` | — |
+| Sleep detail + **hypnogram** | `openSleepDetail`, `hypnogram()` | `SleepDetail`, `Hypnogram` | `nights[].stages` | SleepNet (web: Python · iOS: `SleepStaging`) |
+| Stage breakdown | `sleepDetailBody` breakdown | `StageBreakdown` | `nights[].{deep,light,rem,wake}_pct` | SleepNet |
 | **Cardiovascular age** | `renderCardio` | Cardio section | `cardio` | CVA (web: Python · iOS: `CvaModel`) |
-| Movement ridge / actogram | `renderActivity` ridge | `MovementRidge` | `activity_profile` | — (MET, model-free) |
-| **Activity sessions / workouts** | `renderActivity` bars | workouts section | `activity` | AAD (web: Python · iOS: `ActivityModel`) |
-| Steps / active calories | `renderActivity` stats | activity day stats | `activity_daily` | — |
+| **VO₂max estimate** | `renderCardio` | Fitness section | `fitness.vo2max` | — (Jackson, model-free) |
+| Movement ridge | `ridgeSvg` | `MovementRidge` | `activity_profile` | — (MET, model-free) |
+| Activity detail | `openActivityDetail`, `activityDetailBody` | `ActivityDetail` | `activity_daily`, `activity` | — |
+| **Activity sessions / workouts** | `openActDetail` (session) | workouts section | `activity` | AAD (web: Python · iOS: `ActivityModel`) |
+| Steps / active calories / **distance** | `activityDetailBody` stats | activity day stats | `activity_daily` (incl. `distance_m`) | — |
+| Previous days browser | `openDaysBrowser` → `openDayDetail` | `AllDaysView` → `DayDetailView` | day keys | — |
 | Device & data health | `renderDevice` | device section | `device`, `streams` | — |
-| Long-list capping + "show all" | `collapsibleList()` | `MoreButton` | — | — |
+
+## The day is one unit — pair night + activity by *wake date*
+
+Both clients render **one "day" = last night's sleep + that day's activity**, drillable
+into either half and browsable back through previous days. The hero on each home screen is
+the most recent day; "show all N days" (web: `openDaysBrowser`; iOS: `AllDaysView`) opens
+the rest, each as a combined night+activity detail.
+
+The **pairing rule matters and must stay identical across clients**: nights are labelled by
+their **onset** date (the evening you went to bed), so an overnight sleep that crosses
+midnight belongs to the *next* day's morning. A day `D` pairs with the sleep you *woke from*
+on the morning of `D` — the night whose **wake date** is `D`, not whose onset date is `D`.
+This lives in `wakeYmd()` (web `app.js`) and `Summary.wakeYmd` (iOS `Models.swift`); keep the
+two in lockstep. `nightForDay`/`night(forDay:)` pick the longest in-bed night for a morning so
+a nap doesn't shadow the real sleep.
 
 ## Where the two clients diverge
 
-- **Home layout**: the iOS app is intentionally more condensed — "last night" (one night),
-  a merged activity+workouts section, and a "show all days" page (`AllDaysView` →
-  `DayDetailView`) that combines a day's sleep + activity. The web keeps the actogram +
-  per-section lists. Match *data/features*, not pixel-for-pixel layout.
+- **Home layout**: same day-unit model on both, but the iOS "Observatory" theme floats data on
+  a black canvas (no panels) while the web uses bordered cards/dialogs. Match *data/features*,
+  not pixel-for-pixel layout. iOS opens details as sheets; the web as stacked `<dialog>`s.
 - **BLE sync**: iOS syncs **natively** — `RingSync.swift` (CoreBluetooth `BLETransport`)
   drives the Rust `RingSession` FFI (`oura-core`) to authenticate + drain into a writable
   DB. The web dashboard has **no** BLE; it reads a DB produced by the desktop `oura sync`.

@@ -25,7 +25,10 @@ fn main() {
 
 fn torch_lib_from_python() -> Option<String> {
     let out = std::process::Command::new("python3")
-        .args(["-c", "import os,torch;print(os.path.join(os.path.dirname(torch.__file__),'lib'))"])
+        .args([
+            "-c",
+            "import os,torch;print(os.path.join(os.path.dirname(torch.__file__),'lib'))",
+        ])
         .output()
         .ok()?;
     if !out.status.success() {
