@@ -9,8 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use oura_protocol::device::{Battery, DeviceInfo};
 use crate::error::Result;
+use oura_protocol::device::{Battery, DeviceInfo};
 use oura_protocol::events::RingEvent;
 
 const SCHEMA: &str = r#"
@@ -106,6 +106,39 @@ impl Store {
             ],
         )?;
         Ok(())
+    }
+
+    /// Device identity + last-sync for display: the most-recently-updated device
+    /// row joined with its sync state.
+    /// Returns `(serial, hardware_id, firmware, api_version, mac, updated_unix, last_sync_unix, next_cursor)`.
+    #[allow(clippy::type_complexity)]
+    pub fn device_info(
+        &self,
+    ) -> Result<Option<(String, String, String, String, String, i64, i64, i64)>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT d.serial, COALESCE(d.hardware_id,''), COALESCE(d.firmware,''),
+                        COALESCE(d.api_version,''), COALESCE(d.mac,''), COALESCE(d.updated_unix,0),
+                        COALESCE(s.last_sync_unix,0), COALESCE(s.next_cursor,0)
+                 FROM device d LEFT JOIN sync_state s ON s.serial = d.serial
+                 ORDER BY d.updated_unix DESC LIMIT 1",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
+                        r.get::<_, i64>(5)?,
+                        r.get::<_, i64>(6)?,
+                        r.get::<_, i64>(7)?,
+                    ))
+                },
+            )
+            .optional()?;
+        Ok(row)
     }
 
     /// The persisted incremental-sync cursor (deciseconds), or 0 if none.

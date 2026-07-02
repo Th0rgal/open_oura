@@ -1,0 +1,91 @@
+# xcodegen spec for a *device / TestFlight* build of OuraApp — WITH the on-device
+# torch models (SleepNet / CVA / activity), mirroring build_run_torch.sh.
+#   1. ../build-xcframework.sh                    # device + sim slices of OuraCore (Rust)
+#   2. ../spike/build_libtorch_ios.sh             # libtorch for the simulator
+#      ../spike/build_libtorch_ios.sh device      # libtorch for the device
+#      ../package-libtorch-xcframeworks.sh        # → libtorch-xcframeworks/*.xcframework
+#   3. xcodegen generate                          # writes OuraApp.xcodeproj next to this file
+#   4. open OuraApp.xcodeproj, set your Team, then Product → Archive → TestFlight
+#
+# Paths below are relative to this dir (apps/ios/OuraApp); ../../../ is the repo root.
+# libtorch dylibs, the .ptl models, and oura.db are gitignored local build inputs.
+name: OuraApp
+options:
+  bundleIdPrefix: md.thomas
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    MARKETING_VERSION: "0.1"
+    CURRENT_PROJECT_VERSION: "1"
+    PRODUCT_BUNDLE_IDENTIFIER: md.thomas.openoura
+    TARGETED_DEVICE_FAMILY: "1"   # iPhone only (no iPad multitasking orientation reqs)
+    CODE_SIGN_STYLE: Automatic
+    CODE_SIGN_ENTITLEMENTS: OuraApp.entitlements
+    DEVELOPMENT_TEAM: "BQ6Z84B8L5"
+
+targets:
+  OuraApp:
+    type: application
+    platform: iOS
+    settings:
+      base:
+        INFOPLIST_FILE: Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1"   # iPhone-only (target-level, overrides xcodegen's 1,2 default)
+        # on-device torch: bridging header + TORCH flag + C++ + libtorch headers
+        SWIFT_OBJC_BRIDGING_HEADER: TorchBridge.h
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: TORCH
+        CLANG_CXX_LANGUAGE_STANDARD: "c++17"
+        HEADER_SEARCH_PATHS:
+          - $(SRCROOT)/../../../local/libtorch-ios/pytorch/build_ios/install/include
+          - $(SRCROOT)/../../../local/libtorch-ios/pytorch/build_ios/install/include/torch/csrc/api/include
+        OTHER_LDFLAGS: [-lc++, -lsqlite3]
+        LD_RUNPATH_SEARCH_PATHS: [$(inherited), "@executable_path/Frameworks"]
+    sources:
+      - path: OuraApp.swift
+      - path: Models.swift
+      - path: Core.swift
+      - path: Components.swift
+      - path: Theme.swift
+      - path: BLETransport.swift
+      - path: RingSync.swift
+      - path: EventStore.swift
+      - path: SleepStaging.swift
+      - path: CvaModel.swift
+      - path: ActivityModel.swift
+      - path: TorchBridge.mm
+      - path: TorchBridge.h
+      - path: ../generated/oura_core.swift
+      - path: Assets.xcassets
+      # bundled models + data (gitignored local files). oura.db is temporary until the
+      # on-device BLE sync lands — then the app builds its own DB from your ring.
+      - path: ../../../notes/models/mobile/sleepnet_moonstone_1_2_0.ptl
+        buildPhase: resources
+      - path: ../../../notes/models/mobile/cva_2_1_0.ptl
+        buildPhase: resources
+      - path: ../../../notes/models/mobile/automatic_activity_detection_3_1_11.ptl
+        buildPhase: resources
+      - path: ../../../oura.db
+        buildPhase: resources
+    dependencies:
+      # Rust core (static lib in an xcframework) — link, don't embed
+      - framework: ../OuraCore.xcframework
+        embed: false
+      # libtorch lite interpreter — xcframeworks (device + sim slices) so an archive
+      # picks the right one per SDK. Link AND embed+sign into Frameworks.
+      # Built by: spike/build_libtorch_ios.sh [device] + package-libtorch-xcframeworks.sh
+      - framework: ../libtorch-xcframeworks/libtorch.xcframework
+        embed: true
+        codeSign: true
+      - framework: ../libtorch-xcframeworks/libtorch_cpu.xcframework
+        embed: true
+        codeSign: true
+      - framework: ../libtorch-xcframeworks/libc10.xcframework
+        embed: true
+        codeSign: true
+      - framework: ../libtorch-xcframeworks/libtorch_global_deps.xcframework
+        embed: true
+        codeSign: true

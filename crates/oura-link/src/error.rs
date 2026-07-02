@@ -9,6 +9,8 @@ pub enum Error {
     Ble(String),
     #[error("no matching Oura ring found")]
     DeviceNotFound,
+    #[error("timed out connecting to the ring (is it still linked to a phone? take it off/on the charger and retry)")]
+    ConnectTimeout,
     #[error("characteristic not found: {0}")]
     CharacteristicNotFound(String),
     #[error("authentication failed: {0}")]
@@ -19,6 +21,7 @@ pub enum Error {
     Io(#[from] std::io::Error),
 }
 
+#[cfg(feature = "ble")]
 impl From<btleplug::Error> for Error {
     fn from(e: btleplug::Error) -> Self {
         Error::Ble(e.to_string())

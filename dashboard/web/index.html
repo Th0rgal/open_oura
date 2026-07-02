@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light dark" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%230d9488'/%3E%3Ccircle cx='16' cy='16' r='6' fill='none' stroke='%23ffffff' stroke-width='4' opacity='.55'/%3E%3C/svg%3E" />
+  <title>open_oura</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="wrap">
+    <header class="top">
+      <div class="brand">
+        <span class="mark" aria-hidden="true"></span>
+        <span class="word">open_oura</span>
+      </div>
+      <div class="actions">
+        <span id="batt" class="batt" title="Ring battery"></span>
+        <button id="sync-btn" class="action" title="Sync the ring over Bluetooth">
+          <span class="ic" style="--i:url(/icons/arrows-clockwise.svg)"></span>
+          <span id="sync-label">Sync</span>
+        </button>
+        <button id="profile-btn" class="action icon-only" title="Edit your details" aria-label="Edit profile">
+          <span class="ic" style="--i:url(/icons/user.svg)"></span>
+        </button>
+      </div>
+    </header>
+
+    <p id="digest" class="digest skeleton skeleton-text">&nbsp;</p>
+
+    <section class="tiles" id="tiles" aria-label="Key vitals">
+      <article class="tile skeleton"></article>
+      <article class="tile skeleton"></article>
+      <article class="tile skeleton"></article>
+      <article class="tile skeleton"></article>
+    </section>
+
+    <section class="panel" id="day-panel">
+      <div class="panel-head">
+        <h2><span class="ic" style="--i:url(/icons/moon.svg)"></span>Your day</h2>
+        <div class="legend" id="sleep-legend" hidden>
+          <span><i class="sw deep"></i>Deep</span>
+          <span><i class="sw light"></i>Light</span>
+          <span><i class="sw rem"></i>REM</span>
+          <span><i class="sw wake"></i>Awake</span>
+        </div>
+      </div>
+      <div id="day" class="day">
+        <div class="skeleton skeleton-block"></div>
+      </div>
+    </section>
+
+    <div class="cols-2">
+      <section class="panel" id="cardio-panel">
+        <div class="panel-head"><h2><span class="ic" style="--i:url(/icons/heartbeat.svg)"></span>Cardiovascular</h2></div>
+        <div id="cardio" class="cardio-body"><div class="skeleton skeleton-block"></div></div>
+      </section>
+
+      <section class="panel" id="spo2-panel">
+        <div class="panel-head"><h2><span class="ic" style="--i:url(/icons/wind.svg)"></span>Blood oxygen</h2></div>
+        <div id="spo2" class="spo2-body"><div class="skeleton skeleton-block"></div></div>
+      </section>
+    </div>
+
+    <section class="panel" id="device-panel">
+      <div class="panel-head"><h2><span class="ic" style="--i:url(/icons/cpu.svg)"></span>Device &amp; data health</h2></div>
+      <div id="device" class="device"><div class="skeleton skeleton-block"></div></div>
+    </section>
+
+    <footer class="foot">
+      <span>Everything here is computed on this machine. Nothing left the device.</span>
+      <span id="foot-meta"></span>
+    </footer>
+  </div>
+
+  <!-- profile editor -->
+  <dialog id="profile-dialog" class="dialog">
+    <form id="profile-form" method="dialog">
+      <h3>Your details</h3>
+      <p class="dialog-sub">The ring can't measure these. They tune the cardiovascular-age model and stay on this machine. (Ring size isn't on the ring — it's an account detail — and barely affects the result, so it's left at a default.)</p>
+      <div class="field-row">
+        <div class="field">
+          <label for="f-sex">Sex at birth</label>
+          <select id="f-sex" name="sex">
+            <option value="M">Male</option>
+            <option value="F">Female</option>
+            <option value="O">Other</option>
+          </select>
+        </div>
+        <div class="field"><label for="f-age">Age</label><input id="f-age" name="age" type="number" min="0" max="120" step="1" /></div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label for="f-height">Height (m)</label><input id="f-height" name="height_m" type="number" min="1" max="2.3" step="0.01" /></div>
+        <div class="field"><label for="f-weight">Weight (kg)</label><input id="f-weight" name="weight_kg" type="number" min="20" max="250" step="1" /></div>
+      </div>
+      <div class="dialog-actions">
+        <button type="button" id="profile-cancel" class="btn-text">Cancel</button>
+        <button type="submit" id="profile-save" class="btn-primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/app.js"></script>
+</body>
+</html>

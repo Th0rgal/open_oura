@@ -9,13 +9,15 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 
 use oura_link::ble::{self, BleTransport};
-use oura_store::storage::Store;
 use oura_link::OuraClient;
+use oura_store::storage::Store;
 
 #[cfg(feature = "torch")]
 mod activity_model;
+mod dashboard;
 mod game;
 mod motion_server;
+mod pyrunner;
 mod viz;
 
 /// Read sleep/HR/activity signals straight from an Oura ring (Ring 3/4/5).
@@ -136,6 +138,33 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Compute a Sleep Score for the latest night, live from ring data: Oura's
+    /// SleepNet hypnogram → durations/efficiency/latency, bedtime regularity, then
+    /// the contributor curves + combiner weights calibrated from a trends export.
+    /// Runs via tools/score_sleep.py (needs the Python venv with torch).
+    SleepScore {
+        /// Timezone offset (hours from UTC) for the bedtime clock.
+        #[arg(long, default_value_t = 0)]
+        tz_offset: i64,
+        /// Trends CSV for calibration (default: auto-find ~/Desktop/oura_*trends.csv).
+        #[arg(long)]
+        csv: Option<PathBuf>,
+        /// Emit machine-readable JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Compute a Readiness Score for the latest night, live from ring data. Rebuilds
+    /// the daily-summary + rolling baselines (tools/build_daily.py) then scores via
+    /// the calibrated curves (tools/score_readiness.py). Baseline-relative
+    /// contributors are provisional until ~14 days of history accrue.
+    ReadinessScore {
+        /// Timezone offset (hours from UTC) for the bedtime clock.
+        #[arg(long, default_value_t = 0)]
+        tz_offset: i64,
+        /// Emit machine-readable JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
     /// Subscribe a feature capability (real_steps | atlas | ambient | raw_data |
     /// research_data) via SetFeatureSubscription, to make the ring emit its events.
     Subscribe {
@@ -158,6 +187,29 @@ enum Command {
     },
     /// Read the real on-ring MODE/status of the data features (what's actually on).
     FeatureStatus,
+    /// Serve a local web health dashboard (sleep, cardio, SpO2, activity, device)
+    /// at http://127.0.0.1:PORT. Rust computes from oura.db; torch models run via
+    /// the Python runners. All data stays on this machine.
+    Dashboard {
+        /// Local HTTP port.
+        #[arg(long, default_value_t = 8090)]
+        port: u16,
+        /// Timezone offset (hours from UTC) for displayed times.
+        #[arg(long, default_value_t = 0)]
+        tz_offset: i64,
+        /// Sex for the cardiovascular-age model: M | F | O.
+        #[arg(long, default_value = "M")]
+        sex: String,
+        /// Age (years) for the CVA model.
+        #[arg(long, default_value_t = 30.0)]
+        age: f64,
+        /// Height (meters) for the CVA model.
+        #[arg(long, default_value_t = 1.78)]
+        height: f64,
+        /// Weight (kg) for the CVA model.
+        #[arg(long, default_value_t = 75.0)]
+        weight: f64,
+    },
 }
 
 fn feature_mode_name(mode: u8) -> &'static str {
@@ -213,6 +265,18 @@ fn save_key(path: &Path, key: &[u8; 16]) -> Result<()> {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
+}
+
+/// Open the readings store for best-effort live persistence, warning (rather than
+/// failing the command) if it can't be opened — but not pretending it succeeded.
+fn open_store_or_warn(db: &Path) -> Option<Store> {
+    match Store::open(db) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            eprintln!("warning: live readings won't be saved — can't open {}: {e}", db.display());
+            None
+        }
+    }
 }
 
 async fn connect(cli: &Cli) -> Result<OuraClient<BleTransport>> {
@@ -281,22 +345,50 @@ async fn main() -> Result<()> {
             enable_hr,
             enable_spo2,
         } => cmd_features(&cli, &key, *enable_hr, *enable_spo2).await,
-        Command::Sessions { tz_offset, threshold, json } => {
-            cmd_sessions(&cli, *tz_offset, *threshold, *json)
-        }
+        Command::Sessions {
+            tz_offset,
+            threshold,
+            json,
+        } => cmd_sessions(&cli, *tz_offset, *threshold, *json),
+        Command::SleepScore {
+            tz_offset,
+            csv,
+            json,
+        } => cmd_sleep_score(&cli, *tz_offset, csv.clone(), *json),
+        Command::ReadinessScore { tz_offset, json } => cmd_readiness_score(&cli, *tz_offset, *json),
         Command::Subscribe { feature, mode } => cmd_subscribe(&cli, &key, feature, mode).await,
         Command::FeatureMode { feature, mode } => cmd_feature_mode(&cli, &key, feature, mode).await,
         Command::FeatureStatus => cmd_feature_status(&cli, &key).await,
+        Command::Dashboard {
+            port,
+            tz_offset,
+            sex,
+            age,
+            height,
+            weight,
+        } => {
+            let seed = dashboard::Demographics {
+                sex: sex.chars().next().unwrap_or('M').to_ascii_uppercase(),
+                age: *age,
+                height_m: *height,
+                weight_kg: *weight,
+                ring_size: 10.0,
+            };
+            dashboard::serve(
+                *port,
+                cli.db.clone(),
+                *tz_offset,
+                cli.name.clone(),
+                cli.key_file.clone(),
+                seed,
+            )
+            .await
+        }
     }
 }
 
 /// Subscribe a feature capability via SetFeatureSubscription (needs auth).
-async fn cmd_subscribe(
-    cli: &Cli,
-    key: &Option<[u8; 16]>,
-    feature: &str,
-    mode: &str,
-) -> Result<()> {
+async fn cmd_subscribe(cli: &Cli, key: &Option<[u8; 16]>, feature: &str, mode: &str) -> Result<()> {
     use oura_protocol::protocol::{capability, subscription_mode};
     let cap = match feature {
         "real_steps" => capability::REAL_STEPS,
@@ -342,7 +434,12 @@ async fn cmd_subscribe(
 /// Set a feature's operating mode (SetFeatureMode). The consumer-feature enable
 /// path — e.g. `feature-mode real_steps` turns on the on-ring step/gait DSP whose
 /// `real_steps_features` events (0x7e/0x7f) feed the steps_motion_decoder.
-async fn cmd_feature_mode(cli: &Cli, key: &Option<[u8; 16]>, feature: &str, mode: &str) -> Result<()> {
+async fn cmd_feature_mode(
+    cli: &Cli,
+    key: &Option<[u8; 16]>,
+    feature: &str,
+    mode: &str,
+) -> Result<()> {
     use oura_protocol::protocol::feature_mode;
     let id: u8 = match feature {
         "real_steps" => 0x0b,
@@ -367,7 +464,9 @@ async fn cmd_feature_mode(cli: &Cli, key: &Option<[u8; 16]>, feature: &str, mode
     };
     let client = connect(cli).await?;
     if !maybe_auth(&client, key).await? {
-        return Err(anyhow!("set-feature-mode requires --key-file (authentication)"));
+        return Err(anyhow!(
+            "set-feature-mode requires --key-file (authentication)"
+        ));
     }
     match client.set_feature_mode(id, m).await {
         Ok(()) => {
@@ -383,7 +482,9 @@ async fn cmd_feature_mode(cli: &Cli, key: &Option<[u8; 16]>, feature: &str, mode
 async fn cmd_feature_status(cli: &Cli, key: &Option<[u8; 16]>) -> Result<()> {
     let client = connect(cli).await?;
     if !maybe_auth(&client, key).await? {
-        return Err(anyhow!("feature-status requires --key-file (authentication)"));
+        return Err(anyhow!(
+            "feature-status requires --key-file (authentication)"
+        ));
     }
     let mode_name = |m: u8| match m {
         0 => "OFF",
@@ -393,16 +494,26 @@ async fn cmd_feature_status(cli: &Cli, key: &Option<[u8; 16]>) -> Result<()> {
         _ => "?",
     };
     let feats = [
-        (0x02u8, "daytime_hr"), (0x03, "exercise_hr"), (0x04, "spo2"),
-        (0x08, "resting_hr"), (0x0b, "real_steps"), (0x0c, "experimental"),
+        (0x02u8, "daytime_hr"),
+        (0x03, "exercise_hr"),
+        (0x04, "spo2"),
+        (0x08, "resting_hr"),
+        (0x0b, "real_steps"),
+        (0x0c, "experimental"),
         (0x0d, "cva_ppg"),
     ];
-    println!("  {:<14} {:>3}  {:<14} status state sub", "feature", "id", "mode");
+    println!(
+        "  {:<14} {:>3}  {:<14} status state sub",
+        "feature", "id", "mode"
+    );
     for (id, name) in feats {
         match client.feature_status(id).await {
             Ok(s) => println!(
                 "  {name:<14} {id:>3}  {:<14} {:>6} {:>5} {:>3}",
-                mode_name(s.mode), s.status, s.state, s.subscription
+                mode_name(s.mode),
+                s.status,
+                s.state,
+                s.subscription
             ),
             Err(e) => println!("  {name:<14} {id:>3}  <read failed: {e}>"),
         }
@@ -416,38 +527,12 @@ async fn cmd_feature_status(cli: &Cli, key: &Option<[u8; 16]>) -> Result<()> {
 /// equivalent `tools/run_activity_model.py`. Either way the model — not a
 /// heuristic — produces the labels.
 fn cmd_sessions(cli: &Cli, tz_offset: i64, threshold: f64, json: bool) -> Result<()> {
-    // Locate the repo root by a stable marker present for both backends. Try the
-    // current dir first, then the compiled-in manifest dir, so the binary keeps
-    // working when invoked from elsewhere in the checkout.
-    let marker = Path::new("notes/models/automatic_activity_detection_3_1_11.pt");
-    let find_root = |start: &Path| -> Option<PathBuf> {
-        start.ancestors().find(|d| d.join(marker).is_file()).map(Path::to_path_buf)
-    };
-    let root = std::env::current_dir()
-        .ok()
-        .and_then(|d| find_root(&d))
-        .or_else(|| find_root(Path::new(env!("CARGO_MANIFEST_DIR"))))
-        .ok_or_else(|| {
-            anyhow!(
-                "could not locate the model under notes/models — run `oura sessions` \
-                 from inside the open_oura checkout"
-            )
-        })?;
-
-    // Absolute DB path (the Python child runs with cwd = repo root).
-    let db = cli
-        .db
-        .canonicalize()
-        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(&cli.db));
-
-    // Fail clearly on a missing DB instead of letting the LibTorch path's
-    // Store::open create an empty one (matches the Python runner's resolve_db).
-    if !db.exists() {
-        return Err(anyhow!(
-            "database not found: {} (run `oura sync` first)",
-            db.display()
-        ));
-    }
+    // The model file is a stable marker present for both backends.
+    let root = pyrunner::require_repo_root(
+        Path::new("notes/models/automatic_activity_detection_3_1_11.pt"),
+        "the model under notes/models (run `oura sessions` from inside the checkout)",
+    )?;
+    let db = pyrunner::resolve_db(&cli.db)?;
 
     #[cfg(feature = "torch")]
     {
@@ -458,9 +543,7 @@ fn cmd_sessions(cli: &Cli, tz_offset: i64, threshold: f64, json: bool) -> Result
     {
         use std::process::Command as Proc;
         let script_rel = Path::new("tools/run_activity_model.py");
-        // Prefer the repo's venv python (has torch); fall back to python3 on PATH.
-        let venv_py = root.join(".venv/bin/python");
-        let python = if venv_py.is_file() { venv_py } else { PathBuf::from("python3") };
+        let python = pyrunner::venv_python(&root);
         let mut cmd = Proc::new(&python);
         cmd.current_dir(&root)
             .arg(root.join(script_rel))
@@ -483,6 +566,89 @@ fn cmd_sessions(cli: &Cli, tz_offset: i64, threshold: f64, json: bool) -> Result
         }
         Ok(())
     }
+}
+
+/// Sleep Score for the latest night, computed live from ring data via
+/// tools/score_sleep.py (SleepNet hypnogram + calibrated contributor curves +
+/// combiner weights). Always shells out to Python, which already owns the torch
+/// model path; there is no native LibTorch backend for the scorer.
+fn cmd_sleep_score(cli: &Cli, tz_offset: i64, csv: Option<PathBuf>, json: bool) -> Result<()> {
+    let root = pyrunner::require_repo_root(
+        Path::new("tools/score_sleep.py"),
+        "tools/score_sleep.py",
+    )?;
+    let db = pyrunner::resolve_db(&cli.db)?;
+
+    use std::process::Command as Proc;
+    let python = pyrunner::venv_python(&root);
+    let mut cmd = Proc::new(&python);
+    cmd.current_dir(&root)
+        .arg(root.join("tools/score_sleep.py"))
+        .arg(&db)
+        .arg("--tz")
+        .arg(tz_offset.to_string());
+    if let Some(c) = csv {
+        cmd.arg("--csv").arg(c);
+    }
+    if json {
+        cmd.arg("--json");
+    }
+    let status = cmd.status().with_context(|| {
+        format!(
+            "running the sleep scorer via {} (is the Python venv with torch set up?)",
+            python.display()
+        )
+    })?;
+    if !status.success() {
+        return Err(anyhow!("sleep scorer exited with {status}"));
+    }
+    Ok(())
+}
+
+/// Readiness Score live from ring data: rebuild the daily_summary + rolling
+/// baselines (tools/build_daily.py), then score with the calibrated curves
+/// (tools/score_readiness.py). Both run via the Python venv with torch.
+fn cmd_readiness_score(cli: &Cli, tz_offset: i64, json: bool) -> Result<()> {
+    let root = pyrunner::require_repo_root(
+        Path::new("tools/score_readiness.py"),
+        "tools/score_readiness.py",
+    )?;
+    let db = pyrunner::resolve_db(&cli.db)?;
+
+    use std::process::Command as Proc;
+    let python = pyrunner::venv_python(&root);
+
+    // 1) refresh daily_summary + baselines (captured so it can't pollute --json)
+    let build = Proc::new(&python)
+        .current_dir(&root)
+        .arg(root.join("tools/build_daily.py"))
+        .arg(&db)
+        .arg("--tz")
+        .arg(tz_offset.to_string())
+        .output()
+        .with_context(|| "running tools/build_daily.py (is the Python venv with torch set up?)")?;
+    if !build.status.success() {
+        return Err(anyhow!(
+            "build_daily failed: {}",
+            String::from_utf8_lossy(&build.stderr).trim()
+        ));
+    }
+
+    // 2) score
+    let mut cmd = Proc::new(&python);
+    cmd.current_dir(&root)
+        .arg(root.join("tools/score_readiness.py"))
+        .arg(&db);
+    if json {
+        cmd.arg("--json");
+    }
+    let status = cmd
+        .status()
+        .with_context(|| "running tools/score_readiness.py")?;
+    if !status.success() {
+        return Err(anyhow!("readiness scorer exited with {status}"));
+    }
+    Ok(())
 }
 
 async fn cmd_features(
@@ -550,10 +716,7 @@ async fn cmd_pair(cli: &Cli) -> Result<()> {
 
     // Reuse an existing key file if present; otherwise mint a fresh key.
     let (key, reused) = match &cli.key_file {
-        Some(p) if p.exists() => (
-            load_key(&cli.key_file)?.expect("key file exists"),
-            true,
-        ),
+        Some(p) if p.exists() => (load_key(&cli.key_file)?.expect("key file exists"), true),
         _ => (generate_key()?, false),
     };
     let out = cli
@@ -582,7 +745,10 @@ async fn cmd_pair(cli: &Cli) -> Result<()> {
         Err(e) => println!("Battery: <{e}>"),
     }
 
-    println!("\nPaired. Use it with:  oura --key-file {} info", out.display());
+    println!(
+        "\nPaired. Use it with:  oura --key-file {} info",
+        out.display()
+    );
     let _ = client.transport().disconnect().await;
     Ok(())
 }
@@ -632,9 +798,13 @@ async fn cmd_sync(cli: &Cli, key: &Option<[u8; 16]>, sync_time: bool) -> Result<
 
     let client = connect(cli).await?;
     client.authenticate(key).await.context("authenticating")?;
+    client
+        .setup_app_stream()
+        .await
+        .context("running app-style stream setup")?;
 
     if sync_time {
-        client.sync_time().await.context("syncing time")?;
+        client.sync_time_app().await.context("syncing time")?;
     }
 
     let serial = client.serial().await.unwrap_or_else(|_| "unknown".into());
@@ -696,6 +866,30 @@ async fn cmd_sync(cli: &Cli, key: &Option<[u8; 16]>, sync_time: bool) -> Result<
         outcome.events_synced, inserted, outcome.next_cursor
     );
 
+    // While connected + authed, snapshot the real on-ring feature modes so the
+    // dashboard can show actual on/off (not just "events seen recently"). Best-effort:
+    // written next to the DB as feature_modes.json; a read failure never fails the sync.
+    {
+        let feats = [
+            (0x02u8, "daytime_hr"),
+            (0x03, "exercise_hr"),
+            (0x04, "spo2"),
+            (0x08, "resting_hr"),
+            (0x0b, "real_steps"),
+            (0x0c, "experimental"),
+            (0x0d, "cva_ppg"),
+        ];
+        let mut modes = serde_json::Map::new();
+        for (id, name) in feats {
+            if let Ok(s) = client.feature_status(id).await {
+                modes.insert(name.to_string(), serde_json::json!(s.mode));
+            }
+        }
+        if !modes.is_empty() {
+            oura_summary::write_feature_modes(&cli.db, modes);
+        }
+    }
+
     let _ = client.transport().disconnect().await;
     Ok(())
 }
@@ -704,7 +898,7 @@ async fn cmd_latest(cli: &Cli, key: &Option<[u8; 16]>) -> Result<()> {
     let client = connect(cli).await?;
     maybe_auth(&client, key).await?;
     let serial = client.serial().await.unwrap_or_else(|_| "unknown".into());
-    let store = Store::open(&cli.db).ok();
+    let store = open_store_or_warn(&cli.db);
 
     use oura_protocol::protocol::feature;
     for (label, id) in [
@@ -746,7 +940,7 @@ async fn cmd_live_hr(cli: &Cli, key: &Option<[u8; 16]>, seconds: u64, raw: bool)
     let client = connect(cli).await?;
     maybe_auth(&client, key).await?;
     let serial = client.serial().await.unwrap_or_else(|_| "unknown".into());
-    let store = Store::open(&cli.db).ok();
+    let store = open_store_or_warn(&cli.db);
 
     println!("Streaming live heart rate for {seconds}s (Ctrl-C to stop early)...");
     let mut count = 0u32;
@@ -805,7 +999,11 @@ async fn cmd_accel(cli: &Cli, key: &Option<[u8; 16]>, seconds: u64) -> Result<()
         let moved = (max - min) > 2000.0;
         println!(
             "{count} samples; |a| range {min:.0}..{max:.0} — {}",
-            if moved { "motion detected ✋" } else { "mostly still" }
+            if moved {
+                "motion detected ✋"
+            } else {
+                "mostly still"
+            }
         );
     }
     let _ = client.transport().disconnect().await;
@@ -861,13 +1059,18 @@ async fn rdata_probe(client: &OuraClient<BleTransport>, secs: u64) -> Result<()>
     client.sync_time().await?;
     let (sub0, st0) = client.rdata_state().await?;
     let batt0 = client.battery().await?;
-    println!("After sync_time: RData state subtag={sub0} status={st0}; battery {}%", batt0.percent);
+    println!(
+        "After sync_time: RData state subtag={sub0} status={st0}; battery {}%",
+        batt0.percent
+    );
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as u32)
         .unwrap_or(0);
 
-    let (csub, cst) = client.rdata_configure(&[DataType::Acm2g50Hz], now, now).await?;
+    let (csub, cst) = client
+        .rdata_configure(&[DataType::Acm2g50Hz], now, now)
+        .await?;
     println!("Armed ACM 2g @ 50 Hz: configure subtag={csub} status={cst}");
 
     // From here on, tear down NO MATTER WHAT.
@@ -924,12 +1127,21 @@ async fn rdata_probe(client: &OuraClient<BleTransport>, secs: u64) -> Result<()>
     }
     let rate = total_bytes as f64 / secs as f64;
     let batt_delta = batt0.percent as i16 - batt1 as i16;
-    println!("\n--- RData rate probe (ACM 2g @ 50 Hz, {secs}s / {:.1} min) ---", secs as f64 / 60.0);
+    println!(
+        "\n--- RData rate probe (ACM 2g @ 50 Hz, {secs}s / {:.1} min) ---",
+        secs as f64 / 60.0
+    );
     println!("pages drained  : {pages}");
     println!("max page size  : {page_len} bytes (payload after subtag+status header)");
     println!("total bytes    : {total_bytes}");
-    println!("byte rate      : {rate:.0} B/s  (~{:.1} KB/min)", rate * 60.0 / 1024.0);
-    println!("battery        : {}% -> {batt1}% (Δ {batt_delta} pts)", batt0.percent);
+    println!(
+        "byte rate      : {rate:.0} B/s  (~{:.1} KB/min)",
+        rate * 60.0 / 1024.0
+    );
+    println!(
+        "battery        : {}% -> {batt1}% (Δ {batt_delta} pts)",
+        batt0.percent
+    );
     if batt_delta > 0 {
         let pct_per_hr = batt_delta as f64 * 3600.0 / secs as f64;
         println!("battery rate   : ~{pct_per_hr:.1} %/hr while sampling");
@@ -968,14 +1180,21 @@ async fn rdata_recipe(client: &OuraClient<BleTransport>) -> Result<()> {
 
     client.sync_time().await?;
     let clear = client.rdata_clear().await?;
-    println!("RDataClear  -> status {clear} ({})", rdata_status_name(clear));
+    println!(
+        "RDataClear  -> status {clear} ({})",
+        rdata_status_name(clear)
+    );
     let (ssub, sbyte) = client.rdata_state().await?;
-    println!("RDataState  -> subtag {ssub}, state byte {sbyte} (0 IDLE,1 SCHED,2 REC,3 STOP,4 BUSY)");
+    println!(
+        "RDataState  -> subtag {ssub}, state byte {sbyte} (0 IDLE,1 SCHED,2 REC,3 STOP,4 BUSY)"
+    );
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as u32)
         .unwrap_or(0);
-    let (csub, cst) = client.rdata_configure(&[DataType::Acm2g50Hz], 0, now).await?;
+    let (csub, cst) = client
+        .rdata_configure(&[DataType::Acm2g50Hz], 0, now)
+        .await?;
     println!(
         "RDataConfigure(start=0) -> subtag {csub}, status {cst} ({})",
         rdata_status_name(cst)
@@ -983,7 +1202,10 @@ async fn rdata_recipe(client: &OuraClient<BleTransport>) -> Result<()> {
     if cst == 0 {
         println!(">>> START ACCEPTED — capability is enabled after all!");
     } else {
-        println!(">>> still {} — capability gate confirmed.", rdata_status_name(cst));
+        println!(
+            ">>> still {} — capability gate confirmed.",
+            rdata_status_name(cst)
+        );
     }
     // Teardown regardless.
     let _ = client.rdata_stop().await;
@@ -1010,23 +1232,40 @@ async fn rdata_unlock(client: &OuraClient<BleTransport>) -> Result<()> {
     );
 
     // Try both enable paths (best-effort; report outcomes).
-    match client.set_feature_subscription(capability::RAW_DATA_SAMPLER, subscription_mode::FEATURE_DATA).await {
+    match client
+        .set_feature_subscription(
+            capability::RAW_DATA_SAMPLER,
+            subscription_mode::FEATURE_DATA,
+        )
+        .await
+    {
         Ok(r) => println!("subscribe RAW_DATA_SAMPLER(data) -> result {r}"),
         Err(e) => println!("subscribe RAW_DATA_SAMPLER failed: {e}"),
     }
-    match client.set_feature_mode(capability::RAW_DATA_SAMPLER, feature_mode::REQUESTED).await {
+    match client
+        .set_feature_mode(capability::RAW_DATA_SAMPLER, feature_mode::REQUESTED)
+        .await
+    {
         Ok(()) => println!("set_feature_mode RAW_DATA_SAMPLER(REQUESTED) -> SUCCESS"),
         Err(e) => println!("set_feature_mode RAW_DATA_SAMPLER -> {e}"),
     }
 
     let clear = client.rdata_clear().await?;
-    println!("RDataClear -> status {clear} ({})", rdata_status_name(clear));
+    println!(
+        "RDataClear -> status {clear} ({})",
+        rdata_status_name(clear)
+    );
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as u32)
         .unwrap_or(0);
-    let (_, cst) = client.rdata_configure(&[DataType::Acm2g50Hz], 0, now).await?;
-    println!("RDataConfigure(start=0) -> status {cst} ({})", rdata_status_name(cst));
+    let (_, cst) = client
+        .rdata_configure(&[DataType::Acm2g50Hz], 0, now)
+        .await?;
+    println!(
+        "RDataConfigure(start=0) -> status {cst} ({})",
+        rdata_status_name(cst)
+    );
 
     let mut captured = (0u32, 0usize);
     if cst == 0 {
@@ -1042,7 +1281,10 @@ async fn rdata_unlock(client: &OuraClient<BleTransport>) -> Result<()> {
         }
         println!(">>> drained {} pages, {} bytes", captured.0, captured.1);
     } else {
-        println!(">>> still {} — enabling did not unlock CONFIGURE.", rdata_status_name(cst));
+        println!(
+            ">>> still {} — enabling did not unlock CONFIGURE.",
+            rdata_status_name(cst)
+        );
     }
 
     // Teardown.
@@ -1069,11 +1311,21 @@ async fn rdata_sweep(client: &OuraClient<BleTransport>) -> Result<()> {
 
     // (label, types, start, current)
     let variants: &[(&str, &[DataType], u32, u32)] = &[
-        ("ACM, start=now",          &[DataType::Acm2g50Hz], now, now),
-        ("ACM, start=0",            &[DataType::Acm2g50Hz], 0, now),
-        ("Metadata+ACM, start=now", &[DataType::Metadata, DataType::Acm2g50Hz], now, now),
-        ("Metadata+ACM, start=0",   &[DataType::Metadata, DataType::Acm2g50Hz], 0, now),
-        ("ACM 8g, start=now",       &[DataType::Acm8g50Hz], now, now),
+        ("ACM, start=now", &[DataType::Acm2g50Hz], now, now),
+        ("ACM, start=0", &[DataType::Acm2g50Hz], 0, now),
+        (
+            "Metadata+ACM, start=now",
+            &[DataType::Metadata, DataType::Acm2g50Hz],
+            now,
+            now,
+        ),
+        (
+            "Metadata+ACM, start=0",
+            &[DataType::Metadata, DataType::Acm2g50Hz],
+            0,
+            now,
+        ),
+        ("ACM 8g, start=now", &[DataType::Acm8g50Hz], now, now),
     ];
 
     let (_, idle) = client.rdata_state().await?;
@@ -1085,7 +1337,11 @@ async fn rdata_sweep(client: &OuraClient<BleTransport>) -> Result<()> {
         let engaged = sst != idle;
         println!(
             "{label:<26} configure(sub={csub},st={cst}) -> state(sub={ssub},st={sst}) {}",
-            if engaged { "<<< STATE CHANGED" } else { "(still idle)" }
+            if engaged {
+                "<<< STATE CHANGED"
+            } else {
+                "(still idle)"
+            }
         );
         // tear down before the next attempt
         let _ = client.rdata_stop().await;
