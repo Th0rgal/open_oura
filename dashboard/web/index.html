@@ -29,13 +29,6 @@
 
     <p id="digest" class="digest skeleton skeleton-text">&nbsp;</p>
 
-    <section class="tiles" id="tiles" aria-label="Key vitals">
-      <article class="tile skeleton"></article>
-      <article class="tile skeleton"></article>
-      <article class="tile skeleton"></article>
-      <article class="tile skeleton"></article>
-    </section>
-
     <section class="panel" id="day-panel">
       <div class="panel-head">
         <h2><span class="ic" style="--i:url(/icons/moon.svg)"></span>Your day</h2>
@@ -49,6 +42,13 @@
       <div id="day" class="day">
         <div class="skeleton skeleton-block"></div>
       </div>
+    </section>
+
+    <section class="tiles" id="tiles" aria-label="Key vitals">
+      <article class="tile skeleton"></article>
+      <article class="tile skeleton"></article>
+      <article class="tile skeleton"></article>
+      <article class="tile skeleton"></article>
     </section>
 
     <div class="cols-2">
@@ -100,6 +100,9 @@
       </div>
     </form>
   </dialog>
+
+  <!-- full-page sleep / activity report (shown over the dashboard) -->
+  <div id="page" class="page" hidden></div>
 
   <script src="/app.js"></script>
 </body>

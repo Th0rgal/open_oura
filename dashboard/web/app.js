@@ -220,7 +220,7 @@ function dayCard(d, ymd) {
     const seg = (l, v) => `<span>${l} <b>${num(v)}%</b></span>`;
     comp.innerHTML = seg("Deep", n.deep_pct) + seg("Light", n.light_pct) + seg("REM", n.rem_pct) + seg("Awake", n.wake_pct);
     sp.append(comp);
-    sp.addEventListener("click", () => openSleepDetail(n));
+    sp.addEventListener("click", () => openDayPage(d, ymd, "sleep"));
     card.append(sp);
   }
 
@@ -246,7 +246,7 @@ function dayCard(d, ymd) {
     });
     ap.append(chips);
   }
-  ap.addEventListener("click", () => openActivityDetail(d, ymd));
+  ap.addEventListener("click", () => openDayPage(d, ymd, "activity"));
   card.append(ap);
   return card;
 }
@@ -322,13 +322,21 @@ const fmtDay = (ymd) => {
 const WD = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const hhmm = (min) => `${String((min / 60) | 0).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
 
-// activity type → vendored hugeicons glyph (defaults to a generic activity icon)
-const ACT_ICON = {
-  cycling: "act-cycling", running: "act-running", walking: "act-walking", hiking: "act-walking",
-  swimming: "act-swimming", strengthtraining: "act-strength", coreexercise: "act-strength",
-  crosstraining: "act-strength", yoga: "act-yoga", pilates: "act-yoga",
+// activity type → vendored glyph (keyword-matched so the ~40 AAD labels resolve to one
+// of the clean vendored icons; unknowns fall back to a generic activity mark).
+const ACT_ICON = [
+  [/run/, "act-running"],
+  [/walk|hik|nordic/, "act-walking"],
+  [/cycl|bik/, "act-cycling"],
+  [/swim|dive/, "act-swimming"],
+  [/yoga|pilates|stretch|meditat/, "act-yoga"],
+  [/strength|core|cross ?train|hiit|interval|fitness|elliptical|row|box|martial|climb/, "act-strength"],
+];
+const actIcon = (label) => {
+  const l = (label || "").toLowerCase();
+  for (const [re, icon] of ACT_ICON) if (re.test(l)) return icon;
+  return "act-default";
 };
-const actIcon = (label) => ACT_ICON[(label || "").toLowerCase()] || "act-default";
 
 // session detail popover (opened from a day's session row)
 function openActDetail(s) {
@@ -367,118 +375,328 @@ function openActDetail(s) {
   dlg.showModal();
 }
 
-// ── day-detail dialogs (sleep / activity / combined) ───────────────────────
+// ── full-page sleep & activity reports ─────────────────────────────────────
+// Detail opens as a full page (not a modal): a scientific report with a stacked
+// polysomnograph (hypnogram + aligned signal lanes sharing one night-time axis and a
+// hover crosshair), clinical metrics, and interpretation. Activity gets its own page.
 
-// the night's hypnogram + stage breakdown + that night's vitals, as a detachable
-// block shared by the sleep-only and the combined day detail.
-function sleepDetailBody(n) {
-  const wrap = el("div", "dd-section");
-  wrap.append(el("div", "dd-sub", `${esc(n.start || "—")}–${esc(n.end || "—")} · ${num(n.in_bed_h)} h in bed`));
-  if (n.stages && n.stages.length) {
-    wrap.append(hypnogram(n.stages));
-    const comp = el("div", "breakdown");
-    const seg = (l, v) => `<span>${l} <b>${num(v)}%</b></span>`;
-    comp.innerHTML = seg("Deep", n.deep_pct) + seg("Light", n.light_pct) + seg("REM", n.rem_pct) + seg("Awake", n.wake_pct);
-    wrap.append(comp);
-  } else {
-    wrap.append(el("div", "ad-muted", "No hypnogram for this night yet — the SleepNet model runs on sync."));
+const STAGE = {
+  1: { name: "Deep", cls: "deep", lvl: 3 },
+  2: { name: "Light", cls: "light", lvl: 2 },
+  3: { name: "REM", cls: "rem", lvl: 1 },
+  4: { name: "Awake", cls: "wake", lvl: 0 },
+};
+const parseHM = (s) => { const [h, m] = (s || "0:0").split(":").map(Number); return (h || 0) * 60 + (m || 0); };
+// the night's clock window unwrapped across midnight (end can exceed 1440)
+function nightWin(n) {
+  let a = parseHM(n.start), b = parseHM(n.end);
+  if (b <= a) b += 1440;
+  return { a, b, span: Math.max(1, b - a) };
+}
+const clockAt = (win, f) => {
+  const t = Math.round(win.a + f * win.span) % 1440;
+  return `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}`;
+};
+
+// full-page overlay control
+function showPage(node) {
+  const p = $("page");
+  p.replaceChildren(node);
+  p.hidden = false;
+  p.scrollTop = 0;
+  document.body.classList.add("page-open");
+}
+function closePage() {
+  const p = $("page");
+  p.hidden = true;
+  p.replaceChildren();
+  document.body.classList.remove("page-open");
+}
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("page").hidden) closePage(); });
+
+// page shell: back button + date + Sleep/Activity tab switch
+function openDayPage(d, ymd, tab = "sleep") {
+  const wrap = el("div", "rpt");
+  const head = el("div", "rpt-head");
+  const back = el("button", "rpt-back", "‹ Back");
+  back.type = "button";
+  back.addEventListener("click", closePage);
+  const tabs = el("div", "rpt-tabs");
+  const mk = (key, label) => {
+    const b = el("button", "rpt-tab" + (tab === key ? " on" : ""), label);
+    b.type = "button";
+    b.addEventListener("click", () => openDayPage(d, ymd, key));
+    return b;
+  };
+  tabs.append(mk("sleep", "Sleep"), mk("activity", "Activity"));
+  head.append(back, el("div", "rpt-title", dayTitle(ymd)), tabs);
+  const body = el("div", "rpt-body");
+  body.append(tab === "activity" ? activityReport(d, ymd) : sleepReport(d, ymd));
+  wrap.append(head, body);
+  showPage(wrap);
+}
+
+const stageLegend = () => el("div", "legend rpt-legend",
+  `<span><i class="sw deep"></i>Deep</span><span><i class="sw light"></i>Light</span>` +
+  `<span><i class="sw rem"></i>REM</span><span><i class="sw wake"></i>Awake</span>`);
+
+// stepped clinical hypnogram: y = stage level (Awake top → Deep bottom), colored runs
+function hypnoSvg(stages, w, h) {
+  const n = stages.length;
+  const padT = 8, plotH = h - 16;
+  const yOf = (lvl) => padT + (lvl / 3) * plotH;
+  const xOf = (i) => (i / (n - 1)) * w;
+  let grid = "";
+  for (let l = 0; l < 4; l++) grid += `<line x1="0" y1="${yOf(l).toFixed(1)}" x2="${w}" y2="${yOf(l).toFixed(1)}" stroke="var(--line-soft)" stroke-width="0.5"/>`;
+  let runs = "", conn = "", prevLvl = null, i = 0;
+  while (i < n) {
+    const code = stages[i]; let j = i;
+    while (j < n && stages[j] === code) j++;
+    const st = STAGE[code] || STAGE[2];
+    const x1 = xOf(i), x2 = xOf(Math.min(j, n - 1)), y = yOf(st.lvl);
+    runs += `<line x1="${x1.toFixed(1)}" y1="${y.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y.toFixed(1)}" stroke="var(--${st.cls})" stroke-width="2.5" vector-effect="non-scaling-stroke"/>`;
+    if (prevLvl !== null) conn += `<line x1="${x1.toFixed(1)}" y1="${yOf(prevLvl).toFixed(1)}" x2="${x1.toFixed(1)}" y2="${y.toFixed(1)}" stroke="var(--faint)" stroke-width="0.8" opacity="0.5" vector-effect="non-scaling-stroke"/>`;
+    prevLvl = st.lvl; i = j;
   }
-  const grid = el("div", "ad-grid");
-  const kv = (k, v) => `<div class="kv"><div class="k">${k}</div><div class="v">${v}</div></div>`;
-  grid.innerHTML =
-    kv("Efficiency", n.efficiency != null ? n.efficiency + "%" : "—") +
-    kv("HRV", n.hrv_ms != null ? n.hrv_ms + " ms" : "—") +
-    kv("Resting HR", n.rhr != null ? n.rhr + " bpm" : "—") +
-    kv("Skin temp", n.skin_temp != null ? n.skin_temp.toFixed(1) + " °C" : "—") +
-    kv("Blood O₂", n.spo2_mean != null ? n.spo2_mean + "%" : "—");
-  wrap.append(grid);
+  return `<svg class="lane-svg" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${grid}${conn}${runs}</svg>`;
+}
+
+// smooth auto-scaled line + faint area + dashed mean, for one signal lane
+function laneSvg(v, w, h, color) {
+  if (v.length < 2) return null;
+  const min = Math.min(...v), max = Math.max(...v), rng = (max - min) || 1;
+  const mean = v.reduce((a, b) => a + b, 0) / v.length;
+  const pad = 5, y = (val) => pad + (1 - (val - min) / rng) * (h - 2 * pad);
+  const pts = v.map((val, i) => [(i / (v.length - 1)) * w, y(val)]);
+  const line = smoothPath(pts), my = y(mean).toFixed(1);
+  return {
+    mean, min, max,
+    svg: `<svg class="lane-svg" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">` +
+      `<path d="${line} L${w} ${h} L0 ${h} Z" fill="${color}" opacity="0.09"/>` +
+      `<line x1="0" y1="${my}" x2="${w}" y2="${my}" stroke="${color}" stroke-width="0.6" stroke-dasharray="3 3" opacity="0.45"/>` +
+      `<path d="${line}" fill="none" stroke="${color}" stroke-width="1.4" vector-effect="non-scaling-stroke"/></svg>`,
+  };
+}
+
+// compose the hypnogram + signal lanes into one stack with a shared hover crosshair;
+// the crosshair updates each lane's gutter value + a floating clock readout.
+function polysomnograph(n, lanes) {
+  const win = nightWin(n);
+  const box = el("div", "psg");
+  const plots = el("div", "psg-plots");
+  const cursor = el("div", "psg-cursor"); cursor.hidden = true;
+  const readout = el("div", "psg-readout"); readout.hidden = true;
+  const live = [];
+  lanes.forEach((L) => {
+    const lane = el("div", "psg-lane" + (L.tall ? " tall" : ""));
+    const gut = el("div", "psg-gut");
+    gut.append(el("div", "psg-label", L.label));
+    const val = el("div", "psg-val"); val.textContent = L.summary || "";
+    gut.append(val);
+    const plot = el("div", "psg-plot"); plot.innerHTML = L.svg;
+    lane.append(gut, plot);
+    plots.append(lane);
+    live.push({ ...L, val });
+  });
+  plots.append(cursor);
+  // hour ticks along the bottom
+  const axis = el("div", "psg-lane psg-axis");
+  const ticksHtml = [];
+  for (let t = Math.ceil(win.a / 60) * 60; t <= win.b; t += 60)
+    ticksHtml.push(`<span style="left:${((t - win.a) / win.span * 100).toFixed(2)}%">${String(Math.floor((t % 1440) / 60)).padStart(2, "0")}</span>`);
+  axis.innerHTML = `<div class="psg-gut"></div><div class="psg-plot psg-ticks">${ticksHtml.join("")}</div>`;
+  box.append(readout, plots, axis);
+
+  plots.addEventListener("mousemove", (e) => {
+    const anyPlot = plots.querySelector(".psg-plot");
+    const r = anyPlot.getBoundingClientRect();
+    const f = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+    const gutW = plots.querySelector(".psg-gut").getBoundingClientRect().width;
+    cursor.hidden = false; readout.hidden = false;
+    cursor.style.left = `${gutW + f * r.width}px`;
+    readout.style.left = `${gutW + f * r.width}px`;
+    readout.textContent = clockAt(win, f);
+    live.forEach((L) => { L.val.textContent = L.valueAt(f); });
+  });
+  plots.addEventListener("mouseleave", () => {
+    cursor.hidden = true; readout.hidden = true;
+    live.forEach((L) => { L.val.textContent = L.summary || ""; });
+  });
+  return box;
+}
+
+// horizontal stage-proportion bar (Deep/Light/REM/Awake)
+function stageBar(n) {
+  const bar = el("div", "stagebar");
+  const parts = [["deep", n.deep_pct], ["light", n.light_pct], ["rem", n.rem_pct], ["wake", n.wake_pct]];
+  bar.innerHTML = parts.map(([c, v]) => `<i class="sw-${c}" style="width:${Math.max(0, v || 0)}%" title="${Math.round(v || 0)}%"></i>`).join("");
+  return bar;
+}
+
+// science-based read of the night → a few plain-language sentences + a sleep-debt note
+function sleepInterpretation(d, n, m) {
+  const wrap = el("div", "interp");
+  const out = [];
+  if (n.efficiency != null)
+    out.push(n.efficiency >= 85 ? `Sleep efficiency of ${n.efficiency}% is solid — little time awake once down.`
+      : n.efficiency >= 75 ? `Efficiency ${n.efficiency}% is fair; some fragmentation kept you from deeper rest.`
+      : `Efficiency ${n.efficiency}% is low — a lot of the night in bed wasn't spent asleep.`);
+  if (n.deep_pct != null)
+    out.push(n.deep_pct < 10 ? `Deep sleep was scarce (${n.deep_pct}%) — the physically-restorative stage; low deep often follows late meals, alcohol, or stress.`
+      : `Deep sleep ${n.deep_pct}% (target ~13–23%), the physically-restorative stage.`);
+  if (n.rem_pct != null && m.rem_latency_min != null)
+    out.push(`REM was ${n.rem_pct}% with first REM ${Math.round(m.rem_latency_min)} min after onset (a short REM latency can signal REM pressure or sleep debt).`);
+  if (m.waso_min != null && m.awakenings != null)
+    out.push(`You spent ${Math.round(m.waso_min)} min awake across ${m.awakenings} awakening${m.awakenings === 1 ? "" : "s"} after first falling asleep.`);
+  out.forEach((t) => wrap.append(el("p", "interp-p", t)));
+  const sd = d.sleep_debt;
+  if (sd && sd.valid && sd.debt_min != null) {
+    const h = Math.floor(sd.debt_min / 60), mm = Math.round(sd.debt_min % 60);
+    const note = el("div", "interp-debt");
+    note.innerHTML = `<div class="id-v">${h}h ${mm}m</div><div class="id-k">accumulated sleep debt vs an ${sd.need_h} h nightly need` +
+      `${sd.recent_shortfall_min > 0 ? ` · last night ${Math.round(sd.recent_shortfall_min)} min short` : ""}</div>`;
+    wrap.append(note);
+  }
   return wrap;
 }
 
-// the day's movement ridge + step/kcal totals + a clickable session list (each row
-// opens the per-session model detail). Shared by the activity-only + combined detail.
-function activityDetailBody(d, ymd) {
-  const wrap = el("div", "dd-section");
-  const prof = (d.activity_profile || {})[ymd];
-  if (prof && prof.length > 1) wrap.insertAdjacentHTML("beforeend", ridgeSvg(prof));
-  const ds = (d.activity_daily || {})[ymd];
-  if (ds) {
-    const grid = el("div", "ad-grid");
-    const kv = (k, v) => `<div class="kv"><div class="k">${k}</div><div class="v">${v}</div></div>`;
-    grid.innerHTML =
-      kv("Steps", Math.round(ds.steps || 0).toLocaleString()) +
-      (ds.distance_m != null ? kv("Distance", (ds.distance_m / 1000).toFixed(1) + " km") : "") +
-      kv("Active energy", Math.round(ds.active_kcal || 0) + " kcal") +
-      kv("Total energy", Math.round(ds.total_kcal || 0) + " kcal");
-    wrap.append(grid);
+function sleepReport(d, ymd) {
+  const n = nightForDay(d, ymd);
+  const root = el("div", "rpt-sleep");
+  if (!n || !(n.stages_full && n.stages_full.length)) {
+    root.append(el("div", "error", "No sleep hypnogram for this night yet — run a sync so the SleepNet model can score it."));
+    return root;
   }
+  const m = n.metrics || {}, s = n.series || {};
+  const asleepH = m.asleep_min != null ? m.asleep_min / 60 : null;
+
+  const strip = el("div", "stat-strip");
+  const ss = (k, v) => `<div class="ss"><div class="ss-v">${v}</div><div class="ss-k">${k}</div></div>`;
+  strip.innerHTML =
+    ss("Time in bed", num(n.in_bed_h) + " h") +
+    ss("Asleep", asleepH != null ? asleepH.toFixed(1) + " h" : "—") +
+    ss("Efficiency", n.efficiency != null ? n.efficiency + "%" : "—") +
+    ss("Bedtime", `${n.start}–${n.end}`);
+  root.append(strip, stageLegend());
+
+  // polysomnograph lanes (hypnogram + whatever signals are present)
+  const W = 1000, LH = 50, HH = 92;
+  const stages = n.stages_full;
+  const lanes = [{
+    label: "Hypnogram", summary: "", tall: true, svg: hypnoSvg(stages, W, HH),
+    valueAt: (f) => (STAGE[stages[Math.round(f * (stages.length - 1))]] || {}).name || "",
+  }];
+  const addLane = (key, label, unit, color, dp = 0) => {
+    const v = (s[key] || []).filter((x) => x != null);
+    const L = laneSvg(v, W, LH, color);
+    if (!L) return;
+    const fmt = (x) => (dp ? x.toFixed(dp) : Math.round(x));
+    lanes.push({
+      label, svg: L.svg, summary: `${fmt(L.mean)} ${unit}`,
+      valueAt: (f) => `${fmt(v[Math.round(f * (v.length - 1))])} ${unit}`,
+    });
+  };
+  addLane("hr", "Heart rate", "bpm", "var(--warn)");
+  addLane("hrv", "HRV", "ms", "var(--accent)");
+  addLane("spo2", "Blood O₂", "%", "var(--rem)");
+  addLane("temp", "Skin temp", "°C", "var(--light)", 1);
+  addLane("motion", "Motion", "s", "var(--faint)");
+  root.append(el("p", "subhead", "Overnight polysomnograph"), polysomnograph(n, lanes));
+
+  // architecture + clinical metrics
+  root.append(el("p", "subhead", "Sleep architecture"), stageBar(n));
+  const mg = el("div", "metric-grid");
+  const mins = (x) => (x != null ? Math.round(x) + " min" : "—");
+  const mc = (k, v) => `<div class="mc"><div class="mc-v">${v}</div><div class="mc-k">${k}</div></div>`;
+  mg.innerHTML =
+    mc("Sleep onset", mins(m.sol_min)) +
+    mc("REM latency", mins(m.rem_latency_min)) +
+    mc("Awake (WASO)", mins(m.waso_min)) +
+    mc("Awakenings", m.awakenings != null ? m.awakenings : "—") +
+    mc("Sleep cycles", m.cycles != null ? m.cycles : "—") +
+    mc("Fragmentation", m.frag_index != null ? m.frag_index + " /h" : "—");
+  root.append(mg);
+
+  root.append(el("p", "subhead", "Interpretation"), sleepInterpretation(d, n, m));
+  return root;
+}
+
+// 24h movement (MET-above-rest) area chart with hour axis + active-zone shading
+function metProfileSvg(prof, w, h) {
+  const p = (prof || []).map((x) => x || 0);
+  if (p.length < 2) return "";
+  const peak = Math.max(1, ...p), pad = 6;
+  const xOf = (i) => (i / (p.length - 1)) * w;
+  const yOf = (v) => pad + (1 - Math.min(1, v / peak)) * (h - 2 * pad);
+  const pts = p.map((v, i) => [xOf(i), yOf(v)]);
+  const line = smoothPath(pts);
+  let grid = "";
+  for (let hr = 0; hr <= 24; hr += 6) { const x = (hr / 24) * w; grid += `<line x1="${x}" y1="0" x2="${x}" y2="${h}" stroke="var(--line-soft)" stroke-width="0.5"/>`; }
+  return `<svg class="met-svg" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${grid}` +
+    `<path d="${line} L${w} ${h} L0 ${h} Z" fill="var(--accent)" opacity="0.14"/>` +
+    `<path d="${line}" fill="none" stroke="var(--accent)" stroke-width="1.4" vector-effect="non-scaling-stroke"/></svg>`;
+}
+
+function activityReport(d, ymd) {
+  const root = el("div", "rpt-act");
+  const ds = (d.activity_daily || {})[ymd];
+  const prof = (d.activity_profile || {})[ymd] || [];
+
+  const strip = el("div", "stat-strip");
+  const ss = (k, v) => `<div class="ss"><div class="ss-v">${v}</div><div class="ss-k">${k}</div></div>`;
+  strip.innerHTML =
+    ss("Steps", ds ? Math.round(ds.steps || 0).toLocaleString() : "—") +
+    ss("Active energy", ds ? Math.round(ds.active_kcal || 0) + " kcal" : "—") +
+    ss("Total energy", ds ? Math.round(ds.total_kcal || 0) + " kcal" : "—") +
+    (ds && ds.distance_m != null ? ss("Distance", (ds.distance_m / 1000).toFixed(1) + " km") : "");
+  root.append(strip);
+
+  // 24h movement profile
+  root.append(el("p", "subhead", "Movement across the day"));
+  const met = el("div", "met-wrap");
+  met.innerHTML = metProfileSvg(prof, 1000, 120) +
+    `<div class="met-axis">${[0, 6, 12, 18, 24].map((h) => `<span style="left:${(h / 24 * 100).toFixed(1)}%">${String(h).padStart(2, "0")}</span>`).join("")}</div>`;
+  root.append(met);
+
+  // intensity-derived metrics (buckets are 15-min MET-above-rest)
+  const bucketMin = 24 * 60 / (prof.length || 96);
+  const activeMin = prof.filter((v) => (v || 0) >= 3).length * bucketMin;
+  const lightMin = prof.filter((v) => (v || 0) >= 1.5 && (v || 0) < 3).length * bucketMin;
+  const peakMet = prof.length ? Math.max(...prof.map((v) => v || 0)) : 0;
+  const mg = el("div", "metric-grid");
+  const mc = (k, v) => `<div class="mc"><div class="mc-v">${v}</div><div class="mc-k">${k}</div></div>`;
+  mg.innerHTML =
+    mc("Active", Math.round(activeMin) + " min") +
+    mc("Lightly active", Math.round(lightMin) + " min") +
+    mc("Peak intensity", peakMet.toFixed(1) + " MET") +
+    mc("Sessions", sessionsForDay(d, ymd).length);
+  root.append(mg);
+
+  // sessions timeline + list
   const sessions = sessionsForDay(d, ymd);
+  root.append(el("p", "subhead", "Sessions"));
   if (sessions.length) {
-    wrap.append(el("p", "subhead", "Sessions"));
     const list = el("div", "dd-sessions");
-    sessions.forEach((s) => {
-      const row = el("button", "dd-session" + (s.is_workout >= 0.5 ? " workout" : ""));
+    sessions.forEach((sess) => {
+      const row = el("button", "dd-session" + (sess.is_workout >= 0.5 ? " workout" : ""));
       row.type = "button";
       const ico = el("span", "ic");
-      ico.style.setProperty("--i", `url(/icons/${actIcon(s.label)}.svg)`);
-      const nm = el("span", "dd-s-name");
-      nm.textContent = s.label || "activity";
-      const meta = el("span", "dd-s-meta");
-      meta.textContent = `${s.duration_min} min · ${hhmm(s.start)}`;
+      ico.style.setProperty("--i", `url(/icons/${actIcon(sess.label)}.svg)`);
+      const nm = el("span", "dd-s-name"); nm.textContent = sess.label || "activity";
+      const meta = el("span", "dd-s-meta"); meta.textContent = `${sess.duration_min} min · ${hhmm(sess.start)}`;
       row.append(ico, nm, meta);
-      row.addEventListener("click", () => openActDetail(s));
+      row.addEventListener("click", () => openActDetail(sess));
       list.append(row);
     });
-    wrap.append(list);
+    root.append(list);
   } else {
-    wrap.append(el("div", "ad-muted", "No sessions detected this day."));
+    root.append(el("div", "ad-muted", "No sessions detected this day."));
   }
-  return wrap;
-}
-
-// a reusable detail dialog (id-scoped so the days browser can stack on top of a day
-// detail without a showModal() clash). `bodies` are pre-built DOM nodes.
-function openDetail(id, title, bodies) {
-  let dlg = $(id);
-  if (!dlg) {
-    dlg = el("dialog", "dialog day-dialog");
-    dlg.id = id;
-    dlg.addEventListener("click", (e) => { if (e.target === dlg) dlg.close(); });
-    document.body.append(dlg);
-  }
-  const form = el("form");
-  form.method = "dialog";
-  const head = el("div", "dd-head");
-  const h = el("h3");
-  h.textContent = title;
-  const close = el("button", "dd-close", "✕");
-  close.type = "button";
-  close.setAttribute("aria-label", "Close");
-  close.addEventListener("click", () => dlg.close());
-  head.append(h, close);
-  form.append(head, ...bodies.filter(Boolean));
-  dlg.replaceChildren(form);
-  dlg.showModal();
-}
-
-function openSleepDetail(n) {
-  const w = wakeYmd(n);
-  openDetail("day-dialog", `Sleep · ${w ? dayTitle(w) : (n.date || "")}`, [sleepDetailBody(n)]);
-}
-function openActivityDetail(d, ymd) {
-  openDetail("day-dialog", `Activity · ${dayTitle(ymd)}`, [activityDetailBody(d, ymd)]);
-}
-function openDayDetail(d, ymd) {
-  const n = nightForDay(d, ymd);
-  const bodies = [];
-  if (n) bodies.push(el("p", "subhead", "Sleep"), sleepDetailBody(n));
-  bodies.push(el("p", "subhead", "Activity"), activityDetailBody(d, ymd));
-  openDetail("day-dialog", dayTitle(ymd), bodies);
+  return root;
 }
 
 // the "previous days" page: every day as a row (date, mini-hypnogram, totals) that
-// opens its combined night+activity detail. Uses its own dialog id so opening a
-// day's detail stacks on top instead of clobbering this list.
+// opens its full-page report. Uses its own dialog id.
 function openDaysBrowser(d, days) {
   let dlg = $("days-dialog");
   if (!dlg) {
@@ -515,7 +733,7 @@ function openDaysBrowser(d, days) {
       row.append(hyp);
     }
     row.append(el("span", "dp-chev"));
-    row.addEventListener("click", () => openDayDetail(d, ymd));
+    row.addEventListener("click", () => { dlg.close(); openDayPage(d, ymd, "sleep"); });
     list.append(row);
   });
   form.append(list);

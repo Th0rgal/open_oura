@@ -123,6 +123,7 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
             }
             writeCont = c
             lock.unlock()
+            ringLog.debug("→ write \(data.count)B: \(data.hexString)")
             p.writeValue(data, for: wc, type: .withResponse)
         }
     }
@@ -147,14 +148,19 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
         guard active else { central.stopScan(); return }
         let advName = (advertisementData[CBAdvertisementDataLocalNameKey] as? String)
             ?? peripheral.name ?? ""
-        guard advName.lowercased().contains(nameContains.lowercased()) else { return }
+        guard advName.lowercased().contains(nameContains.lowercased()) else {
+            ringLog.debug("saw '\(advName)' rssi=\(RSSI) — name doesn't match '\(self.nameContains)', ignoring")
+            return
+        }
         central.stopScan()
+        ringLog.info("matched '\(advName)' rssi=\(RSSI) — connecting")
         self.peripheral = peripheral
         peripheral.delegate = self
         central.connect(peripheral, options: nil)
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        ringLog.info("GATT connected — discovering the Oura service")
         peripheral.discoverServices([RingUUID.service])
     }
 
@@ -165,6 +171,7 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral,
                         error: Error?) {
+        ringLog.error("peripheral disconnected: \(error.map { String(describing: $0) } ?? "clean")")
         notifyContinuation?.finish()
         // don't strand a caller awaiting a connect or write when the link drops.
         finishWrite(.failure(BLEError.disconnected))
@@ -188,8 +195,15 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
             if c.uuid == RingUUID.write { writeChar = c }
             if RingUUID.notify.contains(c.uuid.uuidString.uppercased()) { notifyChars.append(c) }
         }
-        guard writeChar != nil else { return finishConnect(.failure(BLEError.noWriteCharacteristic)) }
-        guard !notifyChars.isEmpty else { return finishConnect(.failure(BLEError.notFound)) }
+        ringLog.info("characteristics discovered — write=\(self.writeChar != nil), notify=\(notifyChars.count)")
+        guard writeChar != nil else {
+            ringLog.error("no write characteristic (98ED0002) — wrong device?")
+            return finishConnect(.failure(BLEError.noWriteCharacteristic))
+        }
+        guard !notifyChars.isEmpty else {
+            ringLog.error("no notify characteristics (98ED0003..0006)")
+            return finishConnect(.failure(BLEError.notFound))
+        }
         // don't report "connected" until every notify subscription is confirmed —
         // otherwise Rust can start syncing before inbound frames flow and miss the
         // ring's early responses. didUpdateNotificationStateFor finishes the connect.
@@ -201,20 +215,28 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
                     error: Error?) {
         if let error { return finishConnect(.failure(error)) }
         lock.lock(); pendingNotify -= 1; let ready = pendingNotify <= 0; lock.unlock()
-        if ready { finishConnect(.success(())) }
+        if ready {
+            ringLog.info("all notify subscriptions confirmed — BLE link ready, handing to Rust auth")
+            finishConnect(.success(()))
+        }
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic,
                     error: Error?) {
         // drop the callback on a read/notify error — a stale payload must not be fed
         // into the frame stream Rust drains as protocol responses.
-        guard error == nil, let v = characteristic.value else { return }
+        guard error == nil, let v = characteristic.value else {
+            if let error { ringLog.error("notify error on \(characteristic.uuid): \(String(describing: error))") }
+            return
+        }
+        ringLog.debug("← notif \(v.count)B [\(characteristic.uuid.uuidString.suffix(4))]: \(v.hexString)")
         notifyContinuation?.yield(v)
     }
 
     /// GATT write-with-response acknowledgement (or error) for the in-flight `write`.
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic,
                     error: Error?) {
+        if let error { ringLog.error("write NAK: \(String(describing: error))") }
         finishWrite(error.map { .failure($0) } ?? .success(()))
     }
 

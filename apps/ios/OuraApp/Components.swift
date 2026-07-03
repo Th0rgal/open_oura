@@ -1,5 +1,66 @@
 import SwiftUI
 
+// Activity type → a clean SF Symbol. Keyword-matched so the ~40 AAD behaviour labels all
+// resolve to a sensible figure.* glyph; unknowns fall back to a neutral cardio symbol.
+func activitySymbol(_ label: String) -> String {
+    let l = label.lowercased()
+    switch true {
+    case l.contains("run"): return "figure.run"
+    case l.contains("walk"): return "figure.walk"
+    case l.contains("hik"): return "figure.hiking"
+    case l.contains("cycl"), l.contains("bik"): return "figure.outdoor.cycle"
+    case l.contains("swim"): return "figure.pool.swim"
+    case l.contains("row"): return "figure.rower"
+    case l.contains("core"): return "figure.core.training"
+    case l.contains("strength"): return "figure.strengthtraining.traditional"
+    case l.contains("cross train"): return "figure.cross.training"
+    case l.contains("yoga"): return "figure.yoga"
+    case l.contains("pilates"): return "figure.pilates"
+    case l.contains("hiit"), l.contains("interval"): return "figure.highintensity.intervaltraining"
+    case l.contains("elliptical"): return "figure.elliptical"
+    case l.contains("box"): return "figure.boxing"
+    case l.contains("martial"): return "figure.martial.arts"
+    case l.contains("danc"): return "figure.dance"
+    case l.contains("basketball"): return "figure.basketball"
+    case l.contains("soccer"): return "figure.soccer"
+    case l.contains("football"): return "figure.american.football"
+    case l.contains("baseball"): return "figure.baseball"
+    case l.contains("volleyball"): return "figure.volleyball"
+    case l.contains("tennis"), l.contains("padel"), l.contains("badminton"): return "figure.tennis"
+    case l.contains("hockey"): return "figure.hockey"
+    case l.contains("surf"): return "figure.surfing"
+    case l.contains("snowboard"): return "figure.snowboarding"
+    case l.contains("ski"): return "figure.skiing.crosscountry"
+    case l.contains("horse"): return "figure.equestrian.sports"
+    case l.contains("stretch"): return "figure.flexibility"
+    case l.contains("climb"): return "figure.climbing"
+    case l.contains("golf"): return "figure.golf"
+    case l.contains("meditat"): return "figure.mind.and.body"
+    case l.contains("fitness"): return "figure.strengthtraining.functional"
+    default: return "figure.mixed.cardio"
+    }
+}
+
+// Capitalise an activity label's first letter for display.
+func actLabel(_ s: String) -> String { s.isEmpty ? s : s.prefix(1).uppercased() + s.dropFirst() }
+
+// A labelled activity/workout row: clean SF Symbol + name, duration + start time.
+struct SessionRow: View {
+    let label: String
+    let durationMin: Int
+    let startHM: String
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: activitySymbol(label)).font(.system(size: 14))
+                .foregroundStyle(Obs.teal).frame(width: 20)
+            Text(actLabel(label)).font(Obs.mono(13, .medium)).foregroundStyle(Obs.ink)
+            Spacer()
+            Text("\(durationMin) min").font(Obs.mono(12)).foregroundStyle(Obs.teal)
+            Text(startHM).font(Obs.mono(11)).foregroundStyle(Obs.ink2)
+        }
+    }
+}
+
 // ── reusable readout + chart components ───────────────────────────────────────
 struct Sparkline: View {
     let series: [Double]
@@ -50,37 +111,6 @@ struct VitalCell: View {
     }
 }
 
-struct NightOrbit: View {
-    var seed: Int
-    var body: some View {
-        Canvas { ctx, size in
-            let c = CGPoint(x: size.width / 2, y: size.height / 2)
-            let maxR = min(size.width, size.height) / 2 - 10
-            for k in 1...4 {
-                var ring = Path()
-                ring.addArc(center: c, radius: maxR * CGFloat(k) / 4, startAngle: .degrees(0),
-                            endAngle: .degrees(360), clockwise: false)
-                ctx.stroke(ring, with: .color(Obs.trace), style: .init(lineWidth: 0.6, dash: [2, 5]))
-            }
-            var trace = Path(); trace.move(to: c)
-            var rng = seed == 0 ? 1 : seed
-            for i in 1...7 {
-                rng = (rng &* 1103515245 &+ 12345) & 0x7fffffff
-                let ang = Double(rng % 360) * .pi / 180
-                let r = maxR * CGFloat(i) / 7
-                let p = CGPoint(x: c.x + cos(ang) * r, y: c.y + sin(ang) * r)
-                trace.addLine(to: p)
-                ctx.fill(Path(ellipseIn: CGRect(x: p.x - 2.5, y: p.y - 2.5, width: 5, height: 5)),
-                         with: .color(Obs.ink))
-                ctx.stroke(Path(ellipseIn: CGRect(x: p.x - 4, y: p.y - 4, width: 8, height: 8)),
-                           with: .color(Obs.teal.opacity(0.5)), lineWidth: 0.6)
-            }
-            ctx.stroke(trace, with: .color(Obs.ink2), lineWidth: 0.8)
-        }
-        .frame(height: 200)
-    }
-}
-
 // Sleep-stage hypnogram: a strip of colored segments over the night (1=deep …
 // 4=wake), matching the web dashboard's `.hyp`. Renders whenever stage data exists.
 struct Hypnogram: View {
@@ -97,37 +127,6 @@ struct Hypnogram: View {
         }
         .frame(height: height)
         .clipShape(RoundedRectangle(cornerRadius: 4))
-    }
-}
-
-// Deep / Light / REM / Awake proportion bar + legend.
-struct StageBreakdown: View {
-    let deep: Double, light: Double, rem: Double, wake: Double
-    private var parts: [(String, Double, Color)] {
-        [("Deep", deep, Obs.deep), ("Light", light, Obs.light), ("REM", rem, Obs.rem), ("Awake", wake, Obs.wake)]
-    }
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            GeometryReader { geo in
-                HStack(spacing: 1.5) {
-                    ForEach(parts, id: \.0) { p in
-                        Rectangle().fill(p.2)
-                            .frame(width: max(0, geo.size.width * CGFloat(p.1 / 100) - 1.5))
-                    }
-                    Spacer(minLength: 0)
-                }
-            }
-            .frame(height: 8).clipShape(Capsule())
-            HStack(spacing: 14) {
-                ForEach(parts, id: \.0) { p in
-                    HStack(spacing: 5) {
-                        Circle().fill(p.2).frame(width: 7, height: 7)
-                        Text("\(p.0) ").font(Obs.mono(11)).foregroundStyle(Obs.ink2)
-                            + Text("\(Int(p.1))%").font(Obs.mono(11, .medium)).foregroundStyle(Obs.ink)
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -157,32 +156,3 @@ struct MovementRidge: View {
     }
 }
 
-// Hypnogram + stage breakdown for a night — renders nothing when on-device staging
-// isn't available. Shared by the sleep-detail and day-detail sheets.
-struct SleepStages: View {
-    let n: NightRow
-    var body: some View {
-        if n.hasHypnogram {
-            Hypnogram(stages: n.stages!)
-            StageBreakdown(deep: n.deep_pct ?? 0, light: n.light_pct ?? 0,
-                           rem: n.rem_pct ?? 0, wake: n.wake_pct ?? 0)
-        }
-    }
-}
-
-// The five signal-derived vitals for a night, shared by both detail sheets.
-struct NightVitals: View {
-    let n: NightRow
-    var body: some View {
-        let cells: [(String, String)] = [
-            ("hrv", n.hrv_ms.map { "\(Int($0)) ms" } ?? "—"),
-            ("resting hr", n.rhr.map { "\(Int($0)) bpm" } ?? "—"),
-            ("skin temp", n.skin_temp.map { String(format: "%.1f °c", $0) } ?? "—"),
-            ("blood o₂", n.spo2_mean.map { "\(Int($0))%" } ?? "—"),
-            ("efficiency", n.efficiency.map { "\(Int($0))%" } ?? "—"),
-        ]
-        VStack(spacing: 12) {
-            ForEach(cells, id: \.0) { ObsStat(label: $0.0, value: $0.1) }
-        }
-    }
-}

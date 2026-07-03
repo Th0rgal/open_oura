@@ -11,6 +11,7 @@ BUILD="$APPDIR/build"
 APP="$BUILD/OuraApp.app"
 TRIPLE="arm64-apple-ios17.0-simulator"
 DEV="${1:-Codex-iPhone-17}"
+BUNDLE_ID="md.thomas.openoura"
 
 echo "==> refresh xcframework staticlib (release, iOS sim)"
 cargo build -p oura-core --release --target aarch64-apple-ios-sim >/dev/null
@@ -22,11 +23,15 @@ xcrun -sdk iphonesimulator swiftc \
     -target "$TRIPLE" -parse-as-library \
     -I "$GEN/headers" \
     "$GEN/oura_core.swift" "$APPDIR/Theme.swift" "$APPDIR/OuraApp.swift" \
-    "$APPDIR/Models.swift" "$APPDIR/Core.swift" "$APPDIR/Components.swift" \
+    "$APPDIR/Models.swift" "$APPDIR/Core.swift" "$APPDIR/Components.swift" "$APPDIR/Reports.swift" \
     "$APPDIR/BLETransport.swift" "$APPDIR/RingSync.swift" \
     -L "$XCF" -loura_core \
     -o "$APP/OuraApp"
+# Xcode expands $(PRODUCT_BUNDLE_IDENTIFIER) at build time; the raw-swiftc path doesn't,
+# so substitute it here or LaunchServices registers the app under the literal variable
+# and `simctl launch $BUNDLE_ID` fails with "returned nil" (FBSOpenApplication code 4).
 cp "$APPDIR/Info.plist" "$APP/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" "$APP/Info.plist"
 
 echo "==> bundle oura.db (real synced data)"
 cp "$REPO/oura.db" "$APP/oura.db"
@@ -35,7 +40,7 @@ echo "==> boot + install + launch + screenshot"
 xcrun simctl boot "$DEV" 2>/dev/null || true
 xcrun simctl bootstatus "$DEV" -b >/dev/null 2>&1 || true
 xcrun simctl install "$DEV" "$APP"
-xcrun simctl launch "$DEV" md.thomas.openoura
+xcrun simctl launch "$DEV" "$BUNDLE_ID"
 sleep 2
 xcrun simctl io "$DEV" screenshot "$BUILD/screenshot.png"
 echo "screenshot: $BUILD/screenshot.png"

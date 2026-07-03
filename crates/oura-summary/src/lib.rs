@@ -229,6 +229,135 @@ struct Night {
     hr: Vec<f64>,
     temp: Vec<f64>,
     spo2: Vec<f64>,
+    motion: Vec<f64>,
+}
+
+/// Count maximal runs of `code` at least `min_len` epochs long.
+fn count_bouts(seq: &[i64], code: i64, min_len: usize) -> u32 {
+    let mut count = 0;
+    let mut run = 0usize;
+    for &c in seq {
+        if c == code {
+            run += 1;
+        } else {
+            if run >= min_len {
+                count += 1;
+            }
+            run = 0;
+        }
+    }
+    if run >= min_len {
+        count += 1;
+    }
+    count
+}
+
+/// Count periods of `code`, merging two runs separated by fewer than `merge_gap`
+/// non-`code` epochs into one, then keeping only merged periods of at least `min_len`.
+fn count_periods(seq: &[i64], code: i64, merge_gap: usize, min_len: usize) -> u32 {
+    // collect (start,end) runs of the code
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0;
+    while i < seq.len() {
+        if seq[i] == code {
+            let start = i;
+            while i < seq.len() && seq[i] == code {
+                i += 1;
+            }
+            runs.push((start, i));
+        } else {
+            i += 1;
+        }
+    }
+    if runs.is_empty() {
+        return 0;
+    }
+    // merge runs closer than merge_gap
+    let mut merged: Vec<(usize, usize)> = vec![runs[0]];
+    for &(s, e) in &runs[1..] {
+        let last = merged.last_mut().unwrap();
+        if s - last.1 < merge_gap {
+            last.1 = e;
+        } else {
+            merged.push((s, e));
+        }
+    }
+    merged.iter().filter(|(s, e)| e - s >= min_len).count() as u32
+}
+
+/// Science-based per-night sleep metrics derived from the model hypnogram (per-epoch
+/// codes 1=deep 2=light 3=rem 4=wake). The epoch length is inferred from the night's
+/// in-bed window so we never hardcode the model's 30 s cadence. Returns clinical
+/// readouts (onset latency, REM latency, WASO, awakenings, cycles, fragmentation) plus
+/// the deep/REM front-vs-back-half split, and the asleep seconds used for sleep debt.
+fn sleep_metrics(stages: &[i64], in_bed_s: f64) -> (Value, i32) {
+    let n = stages.len();
+    if n == 0 {
+        return (Value::Null, 0);
+    }
+    let epoch_min = in_bed_s / 60.0 / n as f64;
+    let is_sleep = |c: i64| (1..=3).contains(&c);
+    let onset = stages.iter().position(|&c| is_sleep(c));
+    let final_sleep = stages.iter().rposition(|&c| is_sleep(c));
+    let (Some(onset), Some(final_sleep)) = (onset, final_sleep) else {
+        return (Value::Null, 0);
+    };
+    let sleep_span = &stages[onset..=final_sleep];
+    let asleep_epochs = stages.iter().filter(|&&c| is_sleep(c)).count();
+    let asleep_min = asleep_epochs as f64 * epoch_min;
+
+    // WASO + awakenings: wake epochs strictly inside the sleep period. An awakening is
+    // a wake bout of at least ~1 min (min_wake epochs) so brief scoring flicker doesn't
+    // inflate the count.
+    let waso_epochs = sleep_span.iter().filter(|&&c| c == 4).count();
+    let min_wake = (1.0 / epoch_min).ceil() as usize; // ≥ ~1 minute
+    let awakenings = count_bouts(sleep_span, 4, min_wake.max(1));
+
+    let rem_latency = stages[onset..]
+        .iter()
+        .position(|&c| c == 3)
+        .map(|i| i as f64 * epoch_min);
+
+    // Sleep cycles ≈ REM periods: a REM period is a run of REM, merging gaps shorter
+    // than ~15 min and requiring the period to reach a few minutes — otherwise 30 s
+    // REM flecks read as dozens of "cycles".
+    let merge_gap = (15.0 / epoch_min).round() as usize;
+    let min_rem = (3.0 / epoch_min).ceil() as usize;
+    let cycles = count_periods(sleep_span, 3, merge_gap.max(1), min_rem.max(1));
+
+    // fragmentation: stage changes per hour of sleep.
+    let transitions = sleep_span.windows(2).filter(|w| w[0] != w[1]).count();
+    let frag_index = if asleep_min > 0.0 {
+        transitions as f64 / (asleep_min / 60.0)
+    } else {
+        0.0
+    };
+
+    // deep/REM concentration: share of each stage that falls in the first half of the
+    // sleep period (healthy sleep front-loads deep, back-loads REM).
+    let mid = onset + (final_sleep - onset) / 2;
+    let half_pct = |code: i64| -> Option<f64> {
+        let total = stages.iter().filter(|&&c| c == code).count();
+        if total == 0 {
+            return None;
+        }
+        let first = stages[onset..=mid].iter().filter(|&&c| c == code).count();
+        Some((first as f64 / total as f64 * 100.0).round())
+    };
+
+    let round1 = |x: f64| (x * 10.0).round() / 10.0;
+    let metrics = json!({
+        "asleep_min": round1(asleep_min),
+        "sol_min": round1(onset as f64 * epoch_min),
+        "rem_latency_min": rem_latency.map(round1),
+        "waso_min": round1(waso_epochs as f64 * epoch_min),
+        "awakenings": awakenings,
+        "cycles": cycles,
+        "frag_index": round1(frag_index),
+        "deep_first_half_pct": half_pct(1),
+        "rem_first_half_pct": half_pct(3),
+    });
+    (metrics, (asleep_min * 60.0) as i32)
 }
 
 /// Personal baseline for a vital via ecore's annealing-EMA `Baseline`, over the nights
@@ -272,10 +401,50 @@ fn feat(name: &str, on: bool, feature: &str) -> Value {
     json!({ "name": name, "on": on, "feature": feature })
 }
 
-fn downsample(arr: &[Value], n: usize) -> Vec<i64> {
-    let vals: Vec<i64> = arr.iter().filter_map(|x| x.as_i64()).collect();
+/// Mode filter over a centered odd window — removes single-epoch flicker from the
+/// model hypnogram so cycle/awakening counts reflect real architecture, not 30 s noise
+/// (clinical scoring smooths the same way before deriving events).
+fn smooth_stages(vals: &[i64], win: usize) -> Vec<i64> {
+    if vals.len() < win || win < 3 {
+        return vals.to_vec();
+    }
+    let half = win / 2;
+    (0..vals.len())
+        .map(|i| {
+            let a = i.saturating_sub(half);
+            let b = (i + half + 1).min(vals.len());
+            let mut counts = [0u32; 5];
+            for &s in &vals[a..b] {
+                if (1..=4).contains(&s) {
+                    counts[s as usize] += 1;
+                }
+            }
+            (1..=4).max_by_key(|&k| counts[k as usize]).unwrap_or(vals[i]) as i64
+        })
+        .collect()
+}
+
+/// Bucket-average a dense value series down to at most `n` points, so a per-sample
+/// signal (SpO₂ has tens of thousands of samples/night) stays a light payload while
+/// keeping its shape for the lane charts.
+fn downsample_mean(v: &[f64], n: usize) -> Vec<f64> {
+    if v.len() <= n {
+        return v.to_vec();
+    }
+    let step = v.len() as f64 / n as f64;
+    (0..n)
+        .map(|i| {
+            let a = (i as f64 * step) as usize;
+            let b = (((i + 1) as f64 * step) as usize).max(a + 1).min(v.len());
+            let slice = &v[a..b];
+            slice.iter().sum::<f64>() / slice.len() as f64
+        })
+        .collect()
+}
+
+fn downsample_codes(vals: &[i64], n: usize) -> Vec<i64> {
     if vals.len() <= n {
-        return vals;
+        return vals.to_vec();
     }
     let step = vals.len() as f64 / n as f64;
     (0..n)
@@ -435,6 +604,13 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
                     );
                 }
             }
+            "motion_event" => {
+                // seconds of motion in this window — a restlessness signal aligned to
+                // the night, feeds the polysomnograph's movement lane.
+                if let Some(s) = v["motion_seconds"].as_f64() {
+                    nights[idx].motion.push(s);
+                }
+            }
             _ => {}
         }
     }
@@ -462,12 +638,33 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         })
         .unwrap_or_default();
 
+    // downsample a raw signal to ≤N points (bucket mean) then round for a compact
+    // payload; the frontend spreads each series evenly across the night window (all
+    // signals cover the full night, so index→time is shared across lanes).
+    const SERIES_MAX: usize = 240;
+    let series = |v: &[f64], dp: i32| -> Vec<f64> {
+        let m = 10f64.powi(dp);
+        downsample_mean(v, SERIES_MAX)
+            .iter()
+            .map(|x| (x * m).round() / m)
+            .collect()
+    };
+
     let mut nights_json = Vec::new();
+    let mut asleep_by_night: Vec<i32> = Vec::new(); // oldest-first, for sleep debt
     for nt in &nights {
         let hyp = hyps.get(&nt.start_ds);
-        let stage_cells = hyp
+        let raw_stages: Vec<i64> = hyp
             .and_then(|h| h["stages"].as_array())
-            .map(|s| downsample(s, 120));
+            .map(|s| s.iter().filter_map(|x| x.as_i64()).collect())
+            .unwrap_or_default();
+        // smooth once (≈2.5 min window) — used for the displayed hypnogram AND the
+        // derived metrics, so the two always agree.
+        let full_stages = smooth_stages(&raw_stages, 5);
+        let stage_cells = (!full_stages.is_empty()).then(|| downsample_codes(&full_stages, 120));
+        let in_bed_s = (nt.end_ds - nt.start_ds) as f64 / 10.0;
+        let (metrics, asleep_s) = sleep_metrics(&full_stages, in_bed_s);
+        asleep_by_night.push(asleep_s);
         nights_json.push(json!({
             "date": date_label(unix_s(nt.start_ds), tz),
             "ymd": ymd_label(unix_s(nt.start_ds), tz),
@@ -485,9 +682,37 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
             "wake_pct": hyp.map(|h| h["wake_pct"].clone()),
             "efficiency": hyp.map(|h| h["efficiency_pct"].clone()),
             "stages": stage_cells,
+            // full-resolution hypnogram + aligned raw signals for the detail page's
+            // stacked polysomnograph (empty arrays stay out of the way when absent).
+            "stages_full": (!full_stages.is_empty()).then_some(full_stages),
+            "series": {
+                "hr": series(&nt.hr, 0),
+                "hrv": series(&nt.rmssd, 0),
+                "temp": series(&nt.temp, 2),
+                "spo2": series(&nt.spo2, 0),
+                "motion": series(&nt.motion, 0),
+            },
+            "metrics": metrics,
         }));
     }
     nights_json.reverse();
+
+    // sleep debt over the recent nights (newest-first for the linear-decay weighting),
+    // against an 8 h nightly need — the same ecore-ported algorithm as the ring.
+    let need_h = 8.0;
+    let sleep_debt = {
+        use oura_analysis::ported::sleep_debt::{sleep_debt, SleepDebtConfig};
+        let mut actual: Vec<i32> = asleep_by_night.clone();
+        actual.reverse(); // newest-first
+        let need = vec![(need_h * 3600.0) as i32; actual.len()];
+        let d = sleep_debt(&actual, &need, &SleepDebtConfig::default());
+        json!({
+            "debt_min": (d.debt_s as f64 / 60.0).round(),
+            "recent_shortfall_min": (d.recent_shortfall_s as f64 / 60.0).round(),
+            "valid": d.valid,
+            "need_h": need_h,
+        })
+    };
 
     let mut activity = activity_raw
         .as_ref()
@@ -767,6 +992,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         "device": device,
         "profile": demo.to_json(),
         "nights": nights_json,
+        "sleep_debt": sleep_debt,
         "cardio": cva,
         "fitness": { "vo2max": (vo2max * 10.0).round() / 10.0 },
         "activity": activity,

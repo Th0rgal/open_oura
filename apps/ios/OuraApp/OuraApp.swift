@@ -1,78 +1,10 @@
 import SwiftUI
 
 // The SwiftUI screens for OuraApp. Data types live in Models.swift, the model/FFI
-// orchestration in Core.swift, and the reusable charts/cells in Components.swift.
+// orchestration in Core.swift, the reusable charts/cells in Components.swift, and the
+// full-page sleep/activity reports in Reports.swift.
 // SIBLING CLIENT: the web dashboard (dashboard/web/app.js) renders the SAME summary
 // JSON — a user-facing change here usually belongs there too (docs/clients-web-and-ios.md).
-
-// The detail sheet: hypnogram (or a note when on-device staging isn't available yet)
-// + stage breakdown + that night's vitals.
-struct SleepDetail: View {
-    let n: NightRow
-    @Environment(\.dismiss) private var dismiss
-    var body: some View {
-        ZStack {
-            Obs.canvas.ignoresSafeArea()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(n.date ?? "Sleep").font(Obs.prose(19, .semibold)).foregroundStyle(Obs.ink)
-                            Text("\(n.start ?? "—") → \(n.end ?? "—") · \(n.in_bed_h.map { String(format: "%.1f h in bed", $0) } ?? "—")")
-                                .font(Obs.mono(12)).foregroundStyle(Obs.ink2)
-                        }
-                        Spacer()
-                        Button { dismiss() } label: {
-                            Image(systemName: "xmark").font(.system(size: 13, weight: .medium)).foregroundStyle(Obs.ink2)
-                        }
-                    }
-
-                    ObsTag("hypnogram", icon: "moon.stars.fill")
-                    if n.hasHypnogram {
-                        SleepStages(n: n)
-                    } else {
-                        Text("On-device sleep staging is computed by the SleepNet model, which runs once the on-device torch runner is wired (it powers the web dashboard today). Signal-derived vitals for this night are below.")
-                            .font(Obs.mono(12)).foregroundStyle(Obs.ink2)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-
-                    ObsTag("that night", icon: "waveform.path.ecg")
-                    NightVitals(n: n)
-                }
-                .padding(24)
-            }
-        }
-        .preferredColorScheme(.dark)
-    }
-}
-
-// One day's activity: movement ridge + steps/kcal + that day's workouts.
-struct DaySummaryView: View {
-    let s: Summary
-    let day: String
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text(day).font(Obs.mono(12, .medium)).foregroundStyle(Obs.ink2)
-                Spacer()
-                if let st = s.activity_daily[day] {
-                    Text("\(Int(st.steps ?? 0)) steps").font(Obs.mono(11)).foregroundStyle(Obs.ink2)
-                    Text("· \(Int(st.active_kcal ?? 0)) kcal").font(Obs.mono(11)).foregroundStyle(Obs.teal)
-                }
-            }
-            MovementRidge(profile: s.activity_profile[day] ?? [])
-            ForEach(s.workoutsOn(day)) { w in
-                HStack {
-                    Text(w.label.prefix(1).uppercased() + w.label.dropFirst())
-                        .font(Obs.mono(13, .medium)).foregroundStyle(Obs.ink)
-                    Spacer()
-                    Text("\(w.durationMin) min").font(Obs.mono(12)).foregroundStyle(Obs.teal)
-                    Text(w.startHM).font(Obs.mono(11)).foregroundStyle(Obs.ink2)
-                }
-            }
-        }
-    }
-}
 
 // The home's unified "today": last night's sleep and that day's activity as ONE unit,
 // each region tappable to open its own detail (sleep → SleepDetail, activity →
@@ -127,13 +59,7 @@ struct TodayCard: View {
                     }
                     MovementRidge(profile: s.activity_profile[day] ?? [])
                     ForEach(Array(s.workoutsOn(day).prefix(2))) { w in
-                        HStack {
-                            Text(w.label.prefix(1).uppercased() + w.label.dropFirst())
-                                .font(Obs.mono(12, .medium)).foregroundStyle(Obs.ink)
-                            Spacer()
-                            Text("\(w.durationMin) min").font(Obs.mono(11)).foregroundStyle(Obs.teal)
-                            Text(w.startHM).font(Obs.mono(11)).foregroundStyle(Obs.ink2)
-                        }
+                        SessionRow(label: w.label, durationMin: w.durationMin, startHM: w.startHM)
                     }
                 }
                 .contentShape(Rectangle())
@@ -143,68 +69,7 @@ struct TodayCard: View {
     }
 }
 
-// The activity-only detail sheet for a day: movement ridge + workouts + totals — the
-// activity counterpart to SleepDetail.
-struct ActivityDetail: View {
-    let s: Summary
-    let day: String
-    @Environment(\.dismiss) private var dismiss
-    var body: some View {
-        ZStack {
-            Obs.canvas.ignoresSafeArea()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(day).font(Obs.prose(19, .semibold)).foregroundStyle(Obs.ink)
-                            if let st = s.activity_daily[day] {
-                                Text("\(Int(st.steps ?? 0)) steps · \(Int(st.active_kcal ?? 0)) kcal active")
-                                    .font(Obs.mono(12)).foregroundStyle(Obs.ink2)
-                            }
-                        }
-                        Spacer()
-                        Button { dismiss() } label: {
-                            Image(systemName: "xmark").font(.system(size: 13, weight: .medium)).foregroundStyle(Obs.ink2)
-                        }
-                    }
-
-                    ObsTag("movement", icon: "waveform.path")
-                    MovementRidge(profile: s.activity_profile[day] ?? [], height: 96)
-
-                    let ws = s.workoutsOn(day)
-                    if !ws.isEmpty {
-                        ObsTag("sessions", icon: "figure.run")
-                        VStack(spacing: 12) {
-                            ForEach(ws) { w in
-                                HStack {
-                                    Text(w.label.prefix(1).uppercased() + w.label.dropFirst())
-                                        .font(Obs.mono(13, .medium)).foregroundStyle(Obs.ink)
-                                    Spacer()
-                                    Text("\(w.durationMin) min").font(Obs.mono(12)).foregroundStyle(Obs.teal)
-                                    Text(w.startHM).font(Obs.mono(11)).foregroundStyle(Obs.ink2)
-                                }
-                            }
-                        }
-                    }
-
-                    if let st = s.activity_daily[day] {
-                        ObsTag("totals", icon: "sum")
-                        VStack(spacing: 12) {
-                            ObsStat(label: "steps", value: "\(Int(st.steps ?? 0))")
-                            if let dm = st.distance_m { ObsStat(label: "distance", value: String(format: "%.1f km", dm / 1000)) }
-                            ObsStat(label: "active energy", value: "\(Int(st.active_kcal ?? 0)) kcal", accent: Obs.teal)
-                            if let tk = st.total_kcal { ObsStat(label: "total energy", value: "\(Int(tk)) kcal") }
-                        }
-                    }
-                }
-                .padding(24)
-            }
-        }
-        .preferredColorScheme(.dark)
-    }
-}
-
-// "show all days" → a page listing every day; tap one for its full detail.
+// "show all days" → a page listing every day; tap one for its full report.
 struct AllDaysView: View {
     let s: Summary
     @Environment(\.dismiss) private var dismiss
@@ -216,7 +81,7 @@ struct AllDaysView: View {
                     VStack(spacing: 14) {
                         ForEach(s.days, id: \.self) { day in
                             NavigationLink {
-                                DayDetailView(s: s, day: day)
+                                DayReportView(s: s, day: day, tab: .sleep)
                             } label: {
                                 HStack(spacing: 12) {
                                     VStack(alignment: .leading, spacing: 3) {
@@ -244,36 +109,6 @@ struct AllDaysView: View {
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
             .toolbarColorScheme(.dark, for: .navigationBar)
         }
-        .preferredColorScheme(.dark)
-    }
-}
-
-// One day in full: that night's sleep (hypnogram + breakdown + vitals) and the day's
-// activity (ridge + workouts).
-struct DayDetailView: View {
-    let s: Summary
-    let day: String
-    var body: some View {
-        ZStack {
-            Obs.canvas.ignoresSafeArea()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    if let n = s.night(forDay: day) {
-                        ObsTag("sleep", icon: "moon.fill")
-                        Text("\(n.start ?? "—") → \(n.end ?? "—") · \(n.in_bed_h.map { String(format: "%.1f h", $0) } ?? "—")")
-                            .font(Obs.mono(12)).foregroundStyle(Obs.ink2)
-                        SleepStages(n: n)
-                        NightVitals(n: n)
-                    }
-                    ObsTag("activity")
-                    DaySummaryView(s: s, day: day)
-                }
-                .padding(24)
-            }
-        }
-        .navigationTitle(day)
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbarColorScheme(.dark, for: .navigationBar)
         .preferredColorScheme(.dark)
     }
 }
@@ -333,8 +168,7 @@ struct SyncView: View {
 // ── root ─────────────────────────────────────────────────────────────────────
 struct RootView: View {
     @State private var s: Summary?
-    @State private var sheetNight: NightRow?
-    @State private var sheetActivityDay: DaySel?
+    @State private var report: ReportSel?
     @State private var showAllDays = false
     @State private var showSync = false
     @StateObject private var ring = RingSync()
@@ -360,8 +194,7 @@ struct RootView: View {
             }
         }
         .preferredColorScheme(.dark)
-        .sheet(item: $sheetNight) { SleepDetail(n: $0) }
-        .sheet(item: $sheetActivityDay) { sel in if let s { ActivityDetail(s: s, day: sel.id) } }
+        .fullScreenCover(item: $report) { sel in if let s { DayReportView(s: s, day: sel.day, tab: sel.sleep ? .sleep : .activity) } }
         .sheet(isPresented: $showAllDays) { if let s { AllDaysView(s: s) } }
         .sheet(isPresented: $showSync) { SyncView(ring: ring, onSynced: reload) }
         .onAppear(perform: load)
@@ -414,21 +247,13 @@ struct RootView: View {
                                 .fixedSize(horizontal: false, vertical: true)
                         }
 
-                        // hero: the most recent day's real movement profile (model-free)
-                        if let day = s.activeDays.first, let prof = s.activity_profile[day], prof.count > 1 {
-                            VStack(alignment: .leading, spacing: 8) {
-                                MovementRidge(profile: prof, height: 132)
-                                HStack(spacing: 8) {
-                                    Text("\(day) · movement").font(Obs.mono(11)).foregroundStyle(Obs.ink2)
-                                    Spacer()
-                                    if let st = s.activity_daily[day] {
-                                        Text("\(Int(st.steps ?? 0)) steps").font(Obs.mono(11)).foregroundStyle(Obs.ink2)
-                                        Text("· \(Int(st.active_kcal ?? 0)) kcal").font(Obs.mono(11)).foregroundStyle(Obs.teal)
-                                    }
-                                }
-                            }
-                        } else {
-                            NightOrbit(seed: Int(s.vitals.hrv.latest ?? 4))
+                        // today — last night's sleep + that day's activity as one unit, the
+                        // hero of the home; tap the sleep or the activity region for its report.
+                        if let day = s.days.first {
+                            ObsTag("today", icon: "sun.max.fill")
+                            TodayCard(s: s, day: day,
+                                      onSleep: { report = ReportSel(day: day, sleep: true) },
+                                      onActivity: { report = ReportSel(day: day, sleep: false) })
                         }
 
                         // vitals
@@ -464,15 +289,6 @@ struct RootView: View {
                             ObsTag("fitness", icon: "bolt.heart.fill")
                             ObsStat(label: "vo₂max estimate", value: String(format: "%.1f ml/kg/min", vo), accent: Obs.teal)
                                 .obsCard()
-                        }
-
-                        // today — last night's sleep + that day's activity as one unit;
-                        // tap the sleep or the activity region for its own detail.
-                        if let day = s.days.first {
-                            ObsTag("today", icon: "sun.max.fill")
-                            TodayCard(s: s, day: day,
-                                      onSleep: { if let n = s.night(forDay: day) { sheetNight = n } },
-                                      onActivity: { sheetActivityDay = DaySel(id: day) })
                         }
 
                         // browse every day → per-day detail (sleep + activity)

@@ -40,15 +40,15 @@ metric there once and both clients receive it in the JSON.
 | Digest headline | `load()` digest | `RootView` digest | `digest` | — |
 | Vitals (HRV/RHR/temp/SpO₂) | `renderTiles` / `VitalCell`-like | `VitalCell` | `vitals`, `nights[]` | — |
 | **Unified day (night + activity)** | `renderDay`, `dayCard` | `TodayCard` | `nights[]`, `activity*` | — |
-| Sleep detail + **hypnogram** | `openSleepDetail`, `hypnogram()` | `SleepDetail`, `Hypnogram` | `nights[].stages` | SleepNet (web: Python · iOS: `SleepStaging`) |
-| Stage breakdown | `sleepDetailBody` breakdown | `StageBreakdown` | `nights[].{deep,light,rem,wake}_pct` | SleepNet |
+| **Full-page sleep report** (polysomnograph + clinical metrics + interpretation) | `openDayPage`→`sleepReport`, `polysomnograph`, `hypnoSvg` | `DayReportView`→`SleepReport`, `Polysomnograph` (Reports.swift) | `nights[].{stages_full,series,metrics}`, `sleep_debt` | SleepNet |
+| **Full-page activity report** (24h MET profile + intensity metrics) | `openDayPage`→`activityReport`, `metProfileSvg` | `DayReportView`→`ActivityReport`, `MetProfile` (Reports.swift) | `activity_profile`, `activity_daily`, `activity` | AAD |
+| Stage breakdown | `stageBar` | `StageBreakdown` | `nights[].{deep,light,rem,wake}_pct` | SleepNet |
 | **Cardiovascular age** | `renderCardio` | Cardio section | `cardio` | CVA (web: Python · iOS: `CvaModel`) |
 | **VO₂max estimate** | `renderCardio` | Fitness section | `fitness.vo2max` | — (Jackson, model-free) |
 | Movement ridge | `ridgeSvg` | `MovementRidge` | `activity_profile` | — (MET, model-free) |
-| Activity detail | `openActivityDetail`, `activityDetailBody` | `ActivityDetail` | `activity_daily`, `activity` | — |
 | **Activity sessions / workouts** | `openActDetail` (session) | workouts section | `activity` | AAD (web: Python · iOS: `ActivityModel`) |
-| Steps / active calories / **distance** | `activityDetailBody` stats | activity day stats | `activity_daily` (incl. `distance_m`) | — |
-| Previous days browser | `openDaysBrowser` → `openDayDetail` | `AllDaysView` → `DayDetailView` | day keys | — |
+| Steps / active calories / **distance** | activity report stats | activity day stats | `activity_daily` (incl. `distance_m`) | — |
+| Previous days browser | `openDaysBrowser` → `openDayPage` | `AllDaysView` → `DayDetailView` | day keys | — |
 | Device & data health | `renderDevice` | device section | `device`, `streams` | — |
 
 ## The day is one unit — pair night + activity by *wake date*
@@ -77,9 +77,23 @@ a nap doesn't shadow the real sleep.
   Both ultimately run the SAME `oura-link` `OuraClient<T: Transport>` over a different
   transport (btleplug on desktop, CoreBluetooth-over-FFI on iOS).
 
+## Sleep metrics: two code paths, one algorithm — keep them in sync
+
+The clinical sleep metrics (onset/REM latency, WASO, awakenings, cycles, fragmentation) and
+sleep debt are computed **twice** and must stay identical: once in Rust (`oura-summary`
+`sleep_metrics` / `smooth_stages` / `count_bouts` / `count_periods`, and the `sleep_debt`
+port) for the web, and once in Swift (`Reports.swift` `Sleep.metrics` / `Sleep.smooth` +
+`Summary.sleepDebt`) for iOS. The web reads them from the FFI JSON; iOS recomputes from the
+**on-device** SleepNet hypnogram (`NightRow.stages`), because iOS runs `build_summary` with
+`NoModelRunner` (no server-side staging), so the FFI `stages_full`/`metrics` are empty there.
+The raw signal series (`nights[].series`) DO come from the FFI on both. If you change the
+smoothing window or a metric definition, change **both** implementations.
+
 ## Known gaps (web-only, not yet on iOS)
 
 - **Advanced & debugging**: on-ring feature toggles (`/api/feature`), the per-type event
   stream, profile editing.
+- **Polysomnograph crosshair**: web has a hover crosshair; iOS uses a touch scrubber
+  (drag across the lanes) — same idea, adapted to the input.
 
 When you close one of these gaps, update this section.

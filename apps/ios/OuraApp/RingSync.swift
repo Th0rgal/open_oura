@@ -1,5 +1,16 @@
 import Foundation
 import Security
+import os
+import CryptoKit
+
+// Shared debug logger for the connect + auth + sync path. View live in Console.app
+// (filter subsystem `md.thomas.openoura`) or `xcrun simctl spawn booted log stream
+// --predicate 'subsystem == "md.thomas.openoura"'`. Frames are logged as hex; the auth
+// KEY is never logged (only its length), and the Rust layer logs only nonce/state bytes.
+let ringLog = Logger(subsystem: "md.thomas.openoura", category: "ring")
+extension Data {
+    var hexString: String { map { String(format: "%02x", $0) }.joined() }
+}
 
 // On-device BLE sync: connect to the ring over CoreBluetooth (BLETransport), then
 // drive the SAME Rust client over FFI (RingSession) to authenticate + drain history
@@ -90,7 +101,14 @@ final class RingSync: ObservableObject {
     func run(keyHex: String) async {
         lastReport = nil   // clear any prior success so a failed retry isn't read as one
         let key = keyHex.trimmingCharacters(in: .whitespacesAndNewlines)
+        // A SHA-256-derived fingerprint confirms the *right* key arrived intact without
+        // exposing any key bytes (a raw slice would leak key material). Logged at .debug
+        // so it isn't persisted at the default level.
+        let fp = SHA256.hash(data: Data(key.utf8)).prefix(4).map { String(format: "%02x", $0) }.joined()
+        let hexOk = key.allSatisfy(\.isHexDigit)
+        ringLog.debug("sync run — key len=\(key.count), hex=\(hexOk), fp(sha256)=\(fp)")
         guard key.count == 32, key.allSatisfy(\.isHexDigit) else {
+            ringLog.error("rejected key: len=\(key.count) (need 32 hex chars)")
             status = "key must be 32 hex characters"
             return
         }
@@ -98,26 +116,34 @@ final class RingSync: ObservableObject {
         defer { busy = false }
 
         status = "connecting to ring…"
+        ringLog.info("connecting — scanning for a peripheral named 'Oura'…")
         let t = BLETransport(nameContains: "Oura")
         transport = t
         do {
             try await t.connect()
         } catch {
+            ringLog.error("BLE connect failed: \(String(describing: error))")
             status = "couldn't connect — is the ring nearby and off the charger? (\(error))"
             return
         }
+        ringLog.info("BLE link ready — creating RingSession + inbound-frame pump")
 
         let s = RingSession(writer: RingWriter(t))
         session = s
         pump = Task { for await frame in t.notifications { s.pushFrame(data: frame) } }
 
         status = "syncing…"
+        ringLog.info("starting FFI sync() — auth then drain (watch category=ring for the auth handshake)")
         do {
             let report = try await s.sync(dbPath: DB.url.path, keyHex: key)
             Keychain.saveKey(key)
             lastReport = report
+            ringLog.info("sync OK — serial=\(report.serial) inserted=\(report.inserted) events=\(report.eventsSynced) cursor=\(report.nextCursor)")
             status = "synced — \(report.inserted) new events from \(report.serial)"
         } catch {
+            // the Rust auth layer packs the state byte + nonce + packet dump into this
+            // message, so log it verbatim — it's the primary diagnostic to report back.
+            ringLog.error("sync failed: \(String(describing: error))")
             status = "sync failed: \(error)"
         }
         pump?.cancel()

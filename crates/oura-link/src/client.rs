@@ -14,6 +14,28 @@ use oura_protocol::protocol::{self, feature, feature_mode, Packet};
 /// Default quiet window for collecting responses to a request.
 pub const DEFAULT_QUIET: Duration = Duration::from_millis(1500);
 
+/// Human-readable one-line dump of parsed packets, for debug logs + error messages.
+/// Shows each packet's tag, ext-tag and raw payload hex (payloads never carry the key).
+fn dump_packets(packets: &[Packet]) -> String {
+    if packets.is_empty() {
+        return "<no packets — ring sent nothing before the quiet window>".to_string();
+    }
+    packets
+        .iter()
+        .map(|p| {
+            format!(
+                "{{tag=0x{:02x} ext={} payload={}}}",
+                p.tag,
+                p.ext_tag()
+                    .map(|e| format!("0x{e:02x}"))
+                    .unwrap_or_else(|| "-".to_string()),
+                hex::encode(&p.payload)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// One live heart-rate sample derived from an IBI subscription notification.
 #[derive(Clone, Copy, Debug)]
 pub struct HeartRateSample {
@@ -109,8 +131,14 @@ impl<T: Transport> OuraClient<T> {
     }
 
     async fn request(&self, bytes: &[u8]) -> Result<Vec<Packet>> {
+        tracing::debug!(tx = %hex::encode(bytes), tx_len = bytes.len(), "→ request");
         let frames = transact(&self.transport, bytes, self.quiet).await?;
-        Ok(frames.iter().flat_map(|f| Packet::parse_many(f)).collect())
+        for f in &frames {
+            tracing::debug!(rx = %hex::encode(f), rx_len = f.len(), "← frame");
+        }
+        let packets: Vec<Packet> = frames.iter().flat_map(|f| Packet::parse_many(f)).collect();
+        tracing::debug!(packets = %dump_packets(&packets), "  parsed");
+        Ok(packets)
     }
 
     fn find(packets: &[Packet], tag: u8) -> Option<&Packet> {
@@ -168,28 +196,77 @@ impl<T: Transport> OuraClient<T> {
     /// Run the app-auth challenge with a 16-byte key. Must be repeated per
     /// connection on rings that have a key installed.
     pub async fn authenticate(&self, key: &[u8; 16]) -> Result<AuthResult> {
+        // Never log key bytes (not even a slice — that leaks key material). Only the
+        // length; "is it the right key" is answered by the Swift-side hashed fingerprint
+        // and whether auth ultimately succeeds.
+        tracing::debug!(
+            key_len = key.len(),
+            "auth: step 1 — requesting nonce (0x2b → expect 0x2c)"
+        );
         let packets = self.request(&protocol::req_auth_nonce()).await?;
-        let nonce = packets
-            .iter()
-            .find(|p| p.ext_tag() == Some(0x2c))
-            .map(|p| p.payload[1..].to_vec())
-            .ok_or_else(|| Error::Auth("no nonce response".into()))?;
+        let nonce = match packets.iter().find(|p| p.ext_tag() == Some(0x2c)) {
+            Some(p) if p.payload.len() > 1 => p.payload[1..].to_vec(),
+            _ => {
+                return Err(Error::Auth(format!(
+                    "no nonce response (expected ext 0x2c). ring sent {} packet(s): [{}]",
+                    packets.len(),
+                    dump_packets(&packets)
+                )));
+            }
+        };
+        tracing::debug!(nonce = %hex::encode(&nonce), nonce_len = nonce.len(), "auth: step 2 — got nonce");
 
+        // The encrypted block is deterministic from key+nonce via the shared Rust AES,
+        // so it can't differ between clients and isn't logged (it's key-derived material).
         let encrypted = encrypt_nonce(key, &nonce);
+        tracing::debug!("auth: step 3 — sending AES-128/ECB/PKCS7(nonce) (0x2d → expect 0x2e)");
         let packets = self
             .request(&protocol::req_authenticate(&encrypted))
             .await?;
-        let state = packets
+        let state = match packets
             .iter()
             .find(|p| p.ext_tag() == Some(0x2e))
             .and_then(|p| p.payload.get(1).copied())
-            .ok_or_else(|| Error::Auth("no authenticate response".into()))?;
+        {
+            Some(s) => s,
+            None => {
+                return Err(Error::Auth(format!(
+                    "no authenticate response (expected ext 0x2e). ring sent {} packet(s): [{}]. \
+                     nonce was {} ({}B)",
+                    packets.len(),
+                    dump_packets(&packets),
+                    hex::encode(&nonce),
+                    nonce.len()
+                )));
+            }
+        };
 
         let result = AuthResult::from(state);
+        tracing::debug!(state = %format!("0x{state:02x}"), ?result, "auth: step 4 — ring verdict");
         if result.is_success() {
             Ok(result)
         } else {
-            Err(Error::Auth(format!("{result:?}")))
+            // Rich, actionable failure: the exact state byte + what it means, plus the
+            // bytes exchanged (never the key), so a report pins down key-vs-transport.
+            let hint = match result {
+                AuthResult::AuthenticationError => {
+                    "the ring rejected the key — it does not match THIS ring's installed key \
+                     (re-export the key from the phone that onboarded this exact ring)"
+                }
+                AuthResult::InFactoryReset => {
+                    "the ring is factory-reset (no key installed yet) — pair/onboard it first"
+                }
+                AuthResult::NotOriginalOnboardedDevice => {
+                    "the ring is bonded to a different onboarding — its key is not the one in use"
+                }
+                _ => "unexpected auth state",
+            };
+            Err(Error::Auth(format!(
+                "ring rejected auth: state=0x{state:02x} ({result:?}) — {hint}. \
+                 nonce={} ({}B)",
+                hex::encode(&nonce),
+                nonce.len()
+            )))
         }
     }
 

@@ -13,6 +13,16 @@ struct Trend: Decodable {
     var delta_pct: Double? = nil
 }
 struct Vitals: Decodable { var hrv = Trend(); var rhr = Trend() }
+// per-night raw signal series (from build_summary event accumulation — present in BOTH
+// the model-free and on-device builds; each covers the whole night so index→time is a
+// shared axis across lanes). Feeds the polysomnograph lanes.
+struct NightSeries: Decodable {
+    var hr: [Double] = []
+    var hrv: [Double] = []
+    var spo2: [Double] = []
+    var temp: [Double] = []
+    var motion: [Double] = []
+}
 struct NightRow: Decodable, Identifiable {
     var date: String?; var ymd: String?; var start_ds: Int64?; var start: String?; var end: String?
     var in_bed_h: Double?; var hrv_ms: Double?; var rhr: Double?
@@ -22,6 +32,7 @@ struct NightRow: Decodable, Identifiable {
     var deep_pct: Double?; var light_pct: Double?; var rem_pct: Double?
     var wake_pct: Double?; var efficiency: Double?
     var stages: [Int]? = nil
+    var series: NightSeries? = nil
     var id: String { (date ?? "") + (start ?? "") }
     var hasHypnogram: Bool { (stages?.count ?? 0) > 1 }
 }
@@ -104,5 +115,5 @@ extension Summary {
     }
 }
 
-// identifies a day for the activity-detail sheet (String isn't Identifiable on its own).
-struct DaySel: Identifiable { let id: String }
+// selects which day + which tab the full-page report opens on.
+struct ReportSel: Identifiable { let day: String; let sleep: Bool; var id: String { day + (sleep ? "-s" : "-a") } }

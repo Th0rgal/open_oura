@@ -14,6 +14,7 @@ BUILD="$APPDIR/build"
 APP="$BUILD/OuraApp.app"
 TRIPLE="arm64-apple-ios17.0-simulator"
 DEV="${1:-Codex-iPhone-17}"
+BUNDLE_ID="md.thomas.openoura"
 
 [ -d "$LT/lib" ] || { echo "missing libtorch iOS at $LT (run apps/ios/spike/build_libtorch_ios.sh)"; exit 1; }
 
@@ -33,7 +34,7 @@ xcrun -sdk iphonesimulator swiftc \
     -import-objc-header "$APPDIR/TorchBridge.h" \
     -I "$GEN/headers" \
     "$GEN/oura_core.swift" "$APPDIR/Theme.swift" "$APPDIR/OuraApp.swift" \
-    "$APPDIR/Models.swift" "$APPDIR/Core.swift" "$APPDIR/Components.swift" \
+    "$APPDIR/Models.swift" "$APPDIR/Core.swift" "$APPDIR/Components.swift" "$APPDIR/Reports.swift" \
     "$APPDIR/BLETransport.swift" "$APPDIR/RingSync.swift" \
     "$APPDIR/EventStore.swift" "$APPDIR/SleepStaging.swift" "$APPDIR/CvaModel.swift" "$APPDIR/ActivityModel.swift" "$BUILD/TorchBridge.o" \
     -L "$XCF" -loura_core \
@@ -42,6 +43,9 @@ xcrun -sdk iphonesimulator swiftc \
     -Xlinker -rpath -Xlinker "@executable_path/Frameworks" \
     -o "$APP/OuraApp"
 cp "$APPDIR/Info.plist" "$APP/Info.plist"
+# expand $(PRODUCT_BUNDLE_IDENTIFIER) (Xcode does this; raw swiftc doesn't) so
+# LaunchServices registers the app and `simctl launch $BUNDLE_ID` can find it.
+/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" "$APP/Info.plist"
 
 echo "==> bundle torch dylibs + model + data"
 mkdir -p "$APP/Frameworks"
@@ -60,7 +64,7 @@ echo "==> boot + install + launch + screenshot"
 xcrun simctl boot "$DEV" 2>/dev/null || true
 xcrun simctl bootstatus "$DEV" -b >/dev/null 2>&1 || true
 xcrun simctl install "$DEV" "$APP"
-xcrun simctl launch "$DEV" md.thomas.openoura
+xcrun simctl launch "$DEV" "$BUNDLE_ID"
 sleep 3
 xcrun simctl io "$DEV" screenshot "$BUILD/screenshot.png"
 echo "screenshot: $BUILD/screenshot.png"

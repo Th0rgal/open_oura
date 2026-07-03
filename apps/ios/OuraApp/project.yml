@@ -49,6 +49,7 @@ targets:
       - path: Models.swift
       - path: Core.swift
       - path: Components.swift
+      - path: Reports.swift
       - path: Theme.swift
       - path: BLETransport.swift
       - path: RingSync.swift
