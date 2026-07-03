@@ -86,19 +86,52 @@ function sparkline(series) {
   </svg><i class="spark-dot" style="top:${last[1].toFixed(1)}px"></i>`;
 }
 
-function deltaTag(pct, { good = "up" } = {}) {
-  if (pct == null) return el("span", "delta flat", "");
-  const flat = pct === 0;
-  const cls = flat ? "flat" : (good === "up" ? pct > 0 : pct < 0) ? "up" : "down";
-  return el("span", "delta " + cls, `${pct > 0 ? "+" : ""}${pct}% vs baseline`);
+// a status pill (colored dot + label); kind ∈ ok | warn | neutral
+function pill(label, kind) {
+  const p = el("span", "pill " + kind);
+  p.append(el("i"), document.createTextNode(label));
+  return p;
 }
 
-function tile(label, value, unit, deltaPct, series, opts = {}) {
+// Normal / attention status from a delta% and which direction is healthy.
+function statusFor(deltaPct, good) {
+  if (deltaPct == null) return null;
+  if (Math.abs(deltaPct) <= 5) return { label: "Normal", kind: "ok" };
+  const improving = good === "up" ? deltaPct > 0 : deltaPct < 0;
+  if (improving) return { label: good === "up" ? "High" : "Low", kind: "ok" };
+  return { label: good === "up" ? "Low" : "Elevated", kind: "warn" };
+}
+
+// baseline comparison bar: current value as a fill, the reference (personal baseline
+// or target) as a marker, on a shared 0…(max×1.3) scale — the "your result vs
+// reference" pattern from clinical dashboards.
+function cmpBar(value, ref, unit, refLabel = "baseline") {
+  const hi = Math.max(value, ref) * 1.3 || 1;
+  const wrap = el("div", "cmp");
+  const track = el("div", "cmp-track");
+  const fill = el("i", "cmp-fill");
+  fill.style.width = Math.max(3, Math.min(100, (value / hi) * 100)) + "%";
+  const mark = el("span", "cmp-mark");
+  mark.style.left = Math.min(100, (ref / hi) * 100) + "%";
+  track.append(fill, mark);
+  const dRaw = Math.round((value - ref) * 10) / 10;
+  const cap = el("div", "cmp-cap");
+  cap.innerHTML = `${refLabel} <b>${num(Math.round(ref * 10) / 10)}</b>${unit} · ${dRaw >= 0 ? "+" : ""}${dRaw}${unit}`;
+  wrap.append(track, cap);
+  return wrap;
+}
+
+function metricCard(label, value, unit, opts = {}) {
+  const { deltaPct, ref, refLabel, good = "up", status, sub } = opts;
   const t = el("article", "tile");
-  t.append(el("div", "label", label));
+  const head = el("div", "tile-head");
+  head.append(el("div", "label", label));
+  const st = status !== undefined ? status : statusFor(deltaPct, good);
+  if (st) head.append(pill(st.label, st.kind));
+  t.append(head);
   t.append(el("div", "value", `${num(value)}<span class="unit">${unit || ""}</span>`));
-  if (deltaPct !== undefined) t.append(deltaTag(deltaPct, opts));
-  if (series) t.append(el("div", "spark", sparkline(series)));
+  if (typeof value === "number" && ref != null) t.append(cmpBar(value, ref, unit || "", refLabel));
+  else if (sub) t.append(el("div", "sub", sub));
   return t;
 }
 
@@ -115,17 +148,22 @@ function renderTiles(d) {
   box.classList.add("reveal");
   const hv = d.vitals?.hrv || {}, rh = d.vitals?.rhr || {};
   const n0 = (d.nights || [])[0] || {};
-  const effSeries = [...(d.nights || [])].reverse().map((n) => n.efficiency).filter((x) => x != null);
-  box.append(tile("HRV (rmssd)", hv.latest, " ms", hv.delta_pct, hv.series, { good: "up" }));
-  box.append(tile("Resting HR", rh.latest, " bpm", rh.delta_pct, rh.series, { good: "down" }));
-  box.append(tile("Sleep efficiency", n0.efficiency, "%", undefined, effSeries));
+  box.append(metricCard("HRV (RMSSD)", hv.latest, " ms", { deltaPct: hv.delta_pct, ref: hv.baseline, good: "up" }));
+  box.append(metricCard("Resting HR", rh.latest, " bpm", { deltaPct: rh.delta_pct, ref: rh.baseline, good: "down" }));
+  const eff = n0.efficiency;
+  box.append(metricCard("Sleep efficiency", eff, "%", {
+    ref: 85, refLabel: "target", good: "up",
+    status: eff == null ? null : eff >= 85 ? { label: "Normal", kind: "ok" } : eff >= 75 ? { label: "Fair", kind: "neutral" } : { label: "Low", kind: "warn" },
+  }));
   const cv = d.cardio;
   if (cv && cv.vascular_age != null) {
-    const t = tile("Vascular age", cv.vascular_age, " yr");
-    t.append(el("div", "sub", relAge(cv.vascular_age - cv.chronological_age).short));
-    box.append(t);
+    const diff = cv.vascular_age - cv.chronological_age;
+    box.append(metricCard("Vascular age", cv.vascular_age, " yr", {
+      ref: cv.chronological_age, refLabel: "your age", good: "down",
+      status: diff < -0.5 ? { label: "Younger", kind: "ok" } : diff > 0.5 ? { label: "Older", kind: "warn" } : { label: "In line", kind: "neutral" },
+    }));
   } else {
-    box.append(tile("Vascular age", "—", ""));
+    box.append(metricCard("Vascular age", "—", "", { sub: "needs cva_ppg on" }));
   }
 }
 

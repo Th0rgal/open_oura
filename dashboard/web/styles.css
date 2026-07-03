@@ -12,7 +12,7 @@
   --line-soft: rgba(17, 20, 24, 0.05);
   --accent: #0d9488;
   --accent-soft: rgba(13, 148, 136, 0.12);
-  --good: #2f9e6f;
+  --good: var(--accent);
   --warn: #c9842b;
   --shadow: none;
 
@@ -23,8 +23,8 @@
   --rem: #4fa6b0;
   --wake: #d2b06e;
 
-  --radius: 4px;
-  --radius-sm: 3px;
+  --radius: 8px;
+  --radius-sm: 5px;
   --maxw: 1000px;
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Menlo", monospace;
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
@@ -42,7 +42,18 @@
   --rim: 0 0 0 1px var(--line);
   --glow: transparent;
   --glow-2: transparent;
+
+  /* rigorous 4px spacing scale — every gap/margin/pad is a step on this ladder */
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 40px;
+  /* one set of interaction states, applied uniformly */
+  --hover-fill: color-mix(in oklab, var(--accent) 6%, transparent);
+  --hover-line: color-mix(in oklab, var(--accent) 34%, var(--line));
+  --focus-ring: 2px solid var(--accent);
 }
+
+/* uniform selection + keyboard focus across every control */
+::selection { background: color-mix(in oklab, var(--accent) 20%, transparent); }
+:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
 
 /* mask-based icon: inherits text color, themes automatically */
 .ic {
@@ -67,7 +78,7 @@
     --line-soft: rgba(255, 255, 255, 0.06);
     --accent: #2dd4bf;
     --accent-soft: rgba(45, 212, 191, 0.14);
-    --good: #45c08a;
+    --good: var(--accent);
     --warn: #e0a44e;
     --shadow: none;
     --deep: #5d6989;
@@ -92,7 +103,7 @@
   --line-soft: rgba(255, 255, 255, 0.06);
   --accent: #2dd4bf;
   --accent-soft: rgba(45, 212, 191, 0.14);
-  --good: #45c08a;
+  --good: var(--accent);
   --warn: #e0a44e;
   --shadow: none;
   --deep: #5d6989;
@@ -134,17 +145,16 @@ body {
   position: sticky;
   top: 0;
   z-index: 30;
-  margin-bottom: 22px;
-  padding: 10px 2px 12px;
+  margin-bottom: var(--s5);
+  padding: var(--s2) 2px var(--s3);
   background: var(--bg);
   border-bottom: 1px solid var(--line);
 }
 .brand { display: flex; align-items: center; gap: 11px; }
 .mark {
-  width: 22px; height: 22px; border-radius: 999px;
-  background:
-    radial-gradient(circle at 32% 30%, color-mix(in oklab, var(--accent) 85%, white), var(--accent) 70%);
-  box-shadow: inset 0 0 0 4px color-mix(in oklab, var(--bg) 60%, transparent);
+  width: 18px; height: 18px; border-radius: 999px;
+  background: var(--accent);
+  box-shadow: inset 0 0 0 3px var(--bg);
 }
 .word { font-weight: 600; letter-spacing: -0.01em; font-size: 16px; }
 
@@ -165,11 +175,9 @@ body {
   background: var(--surface);
   border: 1px solid var(--line); border-radius: var(--radius-sm);
   padding: 6px 13px; cursor: pointer;
-  box-shadow: var(--sheen);
-  transition: border-color 0.16s ease, transform 0.1s ease, background 0.16s ease;
+  transition: border-color 0.14s ease;
 }
-.action:hover { border-color: color-mix(in oklab, var(--accent) 38%, var(--line)); }
-.action:active { transform: scale(0.97); }
+.action:hover { border-color: var(--hover-line); }
 .action .ic { font-size: 14px; color: var(--muted); }
 .action.icon-only { padding: 7px; }
 .action.syncing { pointer-events: none; color: var(--muted); }
@@ -183,7 +191,7 @@ body {
   font-size: 15px;
   line-height: 1.5;
   font-weight: 400;
-  margin: 2px 0 22px;
+  margin: 0 0 var(--s5);
   max-width: 78ch;
   color: var(--muted);
 }
@@ -194,20 +202,21 @@ body {
 
 /* ── tiles ──────────────────────────────────────────────── */
 .tiles {
-  display: grid; gap: 14px;
+  display: grid; gap: var(--s3);
   grid-template-columns: repeat(4, 1fr);
-  margin: 22px 0;
+  margin: var(--s5) 0;
 }
 .tile {
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  padding: 14px 16px 13px;
-  min-height: 104px;
-  display: flex; flex-direction: column; gap: 4px;
+  padding: var(--s4) var(--s4) var(--s3);
+  min-height: 128px;
+  display: flex; flex-direction: column;
   transition: border-color 0.14s ease;
 }
-.tile:hover { border-color: color-mix(in oklab, var(--accent) 32%, var(--line)); }
+.tile:hover { border-color: var(--hover-line); }
+.tile-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s2); margin-bottom: var(--s3); }
 .tile .label { font-size: 10px; color: var(--faint); letter-spacing: 0.09em; text-transform: uppercase; font-weight: 560; }
 .tile .value {
   font-family: var(--mono);
@@ -215,6 +224,27 @@ body {
   font-variant-numeric: tabular-nums; line-height: 1.05;
   margin-top: auto;
 }
+
+/* status pill (indicator, stays round) */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px; flex: none;
+  font-size: 10.5px; font-weight: 540; letter-spacing: 0.01em;
+  padding: 2px 8px 2px 6px; border-radius: 999px;
+  border: 1px solid var(--line); color: var(--muted);
+}
+.pill i { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); flex: none; }
+.pill.ok { color: var(--accent); border-color: color-mix(in oklab, var(--accent) 30%, var(--line)); }
+.pill.ok i { background: var(--accent); }
+.pill.warn { color: var(--warn); border-color: color-mix(in oklab, var(--warn) 30%, var(--line)); }
+.pill.warn i { background: var(--warn); }
+
+/* baseline comparison bar: current fill + reference marker */
+.cmp { margin-top: var(--s3); }
+.cmp-track { position: relative; height: 6px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--line-soft); }
+.cmp-fill { display: block; height: 100%; border-radius: 999px; background: var(--accent); }
+.cmp-mark { position: absolute; top: -2px; bottom: -2px; width: 2px; border-radius: 1px; background: var(--muted); transform: translateX(-1px); }
+.cmp-cap { margin-top: var(--s2); font-size: 11px; color: var(--faint); font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.cmp-cap b { color: var(--muted); font-weight: 560; }
 .tile .value .unit { font-size: 14px; color: var(--faint); margin-left: 3px; font-weight: 480; }
 .tile .delta { font-size: 12.5px; font-variant-numeric: tabular-nums; font-family: var(--mono); }
 .tile .delta.up { color: var(--good); }
@@ -232,20 +262,20 @@ body {
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  padding: 22px 26px;
-  margin-top: 22px;
+  padding: var(--s5);
+  margin-top: var(--s5);
 }
 .panel-head {
   display: flex; align-items: center; justify-content: space-between;
-  margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid var(--line-soft);
+  margin-bottom: var(--s4); padding-bottom: var(--s3); border-bottom: 1px solid var(--line-soft);
 }
 .panel-head h2 {
-  display: inline-flex; align-items: center; gap: 9px;
+  display: inline-flex; align-items: center; gap: var(--s2);
   font-size: 11px; font-weight: 600; letter-spacing: 0.11em; text-transform: uppercase;
   margin: 0; color: var(--muted);
 }
 .panel-head h2 .ic { font-size: 15px; color: var(--faint); letter-spacing: 0; }
-.cols-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.cols-2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s3); }
 
 .legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); }
 .legend span { display: inline-flex; align-items: center; gap: 6px; }
@@ -263,7 +293,7 @@ body {
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
 }
-.more-toggle:hover { background: color-mix(in oklab, var(--accent) 6%, transparent); border-color: color-mix(in oklab, var(--accent) 30%, var(--line)); }
+.more-toggle:hover { background: var(--hover-fill); border-color: var(--hover-line); }
 
 /* ── the unified day card (night + activity) ────────────── */
 .day { display: flex; flex-direction: column; }
@@ -284,7 +314,7 @@ body {
   transition: background 0.15s ease;
 }
 .day-part + .day-part { border-top: 1px solid var(--line-soft); }
-.day-part:hover { background: color-mix(in oklab, var(--accent) 5%, transparent); }
+.day-part:hover { background: var(--hover-fill); }
 .day-part:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .dp-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 11px; }
 .dp-tag { font-size: 11px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
@@ -347,7 +377,7 @@ body {
 .kv .v { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 16px; font-weight: 540; }
 
 .gauge { height: 8px; border-radius: 999px; background: var(--surface-2); overflow: hidden; margin-top: 16px; }
-.gauge > i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), color-mix(in oklab, var(--accent) 60%, var(--light))); border-radius: 999px; }
+.gauge > i { display: block; height: 100%; background: var(--accent); border-radius: 999px; }
 .scale { display: flex; justify-content: space-between; font-size: 11px; color: var(--faint); margin-top: 6px; }
 
 /* ── full-page report (sleep / activity) ──────────────────────────────────── */
@@ -460,7 +490,7 @@ body.page-open { overflow: hidden; }
   padding: 9px 8px; border-radius: var(--radius-sm);
   color: var(--text); background: none; border: 1px solid transparent;
 }
-.dd-session:hover { background: color-mix(in oklab, var(--accent) 6%, transparent); border-color: var(--line); }
+.dd-session:hover { background: var(--hover-fill); border-color: var(--line); }
 .dd-session .ic { font-size: 15px; color: var(--faint); }
 .dd-session.workout .ic { color: var(--accent); }
 .dd-s-name { font-size: 13.5px; text-transform: capitalize; }
@@ -473,7 +503,7 @@ body.page-open { overflow: hidden; }
   padding: 11px 8px; border-radius: var(--radius-sm); background: none;
   border: 1px solid transparent; border-bottom: 1px solid var(--line-soft);
 }
-.daylist-row:hover { background: color-mix(in oklab, var(--accent) 6%, transparent); }
+.daylist-row:hover { background: var(--hover-fill); }
 .dl-date { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 13px; font-weight: 540; }
 .dl-sub { font-size: 12px; color: var(--faint); font-family: var(--mono); font-variant-numeric: tabular-nums; margin-top: 2px; }
 .dl-hyp { width: 120px; height: 24px; }
