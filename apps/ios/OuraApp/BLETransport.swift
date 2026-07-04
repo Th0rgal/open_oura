@@ -31,7 +31,23 @@ protocol RingTransport: AnyObject {
     var notifications: AsyncStream<Data> { get }
 }
 
-enum BLEError: Error { case poweredOff, notFound, noWriteCharacteristic, disconnected, timedOut, busy }
+enum BLEError: Error, CustomStringConvertible {
+    case poweredOff, notFound, noWriteCharacteristic, disconnected, busy
+    /// carries the stage the attempt was in, so "timed out" says *what* never happened
+    /// (no advertisement seen vs GATT connect stalled vs subscriptions pending).
+    case timedOut(stage: String)
+
+    var description: String {
+        switch self {
+        case .poweredOff: return "Bluetooth is off or not authorized"
+        case .notFound: return "ring service/characteristics not found"
+        case .noWriteCharacteristic: return "no write characteristic (98ED0002)"
+        case .disconnected: return "ring disconnected"
+        case .busy: return "another BLE operation is in flight"
+        case .timedOut(let stage): return "timed out while \(stage)"
+        }
+    }
+}
 
 /// Scans for an Oura ring advertising the service (filtered by case-insensitive
 /// name), connects, discovers the write + notify characteristics, and bridges them
@@ -55,6 +71,12 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
     private var connectTimeout: DispatchWorkItem?
     private var pendingNotify = 0 // notify subscriptions still awaiting confirmation
     private var poweredOn = false
+    // where the in-flight connect currently is, for the timeout error message.
+    private var stage = "waiting for Bluetooth to power on"
+    // advertisement reports already logged (id|name) — allow-duplicates re-reports the
+    // same ring many times a second; log each device once, and again when its name
+    // first arrives via scan response. Only touched on the (serial) CB queue.
+    private var loggedAds = Set<String>()
     // delegate callbacks land on a concurrent queue; this serialises take-and-resume
     // of the continuations so a success and a timeout can't both resume one (a crash).
     private let lock = NSLock()
@@ -62,12 +84,21 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
     init(nameContains: String = "Oura") {
         self.nameContains = nameContains
         super.init()
-        central = CBCentralManager(delegate: self, queue: .global(qos: .userInitiated))
+        // CoreBluetooth requires a SERIAL queue for delegate callbacks; a concurrent
+        // global queue can deliver them out of order (e.g. a notify confirmation
+        // racing service discovery).
+        central = CBCentralManager(
+            delegate: self,
+            queue: DispatchQueue(label: "md.thomas.openoura.ble", qos: .userInitiated))
     }
 
     /// Scan → connect → discover. Resolves once the write characteristic is ready
     /// and notifications are subscribed.
-    func connect(timeout: TimeInterval = 20) async throws {
+    ///
+    /// The default budget mirrors the desktop client, which allows 25 s of scanning
+    /// plus 30 s for connect + discovery: a worn ring advertises in low-power mode
+    /// only intermittently, so 20 s of scan alone was routinely not enough.
+    func connect(timeout: TimeInterval = 50) async throws {
         try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
             lock.lock()
             // reject (rather than strand) a second connect while one is in flight OR
@@ -79,6 +110,7 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
                 return
             }
             connectCont = c
+            stage = "waiting for Bluetooth to power on"
             // fail rather than hang forever if the ring never advertises (off the
             // charger / not worn) or Bluetooth stays off. The work item is stored so
             // finishConnect() can cancel it — a stale timer from a prior/finished
@@ -86,7 +118,9 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
             let work = DispatchWorkItem { [weak self] in
                 guard let self else { return }
                 self.central.stopScan()
-                self.finishConnect(.failure(BLEError.timedOut))
+                self.lock.lock(); let at = self.stage; self.lock.unlock()
+                dlog("ble", "TIMEOUT while \(at)")
+                self.finishConnect(.failure(BLEError.timedOut(stage: at)))
             }
             connectTimeout = work
             lock.unlock()
@@ -94,12 +128,42 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
             // back the previous, already-finished stream).
             notifications = AsyncStream { self.notifyContinuation = $0 }
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: work)
-            if poweredOn { startScan() }
+            dlog("ble", "connect(timeout: \(Int(timeout))s) — central.state=\(Self.name(of: central.state))")
+            switch central.state {
+            case .poweredOn:
+                startScan()
+            case .poweredOff, .unauthorized, .unsupported:
+                // fail NOW instead of burning the whole timeout: the one-shot state
+                // callback fired before this connect registered, so it won't recur.
+                finishConnect(.failure(BLEError.poweredOff))
+            default:
+                break // .unknown/.resetting — wait for centralManagerDidUpdateState
+            }
+        }
+    }
+
+    private static func name(of state: CBManagerState) -> String {
+        switch state {
+        case .poweredOn: return "poweredOn"
+        case .poweredOff: return "poweredOff"
+        case .unauthorized: return "unauthorized (check Settings > Privacy > Bluetooth)"
+        case .unsupported: return "unsupported"
+        case .resetting: return "resetting"
+        case .unknown: return "unknown (still initializing)"
+        @unknown default: return "state \(state.rawValue)"
         }
     }
 
     private func startScan() {
-        central.scanForPeripherals(withServices: [RingUUID.service], options: nil)
+        lock.lock(); stage = "scanning — no ring advertisement seen yet"; lock.unlock()
+        dlog("ble", "scanning for service \(RingUUID.service) (allow duplicates)")
+        // Allow duplicate discovery reports: the ring's ADV packet is full (flags +
+        // 128-bit service UUID + manufacturer data), so its name only arrives in the
+        // scan response, which a worn ring in low-power mode answers lazily. Without
+        // duplicates iOS may coalesce the ring into a single early, name-less report.
+        central.scanForPeripherals(
+            withServices: [RingUUID.service],
+            options: [CBCentralManagerScanOptionAllowDuplicatesKey: true])
     }
 
     /// Finish the inbound frame stream so a Rust drain blocked on `recv` returns at once
@@ -123,13 +187,14 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
             }
             writeCont = c
             lock.unlock()
-            ringLog.debug("→ write \(data.count)B: \(data.hexString)")
+            dlog("send", "\(data.count)B \(data.hexString)")
             p.writeValue(data, for: wc, type: .withResponse)
         }
     }
 
     // ── CBCentralManagerDelegate ──
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        dlog("ble", "central state → \(Self.name(of: central.state))")
         switch central.state {
         case .poweredOn:
             poweredOn = true
@@ -148,30 +213,48 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
         guard active else { central.stopScan(); return }
         let advName = (advertisementData[CBAdvertisementDataLocalNameKey] as? String)
             ?? peripheral.name ?? ""
-        guard advName.lowercased().contains(nameContains.lowercased()) else {
-            ringLog.debug("saw '\(advName)' rssi=\(RSSI) — name doesn't match '\(self.nameContains)', ignoring")
+        // full advertisement dump, once per (device, name) so allow-duplicates doesn't
+        // flood the transcript but a late-arriving scan-response name still shows up.
+        let adKey = "\(peripheral.identifier.uuidString)|\(advName)"
+        if loggedAds.insert(adKey).inserted {
+            let svc = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID])?
+                .map(\.uuidString).joined(separator: ",") ?? "—"
+            let mfr = (advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data)?.hexString ?? "—"
+            let conn = advertisementData[CBAdvertisementDataIsConnectable] as? Bool
+            dlog("scan", "saw '\(advName.isEmpty ? "<no name>" : advName)' id=\(peripheral.identifier.uuidString.suffix(12)) rssi=\(RSSI) services=[\(svc)] mfr=\(mfr) connectable=\(conn.map(String.init) ?? "?")")
+        }
+        // The scan is already filtered on Oura's proprietary service UUID, so any
+        // report IS a ring — connect even when the name is missing (the name lives in
+        // the scan response, which a worn ring may not have answered yet). Only skip
+        // a NAMED device that contradicts the requested name.
+        if !advName.isEmpty, !advName.lowercased().contains(nameContains.lowercased()) {
+            dlog("scan", "'\(advName)' doesn't match '\(nameContains)' — ignoring")
             return
         }
         central.stopScan()
-        ringLog.info("matched '\(advName)' rssi=\(RSSI) — connecting")
+        dlog("ble", "matched '\(advName.isEmpty ? "<no name yet>" : advName)' rssi=\(RSSI) — GATT connect…")
+        lock.lock(); stage = "GATT-connecting to the discovered ring"; lock.unlock()
         self.peripheral = peripheral
         peripheral.delegate = self
         central.connect(peripheral, options: nil)
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-        ringLog.info("GATT connected — discovering the Oura service")
+        let mtu = peripheral.maximumWriteValueLength(for: .withResponse)
+        dlog("ble", "GATT connected (maxWrite=\(mtu)B) — discovering the Oura service")
+        lock.lock(); stage = "discovering services/characteristics"; lock.unlock()
         peripheral.discoverServices([RingUUID.service])
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral,
                         error: Error?) {
+        dlog("ble", "GATT connect FAILED: \(error.map { String(describing: $0) } ?? "no error info")")
         finishConnect(.failure(error ?? BLEError.notFound))
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral,
                         error: Error?) {
-        ringLog.error("peripheral disconnected: \(error.map { String(describing: $0) } ?? "clean")")
+        dlog("ble", "peripheral disconnected: \(error.map { String(describing: $0) } ?? "clean")")
         notifyContinuation?.finish()
         // don't strand a caller awaiting a connect or write when the link drops.
         finishWrite(.failure(BLEError.disconnected))
@@ -180,43 +263,72 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
 
     // ── CBPeripheralDelegate ──
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
-        if let error { return finishConnect(.failure(error)) }
+        if let error {
+            dlog("ble", "service discovery FAILED: \(error)")
+            return finishConnect(.failure(error))
+        }
+        let found = (peripheral.services ?? []).map(\.uuid.uuidString).joined(separator: ",")
+        dlog("ble", "services: [\(found)]")
         guard let svc = peripheral.services?.first(where: { $0.uuid == RingUUID.service }) else {
+            dlog("ble", "Oura service 98ED0001 NOT among them — wrong device?")
             return finishConnect(.failure(BLEError.notFound))
         }
         peripheral.discoverCharacteristics(nil, for: svc)
     }
 
+    private static func props(_ c: CBCharacteristic) -> String {
+        var p: [String] = []
+        if c.properties.contains(.read) { p.append("read") }
+        if c.properties.contains(.write) { p.append("write") }
+        if c.properties.contains(.writeWithoutResponse) { p.append("writeNR") }
+        if c.properties.contains(.notify) { p.append("notify") }
+        if c.properties.contains(.indicate) { p.append("indicate") }
+        return p.joined(separator: "+")
+    }
+
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService,
                     error: Error?) {
-        if let error { return finishConnect(.failure(error)) }
+        if let error {
+            dlog("ble", "characteristic discovery FAILED: \(error)")
+            return finishConnect(.failure(error))
+        }
         var notifyChars: [CBCharacteristic] = []
         for c in service.characteristics ?? [] {
+            dlog("ble", "char …\(c.uuid.uuidString.suffix(4).lowercased()) [\(Self.props(c))]")
             if c.uuid == RingUUID.write { writeChar = c }
             if RingUUID.notify.contains(c.uuid.uuidString.uppercased()) { notifyChars.append(c) }
         }
-        ringLog.info("characteristics discovered — write=\(self.writeChar != nil), notify=\(notifyChars.count)")
+        dlog("ble", "characteristics discovered — write=\(writeChar != nil), notify=\(notifyChars.count)")
         guard writeChar != nil else {
-            ringLog.error("no write characteristic (98ED0002) — wrong device?")
+            dlog("ble", "no write characteristic (98ED0002) — wrong device?")
             return finishConnect(.failure(BLEError.noWriteCharacteristic))
         }
         guard !notifyChars.isEmpty else {
-            ringLog.error("no notify characteristics (98ED0003..0006)")
+            dlog("ble", "no notify characteristics (98ED0003..0006)")
             return finishConnect(.failure(BLEError.notFound))
         }
         // don't report "connected" until every notify subscription is confirmed —
         // otherwise Rust can start syncing before inbound frames flow and miss the
         // ring's early responses. didUpdateNotificationStateFor finishes the connect.
-        lock.lock(); pendingNotify = notifyChars.count; lock.unlock()
+        lock.lock()
+        pendingNotify = notifyChars.count
+        stage = "subscribing to notify characteristics"
+        lock.unlock()
         for c in notifyChars { peripheral.setNotifyValue(true, for: c) }
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic,
                     error: Error?) {
-        if let error { return finishConnect(.failure(error)) }
+        if let error {
+            // a pairing/encryption demand surfaces here (e.g. "Authentication is
+            // insufficient") — the single most diagnostic error on a keyed ring.
+            dlog("ble", "subscribe FAILED on …\(characteristic.uuid.uuidString.suffix(4).lowercased()): \(error)")
+            return finishConnect(.failure(error))
+        }
+        dlog("ble", "subscribed …\(characteristic.uuid.uuidString.suffix(4).lowercased())")
         lock.lock(); pendingNotify -= 1; let ready = pendingNotify <= 0; lock.unlock()
         if ready {
-            ringLog.info("all notify subscriptions confirmed — BLE link ready, handing to Rust auth")
+            dlog("ble", "all notify subscriptions confirmed — BLE link ready, handing to Rust auth")
             finishConnect(.success(()))
         }
     }
@@ -226,17 +338,17 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
         // drop the callback on a read/notify error — a stale payload must not be fed
         // into the frame stream Rust drains as protocol responses.
         guard error == nil, let v = characteristic.value else {
-            if let error { ringLog.error("notify error on \(characteristic.uuid): \(String(describing: error))") }
+            if let error { dlog("ble", "notify ERROR on \(characteristic.uuid): \(error)") }
             return
         }
-        ringLog.debug("← notif \(v.count)B [\(characteristic.uuid.uuidString.suffix(4))]: \(v.hexString)")
+        dlog("recv", "\(v.count)B [\(characteristic.uuid.uuidString.suffix(4).lowercased())] \(v.hexString)")
         notifyContinuation?.yield(v)
     }
 
     /// GATT write-with-response acknowledgement (or error) for the in-flight `write`.
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic,
                     error: Error?) {
-        if let error { ringLog.error("write NAK: \(String(describing: error))") }
+        if let error { dlog("ble", "write NAK: \(error)") }
         finishWrite(error.map { .failure($0) } ?? .success(()))
     }
 

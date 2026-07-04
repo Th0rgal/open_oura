@@ -120,13 +120,17 @@ struct SyncView: View {
     let onSynced: () -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var key = Keychain.loadKey() ?? ""
+    @ObservedObject private var diag = RingDiag.shared
+    @State private var copied = false
     var body: some View {
         NavigationStack {
             ZStack {
                 Obs.canvas.ignoresSafeArea()
                 VStack(alignment: .leading, spacing: 18) {
                     Text("Pair your ring").font(Obs.prose(20, .semibold)).foregroundStyle(Obs.ink)
-                    Text("Wear the ring (off the charger), then paste the auth key you exported on your computer.")
+                    // the ring advertises reliably only ON its charger, and its single
+                    // BLE link is usually held by any phone running the official app.
+                    Text("Put the ring on its charger next to this iPhone, turn off Bluetooth on any phone with the official Oura app, then paste the auth key you exported on your computer.")
                         .font(Obs.mono(12)).foregroundStyle(Obs.ink2).fixedSize(horizontal: false, vertical: true)
                     TextField("32-hex auth key", text: $key)
                         .font(Obs.mono(13)).foregroundStyle(Obs.ink)
@@ -152,6 +156,34 @@ struct SyncView: View {
                         Text(ring.status).font(Obs.mono(12))
                             .foregroundStyle(ring.lastReport != nil ? Obs.teal : Obs.ink2)
                             .fixedSize(horizontal: false, vertical: true)
+                    }
+                    // live connect/auth/sync transcript — "copy logs" puts the FULL
+                    // transcript (RingDiag.dump) on the pasteboard for a bug report.
+                    if diag.totalLines > 0 {
+                        HStack {
+                            Text("diagnostics · \(diag.totalLines) lines")
+                                .font(Obs.mono(11)).foregroundStyle(Obs.ink2)
+                            Spacer()
+                            Button(copied ? "copied ✓" : "copy logs") {
+                                UIPasteboard.general.string = RingDiag.shared.dump()
+                                copied = true
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { copied = false }
+                            }
+                            .font(Obs.mono(11, .medium)).foregroundStyle(Obs.teal)
+                        }
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 2) {
+                                ForEach(Array(diag.tail.enumerated()), id: \.offset) { _, line in
+                                    Text(line).font(Obs.mono(9)).foregroundStyle(Obs.ink2)
+                                        .lineLimit(3)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                            }
+                            .padding(8)
+                        }
+                        .defaultScrollAnchor(.bottom)
+                        .frame(maxHeight: 220)
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Obs.trace, lineWidth: 0.8))
                     }
                     Spacer()
                 }
