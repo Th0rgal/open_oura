@@ -345,8 +345,11 @@ final class OuraRing: NSObject, ObservableObject {
     /// random 16-byte key, install it with `SetAuthKey`, store it in the Keychain,
     /// then authenticate. No key typing — pairing *creates* the key.
     func pairNewRing() async {
-        if writeChar == nil { connect(); await waitUntilReady() }
-        guard writeChar != nil else {
+        if writeChar == nil || !notifyReady {
+            if writeChar == nil { connect() }
+            await waitUntilReady()
+        }
+        guard writeChar != nil, notifyReady else {
             dbg("pairNewRing: link never became ready")
             failConnect("Couldn't connect", "Couldn't connect to the ring. Keep it close and make sure it isn't connected elsewhere, then try again.")
             return
