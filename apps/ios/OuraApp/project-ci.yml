@@ -38,6 +38,7 @@ targets:
       - path: Core.swift
       - path: Components.swift
       - path: Theme.swift
+      - path: Reports.swift
       - path: BLETransport.swift
       - path: RingSync.swift
       - path: ../generated/oura_core.swift

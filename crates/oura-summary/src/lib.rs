@@ -225,6 +225,7 @@ fn nightly_skin_temp(temps_c: &[f64]) -> Option<f64> {
 struct Night {
     start_ds: i64,
     end_ds: i64,
+    epoch_idx: usize,
     rmssd: Vec<f64>,
     hr: Vec<f64>,
     temp: Vec<f64>,
@@ -281,8 +282,16 @@ fn autonomic_by_stage(
             e.3 += 1;
         }
     }
-    let hrv = |c: i64| acc.get(&c).filter(|e| e.1 > 0).map(|e| (e.0 / e.1 as f64).round());
-    let hr = |c: i64| acc.get(&c).filter(|e| e.3 > 0).map(|e| (e.2 / e.3 as f64).round());
+    let hrv = |c: i64| {
+        acc.get(&c)
+            .filter(|e| e.1 > 0)
+            .map(|e| (e.0 / e.1 as f64).round())
+    };
+    let hr = |c: i64| {
+        acc.get(&c)
+            .filter(|e| e.3 > 0)
+            .map(|e| (e.2 / e.3 as f64).round())
+    };
     json!({
         "hrv_deep": hrv(1), "hrv_light": hrv(2), "hrv_rem": hrv(3),
         "hr_deep":  hr(1),  "hr_light":  hr(2),  "hr_rem":  hr(3),
@@ -476,7 +485,9 @@ fn smooth_stages(vals: &[i64], win: usize) -> Vec<i64> {
                     counts[s as usize] += 1;
                 }
             }
-            (1..=4).max_by_key(|&k| counts[k as usize]).unwrap_or(vals[i]) as i64
+            (1..=4)
+                .max_by_key(|&k| counts[k as usize])
+                .unwrap_or(vals[i]) as i64
         })
         .collect()
 }
@@ -590,50 +601,53 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
     // A real reboot drops ds by millions; 6 h of slack absorbs minor out-of-order
     // framing within an epoch without ever splitting one.
     const EPOCH_RESET_SLACK_DS: i64 = 6 * 3600 * 10;
-    let mut order: Vec<(i64, i64)> = events.iter().map(|(ds, _, _, cu)| (*cu, *ds)).collect();
+    let mut order: Vec<(i64, i64, usize)> = events
+        .iter()
+        .enumerate()
+        .map(|(idx, (ds, _, _, cu))| (*cu, *ds, idx))
+        .collect();
     order.sort_unstable();
     let mut epochs: Vec<Epoch> = Vec::new();
-    for (cu, ds) in order {
-        match epochs.last_mut() {
-            Some(e) if ds >= e.max_ds - EPOCH_RESET_SLACK_DS => {
+    let mut event_epochs = vec![0usize; events.len()];
+    for (cu, ds, event_idx) in order {
+        if let Some(epoch_idx) = epochs.len().checked_sub(1) {
+            let e = &mut epochs[epoch_idx];
+            if ds >= e.max_ds - EPOCH_RESET_SLACK_DS {
+                event_epochs[event_idx] = epoch_idx;
                 if ds >= e.max_ds {
                     e.max_ds = ds;
                     e.anchor_unix = cu;
                 }
                 e.min_ds = e.min_ds.min(ds);
+                continue;
             }
-            _ => epochs.push(Epoch {
-                min_ds: ds,
-                max_ds: ds,
-                anchor_unix: cu,
-            }),
         }
+        event_epochs[event_idx] = epochs.len();
+        epochs.push(Epoch {
+            min_ds: ds,
+            max_ds: ds,
+            anchor_unix: cu,
+        });
     }
-    // Map a raw ds to wall-clock seconds via the epoch it belongs to. Epochs are usually
-    // disjoint in ds (a fresh boot starts near 0); if ranges overlap, prefer the
-    // narrowest epoch containing ds, falling back to the newest epoch.
-    let unix_s = |ds: i64| -> f64 {
-        let e = epochs
-            .iter()
-            .filter(|e| {
-                ds >= e.min_ds - EPOCH_RESET_SLACK_DS && ds <= e.max_ds + EPOCH_RESET_SLACK_DS
-            })
-            .min_by_key(|e| e.max_ds - e.min_ds)
-            .unwrap_or_else(|| epochs.last().expect("events is non-empty"));
+    // Map raw ds to wall-clock seconds via the event's assigned boot epoch. Raw ds values
+    // can overlap after a ring reboot, so choosing an epoch from ds alone is ambiguous.
+    let unix_in_epoch = |ds: i64, epoch_idx: usize| -> f64 {
+        let e = &epochs[epoch_idx];
         e.anchor_unix as f64 - (e.max_ds - ds) as f64 / 10.0
     };
     // Newest epoch's capture time — a wall-clock "now" reference and fallback anchor.
     let anchor_unix = epochs.iter().map(|e| e.anchor_unix).max().unwrap();
 
-    let mut beds: Vec<(i64, i64)> = Vec::new();
+    let mut beds: Vec<(i64, i64, usize)> = Vec::new();
     let mut present_recent = std::collections::HashSet::new();
     // "recent" = within 10 days of the newest data, measured in wall-clock so it never
     // sweeps in an older epoch that happens to share a high raw ds.
     let recent_cut_unix = anchor_unix as f64 - 10.0 * 86_400.0;
     let name_of = |tag: u8| oura_protocol::events::event_name(tag);
-    for (ds, tag, jstr, _) in &events {
+    for (event_idx, (ds, tag, jstr, _)) in events.iter().enumerate() {
+        let epoch_idx = event_epochs[event_idx];
         let n = name_of(*tag);
-        if unix_s(*ds) >= recent_cut_unix {
+        if unix_in_epoch(*ds, epoch_idx) >= recent_cut_unix {
             present_recent.insert(n);
         }
         if n == "bedtime_period" {
@@ -641,31 +655,36 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
                 if let (Some(s), Some(e)) =
                     (v["bedtime_start_ds"].as_i64(), v["bedtime_end_ds"].as_i64())
                 {
-                    match beds.iter_mut().find(|(bs, _)| *bs == s) {
+                    match beds
+                        .iter_mut()
+                        .find(|(bs, _, b_epoch_idx)| *bs == s && *b_epoch_idx == epoch_idx)
+                    {
                         Some(b) => b.1 = b.1.max(e),
-                        None => beds.push((s, e)),
+                        None => beds.push((s, e, epoch_idx)),
                     }
                 }
             }
         }
     }
-    beds.sort_by(|a, b| unix_s(a.0).total_cmp(&unix_s(b.0)));
+    beds.sort_by(|a, b| unix_in_epoch(a.0, a.2).total_cmp(&unix_in_epoch(b.0, b.2)));
 
     let mut nights: Vec<Night> = beds
         .iter()
-        .map(|&(s, e)| Night {
+        .map(|&(s, e, epoch_idx)| Night {
             start_ds: s,
             end_ds: e,
+            epoch_idx,
             ..Default::default()
         })
         .collect();
-    let find_night = |ds: i64, nights: &[Night]| {
-        nights
-            .iter()
-            .position(|nt| nt.start_ds - 600 <= ds && ds <= nt.end_ds + 600)
+    let find_night = |ds: i64, epoch_idx: usize, nights: &[Night]| {
+        nights.iter().position(|nt| {
+            nt.epoch_idx == epoch_idx && nt.start_ds - 600 <= ds && ds <= nt.end_ds + 600
+        })
     };
-    for (ds, tag, jstr, _) in &events {
-        let Some(idx) = find_night(*ds, &nights) else {
+    for (event_idx, (ds, tag, jstr, _)) in events.iter().enumerate() {
+        let epoch_idx = event_epochs[event_idx];
+        let Some(idx) = find_night(*ds, epoch_idx, &nights) else {
             continue;
         };
         let n = name_of(*tag);
@@ -782,13 +801,16 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         let in_bed_s = (nt.end_ds - nt.start_ds) as f64 / 10.0;
         let (metrics, asleep_s) = sleep_metrics(&full_stages, in_bed_s);
         asleep_by_night.push(asleep_s);
-        let autonomic = autonomic_by_stage(&nt.hrv_t, &nt.hr_t, &full_stages, nt.start_ds, nt.end_ds);
+        let autonomic =
+            autonomic_by_stage(&nt.hrv_t, &nt.hr_t, &full_stages, nt.start_ds, nt.end_ds);
+        let start_unix = unix_in_epoch(nt.start_ds, nt.epoch_idx);
+        let end_unix = unix_in_epoch(nt.end_ds, nt.epoch_idx);
         nights_json.push(json!({
-            "date": date_label(unix_s(nt.start_ds), tz),
-            "ymd": ymd_label(unix_s(nt.start_ds), tz),
+            "date": date_label(start_unix, tz),
+            "ymd": ymd_label(start_unix, tz),
             "start_ds": nt.start_ds, // exact bedtime key for on-device model injection
-            "start": hm(unix_s(nt.start_ds), tz),
-            "end": hm(unix_s(nt.end_ds), tz),
+            "start": hm(start_unix, tz),
+            "end": hm(end_unix, tz),
             "in_bed_h": ((nt.end_ds - nt.start_ds) as f64 / 10.0 / 3600.0 * 10.0).round() / 10.0,
             "hrv_ms": mean(&nt.rmssd).map(|x| x.round()),
             "rhr": nt.hr.iter().cloned().fold(f64::INFINITY, f64::min).is_finite().then(|| nt.hr.iter().cloned().fold(f64::INFINITY, f64::min).round()),
@@ -854,8 +876,9 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
     };
     let bmr_kcal_day = oura_analysis::ported::metabolic::bmr_schofield(demo.age, sex_code, weight);
     // Anthropometric VO2max (Jackson non-exercise estimate), ecore's own formula.
-    let vo2max = oura_analysis::ported::metabolic::vo2max_jackson(demo.age, demo.sex == 'F', weight);
-    for (ds, tag, jstr, _) in &events {
+    let vo2max =
+        oura_analysis::ported::metabolic::vo2max_jackson(demo.age, demo.sex == 'F', weight);
+    for (event_idx, (ds, tag, jstr, _)) in events.iter().enumerate() {
         if name_of(*tag) != "activity_information" || !jstr.contains("\"met\"") {
             continue;
         }
@@ -863,7 +886,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
             if let Some(met) = v["met"].as_array() {
                 for (i, m) in met.iter().enumerate() {
                     let mv = m.as_f64().unwrap_or(1.0);
-                    let unix = unix_s(*ds) + i as f64 * 60.0;
+                    let unix = unix_in_epoch(*ds, event_epochs[event_idx]) + i as f64 * 60.0;
                     let local = unix + tz as f64 * 3600.0;
                     let day_idx = (local / 86400.0).floor() as i64;
                     let (y, mo, dd) = civil(day_idx);
