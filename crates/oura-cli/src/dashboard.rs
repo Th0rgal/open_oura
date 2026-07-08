@@ -405,6 +405,8 @@ async fn handle(
             | ("POST", "/api/ring-key")
             | ("GET", "/api/ring-key")
             | ("POST", "/api/dna/fetch")
+            | ("POST", "/api/blood/import-dir")
+            | ("POST", "/api/blood/import")
     ) && !csrf_ok;
     if forbid {
         return write_resp(&mut sock, "403 Forbidden", "text/plain", b"forbidden").await;
@@ -494,6 +496,21 @@ async fn handle(
         }
         ("GET", "/api/blood/report") => {
             let v = tokio::task::spawn_blocking(crate::blood::report)
+                .await
+                .map_err(|e| anyhow!(e))?;
+            json_resp(&mut sock, &v).await
+        }
+        ("POST", "/api/blood/import-dir") => {
+            let v = tokio::task::spawn_blocking(crate::blood::import_dir)
+                .await
+                .map_err(|e| anyhow!(e))?;
+            json_resp(&mut sock, &v).await
+        }
+        ("POST", "/api/blood/import") => {
+            let req =
+                serde_json::from_str::<Value>(body.trim_end_matches('\0')).unwrap_or(Value::Null);
+            let path = req["path"].as_str().unwrap_or("").to_string();
+            let v = tokio::task::spawn_blocking(move || crate::blood::import_path(&path))
                 .await
                 .map_err(|e| anyhow!(e))?;
             json_resp(&mut sock, &v).await

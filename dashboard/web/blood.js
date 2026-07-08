@@ -1,5 +1,5 @@
-// open_oura blood panel — fetches /api/blood/report (Rust computes status/trend/flags
-// from a mocked-but-real panel) and renders it: reference-range trends per marker, the
+// open_oura blood panel - fetches /api/blood/report (Rust computes status/trend/flags
+// from imported local PDF rows) and renders reference-range trends per marker, the
 // markers worth attention, and a per-marker detail chart. Web-only; see docs.
 "use strict";
 
@@ -40,7 +40,11 @@ const clear = (node) => { node.replaceChildren(); return node; };
 const KIND = { watch: "warn", good: "ok", neutral: "neutral" };
 const pill = (label, kind) => h("span", { class: `pill ${kind}` }, h("i"), label);
 const signed = (n) => (n >= 0 ? "+" : "") + n;
-const fmtDate = (iso) => { const [y, m, d] = iso.split("-"); return `${d}/${m}/${y.slice(2)}`; };
+const fmtDate = (iso) => {
+  if (!iso || iso === "unknown") return "unknown";
+  const [y, m, d] = iso.split("-");
+  return `${d}/${m}/${y.slice(2)}`;
+};
 const fmtSize = (b) => (b >= 1e6 ? (b / 1e6).toFixed(1) + " MB" : (b / 1e3).toFixed(0) + " KB");
 
 // ── monotone-cubic path (ported from the main dashboard's app.js) ─────────────
@@ -93,15 +97,20 @@ let REPORT = null;
 async function boot() {
   $("import-btn").addEventListener("click", onImportClick);
   $("marker-dialog").addEventListener("click", (e) => { if (e.target.id === "marker-dialog") $("marker-dialog").close(); });
+  await loadReport();
+}
+
+async function loadReport() {
   try {
     const d = await (await fetch("/api/blood/report", { headers: { "X-Oura-Dash": "1" } })).json();
     REPORT = d;
     if (d.error) { showError(d.error); return; }
+    $("source-tag").textContent = d.mocked ? "sample panel" : `${d.source || "pdf"} · ${d.summary.imports} reports`;
     renderSummary(d.summary);
     renderImports(d.imports);
     renderAttention(d.markers);
     renderPanels(d.panels, d.markers);
-    $("foot-meta").textContent = `${d.summary.markers_total} markers · ${d.summary.imports} reports · ${fmtDate(d.summary.first_date)}–${fmtDate(d.summary.latest_date)}`;
+    $("foot-meta").textContent = `${d.summary.markers_total} markers · ${d.summary.imports} reports · ${fmtDate(d.summary.first_date)}-${fmtDate(d.summary.latest_date)}`;
   } catch (e) {
     showError("Couldn't reach the blood API.");
   }
@@ -113,9 +122,28 @@ function showError(msg) {
   clear($("summary"));
 }
 
-function onImportClick() {
-  $("import-hint").textContent =
-    "Preview: this panel is bundled. Once wired up, import parses the lab PDF locally, skips duplicates by content hash, and caches to a local blood.db — separate from the ring's oura.db.";
+async function onImportClick() {
+  const btn = $("import-btn");
+  btn.disabled = true;
+  $("import-hint").textContent = "Scanning configured folder for blood PDFs...";
+  try {
+    const res = await fetch("/api/blood/import-dir", {
+      method: "POST",
+      headers: { "X-Oura-Dash": "1", "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const d = await res.json();
+    if (!d.ok && d.message) {
+      $("import-hint").textContent = d.message;
+    } else {
+      $("import-hint").textContent = `${d.imported} imported · ${d.duplicates} duplicates · ${d.failed} failed`;
+      await loadReport();
+    }
+  } catch (e) {
+    $("import-hint").textContent = "Import failed.";
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // ── summary strip ─────────────────────────────────────────────────────────────
@@ -139,7 +167,8 @@ function renderImports(imports) {
       h("span", { class: "ic", style: "--i:url(/icons/test-tube.svg)" }),
       h("span", { class: "bl-imp-name" }, im.file),
       h("span", { class: "bl-imp-date" }, fmtDate(im.date)),
-      h("span", { class: "bl-imp-meta" }, `${im.markers} markers · ${fmtSize(im.size)}`)));
+      h("span", { class: "bl-imp-meta" }, `${im.markers} markers · ${im.lab || "lab"} · ${im.status || "ok"} · ${fmtSize(im.size)}`),
+      ...(im.warnings && im.warnings.length ? [h("span", { class: "bl-imp-warn" }, im.warnings.join("; "))] : []))));
   });
 }
 

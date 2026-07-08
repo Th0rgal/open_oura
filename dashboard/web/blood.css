@@ -38,7 +38,7 @@
 /* imported-files list */
 .bl-imports { display: flex; flex-direction: column; }
 .bl-imp {
-  display: grid; grid-template-columns: 18px 1fr auto auto; gap: 12px; align-items: center;
+  display: grid; grid-template-columns: 18px 1fr auto auto; gap: 8px 12px; align-items: center;
   padding: 9px 2px; border-top: 1px solid var(--line-soft);
   font-variant-numeric: tabular-nums;
 }
@@ -47,6 +47,7 @@
 .bl-imp-name { font: 500 13px/1.2 var(--sans); }
 .bl-imp-date { font: 400 12px/1 var(--mono); color: var(--muted); }
 .bl-imp-meta { font: 400 11px/1 var(--mono); color: var(--faint); }
+.bl-imp-warn { grid-column: 2 / -1; font: 400 11px/1.35 var(--sans); color: var(--warn); }
 .bl-imp.latest .bl-imp-name::after {
   content: "latest"; margin-left: 8px; font: 600 9px/1 var(--sans); letter-spacing: 0.06em; text-transform: uppercase;
   color: var(--accent); background: var(--accent-soft); padding: 3px 5px; border-radius: 4px; vertical-align: 1px;

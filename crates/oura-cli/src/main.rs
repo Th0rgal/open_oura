@@ -217,6 +217,11 @@ enum Command {
         /// `dna/files/`; also settable via `$OURA_DNA_FILES`.
         #[arg(long, value_name = "DIR")]
         dna_files: Option<PathBuf>,
+        /// Directory to scan for local blood report PDFs named `blood *.pdf`.
+        /// Defaults to `~/Documents/official/health` when present; also settable
+        /// via `$OURA_BLOOD_FILES`.
+        #[arg(long, value_name = "DIR")]
+        blood_files: Option<PathBuf>,
     },
 }
 
@@ -375,6 +380,7 @@ async fn main() -> Result<()> {
             height,
             weight,
             dna_files,
+            blood_files,
         } => {
             let seed = dashboard::Demographics {
                 sex: sex.chars().next().unwrap_or('M').to_ascii_uppercase(),
@@ -385,6 +391,8 @@ async fn main() -> Result<()> {
             };
             // where the /dna explorer reads genome files from (flag → env → repo default)
             dna::set_genomes_dir(dna_files.clone());
+            // where the /blood explorer reads and caches local lab PDFs
+            blood::set_files_dir(blood_files.clone());
             dashboard::serve(
                 *port,
                 cli.db.clone(),

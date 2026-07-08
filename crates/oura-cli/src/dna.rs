@@ -435,3 +435,31 @@ fn resolve_genome(file: &str) -> Result<(PathBuf, String)> {
     }
     Ok((vcf, name))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn real_configured_dir_prefers_snp_indel_vcf_when_present() {
+        let dir = PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+            .join("Documents/official/health/dna/files");
+        if !dir.exists() {
+            return;
+        }
+        set_genomes_dir(Some(dir.clone()));
+        let v = list_files();
+        assert_eq!(
+            v["genomes_dir"].as_str(),
+            Some(dir.display().to_string()).as_deref()
+        );
+        let genomes = v["genomes"].as_array().expect("genomes array");
+        assert!(genomes
+            .iter()
+            .any(|g| g["kind"] == "snp-indel" && g["scoreable"] == true));
+        assert_eq!(
+            genomes.first().and_then(|g| g["kind"].as_str()),
+            Some("snp-indel")
+        );
+    }
+}
