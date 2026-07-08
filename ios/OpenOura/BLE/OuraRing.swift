@@ -256,19 +256,20 @@ final class OuraRing: NSObject, ObservableObject {
     }
 
     /// One `GetEvent` batch: collect event frames until the `0x11` summary or timeout.
-    private func getEventBatch(start: UInt32, timeout: TimeInterval) async -> (events: [Packet], bytesLeft: UInt32, maxTs: UInt32) {
+    private func getEventBatch(start: UInt32, timeout: TimeInterval) async -> (events: [Packet], bytesLeft: UInt32, maxTs: UInt32, gotSummary: Bool) {
         await withCheckedContinuation { cont in
             bleQueue.async {
                 var evs: [Packet] = []
                 var maxTs = start
                 var bytesLeft: UInt32 = 0
+                var gotSummary = false
                 let id = UUID()
                 var done = false
                 let timer = DispatchSource.makeTimerSource(queue: self.bleQueue)
                 func finish() {
                     if done { return }; done = true
                     self.listeners.removeValue(forKey: id); timer.cancel()
-                    cont.resume(returning: (evs, bytesLeft, maxTs))
+                    cont.resume(returning: (evs, bytesLeft, maxTs, gotSummary))
                 }
                 timer.schedule(deadline: .now() + timeout)
                 timer.setEventHandler(handler: finish)
@@ -276,6 +277,7 @@ final class OuraRing: NSObject, ObservableObject {
                 self.listeners[id] = { data in
                     guard let p = Packet.parse(data) else { return }
                     if p.tag == 0x11 {
+                        gotSummary = true
                         if p.payload.count >= 6 {
                             bytesLeft = UInt32(p.payload[2]) | UInt32(p.payload[3]) << 8
                                       | UInt32(p.payload[4]) << 16 | UInt32(p.payload[5]) << 24
@@ -302,6 +304,10 @@ final class OuraRing: NSObject, ObservableObject {
         var start = cursor
         for _ in 0..<10_000 {
             let batch = await getEventBatch(start: start, timeout: 1.5)
+            guard batch.gotSummary else {
+                dbg("GetEvent timed out before summary at cursor \(start)")
+                break
+            }
             for p in batch.events {
                 guard p.payload.count >= 4 else { continue }
                 let ts = UInt32(p.payload[0]) | UInt32(p.payload[1]) << 8
@@ -683,7 +689,14 @@ final class OuraRing: NSObject, ObservableObject {
     func factoryReset() async {
         guard state == .ready else { return }
         dbg("factory reset requested")
-        _ = await requestUntil(Req.factoryReset, tag: 0x1b, ext: nil, timeout: 2.0)
+        guard let resp = await requestUntil(Req.factoryReset, tag: 0x1b, ext: nil, timeout: 2.0),
+              resp.payload.first == 0x00 else {
+            publish {
+                self.state = .failed("Factory reset uncertain")
+                self.status = "Factory reset uncertain - reconnect before clearing local state"
+            }
+            return
+        }
         KeyStore.clear()
         UserDefaults.standard.removeObject(forKey: "ringPeripheralID")
         UserDefaults.standard.removeObject(forKey: "syncCursor")
