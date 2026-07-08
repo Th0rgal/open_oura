@@ -1,4 +1,0 @@
-module oura_coreFFI {
-    header "oura_coreFFI.h"
-    export *
-}

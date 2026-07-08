@@ -28,8 +28,7 @@ crate owns one job and depends only "downward".
                 │              readings, daily metrics, cursor    │
                 └────────────────────────────────────────────────┘
 
-   oura-cli  orchestrates: fetch → store(raw) → decode → analyse → store(metrics)
-             + the viz / game web UIs (motion_server)
+   oura-cli  orchestrates protocol/debug flows: fetch → store(raw) → decode
 ```
 
 ## Crates and what goes where
@@ -40,7 +39,7 @@ crate owns one job and depends only "downward".
 | `oura-link` | fetch | `Transport` trait, `btleplug` `BleTransport`, `OuraClient` (firmware/battery/auth/sync/live/features/rdata) | oura-protocol | BLE, async |
 | `oura-analysis` | interpret (compute) | ecore-derived metric algorithms; daily-metric structs; `sleepnet` model wrapper (feature-gated) | oura-protocol | none (pure compute) |
 | `oura-store` | apply | SQLite schema + read/write, sync cursor, `redecode` | oura-protocol | SQLite |
-| `oura-cli` | wiring | command dispatch, the viz/game servers | all of the above | everything |
+| `oura-cli` | wiring | protocol/debug command dispatch | all of the above | BLE, SQLite |
 
 **Where to add things**
 - A new **wire decoder** (new event body) → `oura-protocol::events::decode_body`
@@ -50,7 +49,9 @@ crate owns one job and depends only "downward".
 - A new **metric/algorithm** (score, sleep, baseline…) → a module in
   `oura-analysis`, with a doc under `docs/algorithms/` (see below).
 - A new **persisted table / query** → `oura-store::storage`.
-- A new **command or UI** → `oura-cli`.
+- A new **protocol/debug command** → `oura-cli`.
+- Product UI, dashboard APIs, DNA/blood, and iOS app work live in
+  [`open_health`](https://github.com/Th0rgal/open_health).
 
 ## Errors
 

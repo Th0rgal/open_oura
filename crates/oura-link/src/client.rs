@@ -185,7 +185,8 @@ impl<T: Transport> OuraClient<T> {
 
     /// Request that completes when an extended (`0x2f`) packet with `ext` arrives.
     async fn request_ext(&self, bytes: &[u8], ext: u8) -> Result<Vec<Packet>> {
-        self.request_until(bytes, |p| p.ext_tag() == Some(ext)).await
+        self.request_until(bytes, |p| p.ext_tag() == Some(ext))
+            .await
     }
 
     /// Event-batch request: terminates on `terminal` like [`Self::request_until`],
@@ -250,7 +251,9 @@ impl<T: Transport> OuraClient<T> {
     pub async fn capabilities(&self) -> Result<Vec<Capability>> {
         let mut caps = Vec::new();
         for page in 0u8..2 {
-            let packets = self.request_ext(&protocol::req_capabilities(page), 0x02).await?;
+            let packets = self
+                .request_ext(&protocol::req_capabilities(page), 0x02)
+                .await?;
             if let Some(p) = packets.iter().find(|p| p.ext_tag() == Some(0x02)) {
                 caps.extend(device::parse_capabilities(p));
             }
@@ -448,22 +451,15 @@ impl<T: Transport> OuraClient<T> {
         // ext 0x42) — the same terminator the official app waits for. An ext
         // status packet (payload[0]=0x00, "unsupported") also ends the request.
         let batch_terminal = |p: &Packet| {
-            p.tag == 0x11
-                || (p.tag == 0x2f && matches!(p.payload.first(), Some(0x42) | Some(0x00)))
+            p.tag == 0x11 || (p.tag == 0x2f && matches!(p.payload.first(), Some(0x42) | Some(0x00)))
         };
         // Safety bound against a misbehaving ring that never reports drained.
         for _ in 0..100_000 {
-            let mut packets = self
-                .request_tag(&protocol::req_data_flush(), 0x29)
-                .await?;
+            let mut packets = self.request_tag(&protocol::req_data_flush(), 0x29).await?;
             if use_extended {
                 let ext = self
                     .request_batch(
-                        &protocol::req_ext_get_event(
-                            (start as u64) * 100,
-                            EXT_BATCH_MAX_EVENTS,
-                            0,
-                        ),
+                        &protocol::req_ext_get_event((start as u64) * 100, EXT_BATCH_MAX_EVENTS, 0),
                         batch_terminal,
                     )
                     .await?;
@@ -473,8 +469,11 @@ impl<T: Transport> OuraClient<T> {
                 if unsupported {
                     use_extended = false;
                     packets.extend(
-                        self.request_batch(&protocol::req_get_event(start, 255, -1), batch_terminal)
-                            .await?,
+                        self.request_batch(
+                            &protocol::req_get_event(start, 255, -1),
+                            batch_terminal,
+                        )
+                        .await?,
                     );
                 } else {
                     packets.extend(ext);

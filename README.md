@@ -1,7 +1,8 @@
 # open_oura
 
-Reverse-engineering the Oura ring BLE protocol, plus an independent, **cloud-free**
-client that reads your data straight from the ring.
+Reverse-engineering the Oura ring BLE protocol, plus reusable Rust libraries and
+a small independent, **cloud-free** client that reads your data straight from the
+ring.
 
 Tested live against a Ring 3 Horizon and a Ring 5 (pairing, auth, and event sync
 confirmed on both). Designed for Ring 3/4/5, which share the same GATT layout,
@@ -37,6 +38,13 @@ offline. The one genuine cloud-only step is **workout auto-classification**
 - **`reverse/`, `captures/`**: local-only, gitignored. The decompiled app and raw
   captures (which may contain serials, MACs, and auth keys).
 
+## App layer
+
+The web dashboard, iOS app, DNA explorer, blood PDF import, and model-running
+product surface now live in
+[`open_health`](https://github.com/Th0rgal/open_health). This repository is the
+Oura protocol/library base that `open_health` consumes.
+
 ## Quick start (Rust client)
 
 ```bash
@@ -46,12 +54,9 @@ cargo build --release
 ```
 
 See [`crates/README.md`](crates/README.md) for all commands (`scan`, `pair`,
-`info`, `sync`, `latest`, `live-hr`, `accel`, `viz`, `game`, `features`, `rdata`,
-`events`, `redecode`, `sleep-analyze`, `sessions`, `dashboard`) and the auth-key
-details. `oura dashboard` serves a local web health dashboard (sleep, cardio,
-SpO2, activity, device) at `http://127.0.0.1:8090` (see [`dashboard/`](dashboard/));
-`oura viz` opens a real-time 3D motion visualizer; `oura game` is a tilt-controlled
-asteroid game driven by the ring.
+`info`, `sync`, `latest`, `live-hr`, `accel`, `features`, `rdata`, `events`,
+`redecode`, `sleep-analyze`, `subscribe`, `feature-mode`, and `feature-status`)
+and the auth-key details.
 
 ## Research bench (Python)
 
@@ -78,8 +83,6 @@ State-changing and destructive commands are hidden behind `--include-state` and
 - [`docs/ring-features.md`](docs/ring-features.md): the feature capabilities, runtime
   modes, what's on by default, and which event each enabled feature produces (incl.
   what `experimental` does — and doesn't).
-- [`docs/model-runners.md`](docs/model-runners.md): running Oura's decrypted on-device
-  models on your synced data — what runs (activity, sleep, CVA, SpO2) vs what's blocked.
 - [`docs/cva-cardiovascular-age.md`](docs/cva-cardiovascular-age.md): decoding the raw
   PPG (`cva_raw_ppg_data` 0x81) and running the cardiovascular-age model.
 - [`docs/spo2-calibration.md`](docs/spo2-calibration.md): turning the SpO2 R-ratio into

@@ -18,7 +18,7 @@ The code is split by concern - **fetch → interpret → apply** (see
   ported from Oura's `ecore` engine (HRV, SpO2, baselines, sleep summary, the
   three scores). See [`docs/algorithms/`](../docs/algorithms/README.md).
 - **`oura-store`** - *apply*: SQLite persistence (raw events, readings, sync cursor).
-- **`oura-cli`** - the `oura` binary wiring it together (+ the `viz`/`game` web UIs).
+- **`oura-cli`** - the protocol/debug `oura` binary wiring it together.
 
 ## Build
 
@@ -68,12 +68,6 @@ oura --key-file key.hex live-hr --seconds 30 [--raw]
 
 # Live accelerometer stream - wave your hand to see motion (ACM real-time)
 oura --key-file key.hex accel --seconds 15
-
-# Real-time 3D motion visualizer (opens a local web UI)
-oura --key-file key.hex viz   # then open http://127.0.0.1:8088
-
-# Tilt-controlled asteroid game driven by the ring (local web UI)
-oura --key-file key.hex game  # then open http://127.0.0.1:8089
 
 # RData bulk sampler control: state (read) / stop / clear (teardown)
 oura --key-file key.hex rdata state
@@ -164,38 +158,6 @@ Both are app-initiated and **power-hungry, so teardown is part of the operation*
   Hz), accelerometer, **gyroscope** (125–2000 dps; never used in normal operation),
   and temperature. **Starting a collection is intentionally not exposed** - see
   limitations.
-
-## Live motion visualizer (`viz`)
-
-`oura viz` serves a self-contained web page (no external scripts - a hand-rolled
-canvas renderer, so no CDN/Subresource-Integrity exposure) at
-`http://127.0.0.1:8088`. It shows the ring's **orientation** in 3D (from the
-gravity vector) and a **motion trajectory**, fed by the live ACM stream over
-Server-Sent Events. The page has:
-
-- **Start / Stop** buttons toggle the ring's BLE stream (`/start` arms ACM for
-  `--minutes`; `/stop` sends realtime-off). To save battery, streaming also stops
-  when you close the tab: the page sends `/stop` on unload, and the server sends
-  realtime-off when the last client disconnects (also on Ctrl-C, with the ring's
-  own duration timer as a final backstop).
-- **Sensitivity settings** (live sliders): smoothing, integration damping,
-  zero-velocity threshold, counts-per-g, and path scale.
-- Drag to orbit the view; Reset clears the path.
-
-**Limitations (by design):** the **gyroscope is not on the live BLE channel** - the
-real-time channel (`0x06`) carries only the accelerometer (gyro is RData-only and
-not real-time). So orientation is accel-derived (**pitch/roll** observable, **yaw
-is not**), and the trajectory is double-integrated linear acceleration, which
-**drifts** - a zero-velocity update and the sensitivity sliders keep it usable, but
-it is a demo, not metric positioning. A true gyro-fused trajectory would require an
-RData *recording* (non-real-time) replayed offline - kept for later.
-
-## Tilt game (`game`)
-
-`oura game` ("Ring Runner") reuses the same self-contained server and live ACM
-stream as a WebGL asteroid-dodging game. It captures a neutral hand pose over 3
-seconds, then steers a ship by ring orientation (decoupled pitch/roll, so the axes
-do not cross-talk). Same start/stop and battery behavior as `viz`.
 
 ## Coverage & limitations
 
