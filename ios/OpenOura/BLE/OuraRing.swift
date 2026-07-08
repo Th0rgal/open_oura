@@ -66,6 +66,7 @@ final class OuraRing: NSObject, ObservableObject {
     private var central: CBCentralManager!
     private var peripheral: CBPeripheral?
     private var writeChar: CBCharacteristic?
+    private var notifyReady = false
     private var pendingConnect = false
     private var connecting = false      // a connect attempt is in flight (bleQueue)
     private var scanTimer: DispatchSourceTimer?
@@ -105,6 +106,20 @@ final class OuraRing: NSObject, ObservableObject {
     private func writeRaw(_ data: Data) {
         guard let p = peripheral, let c = writeChar else { return }
         p.writeValue(data, for: c, type: .withResponse)
+    }
+
+    private func finishReadyIfPossible() {
+        guard writeChar != nil, notifyReady else { return }
+        dbg("link ready (write characteristic + notifications)")
+        connecting = false
+        scanTimer?.cancel(); connectTimer?.cancel(); readyTimer?.cancel()
+        if let c = readyContinuation {
+            // A manual authenticateAndLoad() is awaiting — let it drive auth.
+            readyContinuation = nil; c.resume()
+        } else {
+            // Auto-reconnect / restoration path: authenticate + incremental sync.
+            Task { if await self.runAuth(), self.autoSync { await self.autoSyncIncremental() } }
+        }
     }
 
     // MARK: - Connect / scan
@@ -182,12 +197,12 @@ final class OuraRing: NSObject, ObservableObject {
         publish { self.state = .idle; self.status = "Disconnected" }
     }
 
-    /// Suspend until the link is ready (write characteristic discovered), or until
+    /// Suspend until the link is ready (write characteristic + notifications), or until
     /// `timeout` elapses (so a failed scan/connect never hangs the caller).
     private func waitUntilReady(timeout: TimeInterval = 20) async {
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
             bleQueue.async {
-                if self.writeChar != nil { c.resume(); return }
+                if self.writeChar != nil && self.notifyReady { c.resume(); return }
                 self.readyContinuation = c
                 let t = DispatchSource.makeTimerSource(queue: self.bleQueue)
                 t.schedule(deadline: .now() + timeout)
@@ -298,15 +313,15 @@ final class OuraRing: NSObject, ObservableObject {
     }
 
     /// Stream-safe incremental drain from `cursor`; calls `onEvent` per event.
-    /// Returns the next cursor. Safe to run while the accelerometer streams.
+    /// Returns the next cursor plus whether the drain completed without timeout.
     @discardableResult
-    private func drainEventsLive(cursor: UInt32, onEvent: (DecodedEvent) -> Void) async -> UInt32 {
+    private func drainEventsLive(cursor: UInt32, onEvent: (DecodedEvent) -> Void) async -> (cursor: UInt32, complete: Bool) {
         var start = cursor
         for _ in 0..<10_000 {
             let batch = await getEventBatch(start: start, timeout: 1.5)
             guard batch.gotSummary else {
                 dbg("GetEvent timed out before summary at cursor \(start)")
-                break
+                return (start, false)
             }
             for p in batch.events {
                 guard p.payload.count >= 4 else { continue }
@@ -321,7 +336,7 @@ final class OuraRing: NSObject, ObservableObject {
             if progressed { start = next }
             if batch.bytesLeft == 0 || !progressed { break }
         }
-        return start
+        return (start, true)
     }
 
     // MARK: - High-level flows
@@ -515,8 +530,8 @@ final class OuraRing: NSObject, ObservableObject {
         } else {
             dbg("live: no feature-status response")
         }
-        var cursor = await drainEventsLive(cursor: 0) { _ in }   // baseline
-        dbg("live: baseline cursor=\(cursor)")
+        var cursor = UInt32(truncatingIfNeeded: UserDefaults.standard.integer(forKey: "syncCursor"))
+        dbg("live: starting cursor=\(cursor)")
         installLiveACMListener()
         await sendAndWait(Req.setRealtime(bitmask: Realtime.acm, minutes: 5, delay: 0))
         dbg("live: ACM armed; entering poll loop")
@@ -528,10 +543,11 @@ final class OuraRing: NSObject, ObservableObject {
                 dbg("live: ACM re-armed")
             }
             var n = 0, hr80 = 0
-            cursor = await drainEventsLive(cursor: cursor) { [weak self] ev in
+            let drain = await drainEventsLive(cursor: cursor) { [weak self] ev in
                 n += 1; if ev.tag == 0x80 { hr80 += 1 }
                 self?.handleLiveEvent(ev)
             }
+            cursor = drain.cursor
             dbg("live: tick \(tick) drained \(n) events (\(hr80)×0x80) cursor=\(cursor)")
             if tick % 6 == 0 { await readBattery() }
             tick += 1
@@ -626,8 +642,12 @@ final class OuraRing: NSObject, ObservableObject {
         // Drain into a scratch buffer; the displayed model is only swapped in once
         // the sync *completes*, so the UI never shows a half-synced state.
         var collected: [DecodedEvent] = []
-        let next = await drainEventsLive(cursor: 0) { ev in collected.append(ev) }
-        UserDefaults.standard.set(Int(next), forKey: "syncCursor")
+        let drain = await drainEventsLive(cursor: 0) { ev in collected.append(ev) }
+        guard drain.complete else {
+            publish { self.syncing = false; self.status = "Sync timed out - try again closer to the ring" }
+            return
+        }
+        UserDefaults.standard.set(Int(drain.cursor), forKey: "syncCursor")
         let model = HealthData(events: collected)
         HealthStore.save(collected)
         publish {
@@ -649,8 +669,12 @@ final class OuraRing: NSObject, ObservableObject {
         publish { self.syncing = true }
         let start = UInt32(truncatingIfNeeded: UserDefaults.standard.integer(forKey: "syncCursor"))
         var fresh: [DecodedEvent] = []
-        let next = await drainEventsLive(cursor: start) { fresh.append($0) }
-        UserDefaults.standard.set(Int(next), forKey: "syncCursor")
+        let drain = await drainEventsLive(cursor: start) { fresh.append($0) }
+        guard drain.complete else {
+            publish { self.syncing = false; self.status = "Sync timed out - try again closer to the ring" }
+            return
+        }
+        UserDefaults.standard.set(Int(drain.cursor), forKey: "syncCursor")
 
         var all = HealthStore.load()
         var seen = Set(all.map { "\($0.tag)-\($0.timestamp)" })
@@ -658,7 +682,7 @@ final class OuraRing: NSObject, ObservableObject {
         if all.count > 100_000 { all = Array(all.suffix(100_000)) }
         let model = HealthData(events: all)
         HealthStore.save(all)
-        dbg("incremental sync: +\(fresh.count) events (cursor \(start)→\(next)), \(all.count) total")
+        dbg("incremental sync: +\(fresh.count) events (cursor \(start)→\(drain.cursor)), \(all.count) total")
         publish {
             self.events = all
             self.health = model
@@ -794,6 +818,7 @@ extension OuraRing: CBCentralManagerDelegate, CBPeripheralDelegate {
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         dbg("disconnected\(error.map { ": \($0.localizedDescription)" } ?? "")")
         self.writeChar = nil
+        self.notifyReady = false
         self.connecting = false
         self.clearLiveAfterDisconnect()
         // Unless the user asked to disconnect, immediately re-arm a pending connect
@@ -819,27 +844,34 @@ extension OuraRing: CBCentralManagerDelegate, CBPeripheralDelegate {
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
+        notifyReady = false
         for c in service.characteristics ?? [] {
             if c.uuid == OuraGATT.write { writeChar = c }
             if c.properties.contains(.notify) || c.properties.contains(.indicate) {
-                peripheral.setNotifyValue(true, for: c)
+                if c.isNotifying {
+                    notifyReady = true
+                } else {
+                    peripheral.setNotifyValue(true, for: c)
+                }
             }
         }
-        // Link is usable once the write characteristic is known.
-        if writeChar != nil {
-            dbg("link ready (write characteristic discovered)")
-            connecting = false
-            scanTimer?.cancel(); connectTimer?.cancel(); readyTimer?.cancel()
-            if let c = readyContinuation {
-                // A manual authenticateAndLoad() is awaiting — let it drive auth.
-                readyContinuation = nil; c.resume()
-            } else {
-                // Auto-reconnect / restoration path: authenticate + incremental sync.
-                Task { if await self.runAuth(), self.autoSync { await self.autoSyncIncremental() } }
-            }
+        if writeChar != nil, notifyReady {
+            finishReadyIfPossible()
+        } else if writeChar != nil {
+            dbg("write characteristic found; waiting for notifications")
         } else {
             dbg("write characteristic not found in service")
         }
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
+        if let error {
+            dbg("notify setup error: \(error.localizedDescription)")
+            return
+        }
+        guard characteristic.isNotifying else { return }
+        notifyReady = true
+        finishReadyIfPossible()
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
