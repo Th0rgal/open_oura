@@ -325,6 +325,11 @@ final class OuraRing: NSObject, ObservableObject {
     /// then authenticate. No key typing — pairing *creates* the key.
     func pairNewRing() async {
         if writeChar == nil { connect(); await waitUntilReady() }
+        guard writeChar != nil else {
+            dbg("pairNewRing: link never became ready")
+            failConnect("Couldn't connect", "Couldn't connect to the ring. Keep it close and make sure it isn't connected elsewhere, then try again.")
+            return
+        }
         publish { self.state = .authenticating; self.status = "Pairing…" }
 
         var keyBytes = [UInt8](repeating: 0, count: 16)
@@ -479,6 +484,14 @@ final class OuraRing: NSObject, ObservableObject {
         publish { self.liveActive = false; self.status = "Connected"; self.motionG = nil }
     }
 
+    private func clearLiveAfterDisconnect() {
+        liveTask?.cancel(); liveTask = nil
+        if let id = liveListenerID { listeners.removeValue(forKey: id); liveListenerID = nil }
+        ibiBuffer.removeAll()
+        restWin = 0; restMoves = 0
+        publish { self.liveActive = false; self.motionG = nil }
+    }
+
     private func runLive() async {
         dbg("live: enabling notifications + daytime-HR CONNECTED_LIVE")
         await sendAndWait(Req.setNotification(0x3f))
@@ -588,7 +601,7 @@ final class OuraRing: NSObject, ObservableObject {
 
     /// Full re-sync from scratch (manual "Sync now"). Replaces the cached history.
     func syncHistory() async {
-        guard state == .ready, !syncing else { return }
+        guard state == .ready, !syncing, !liveActive else { return }
         publish { self.syncing = true }
         // Drain into a scratch buffer; the displayed model is only swapped in once
         // the sync *completes*, so the UI never shows a half-synced state.
@@ -610,7 +623,7 @@ final class OuraRing: NSObject, ObservableObject {
     /// cursor, merge into the cached set, persist. Wrapped in a background task so
     /// it can finish when the app was woken in the background by state restoration.
     func autoSyncIncremental() async {
-        guard state == .ready, !syncing else { return }
+        guard state == .ready, !syncing, !liveActive else { return }
         let bg = await beginBG()
         defer { Task { await endBG(bg) } }
         publish { self.syncing = true }
@@ -754,7 +767,7 @@ extension OuraRing: CBCentralManagerDelegate, CBPeripheralDelegate {
         dbg("disconnected\(error.map { ": \($0.localizedDescription)" } ?? "")")
         self.writeChar = nil
         self.connecting = false
-        self.liveActive = false
+        self.clearLiveAfterDisconnect()
         // Unless the user asked to disconnect, immediately re-arm a pending connect
         // so we silently reconnect when the ring next wakes (charger/worn).
         if !userDisconnecting, autoConnect {
