@@ -266,10 +266,22 @@ async fn main() -> Result<()> {
             let client = connect(&cli).await?;
             maybe_auth(&client, &key).await?;
             let serial = client.serial().await.unwrap_or_else(|_| "unknown".into());
-            let start_cursor = Store::open(&cli.db)
-                .ok()
-                .and_then(|store| store.cursor(&serial).ok())
-                .unwrap_or(0);
+            let store = Store::open(&cli.db).with_context(|| {
+                format!(
+                    "live mode needs a readable DB cursor; run `oura sync` first or fix {}",
+                    cli.db.display()
+                )
+            })?;
+            let saved_cursor = store.cursor(&serial)?;
+            let start_cursor = if saved_cursor > 0 {
+                saved_cursor
+            } else {
+                store.event_high_water_cursor(&serial)?.ok_or_else(|| {
+                    anyhow!(
+                        "live mode needs a baseline for serial {serial}; run `oura sync` once before `oura live`"
+                    )
+                })?
+            };
             live::run(client, *port, *minutes, start_cursor).await
         }
         Command::Game { port, minutes } => {

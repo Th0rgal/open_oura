@@ -9,8 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use oura_protocol::device::{Battery, DeviceInfo};
 use crate::error::Result;
+use oura_protocol::device::{Battery, DeviceInfo};
 use oura_protocol::events::RingEvent;
 
 const SCHEMA: &str = r#"
@@ -119,6 +119,16 @@ impl Store {
             )
             .optional()?;
         Ok(v.unwrap_or(0) as u32)
+    }
+
+    /// One past the highest stored event timestamp for this serial, if any.
+    pub fn event_high_water_cursor(&self, serial: &str) -> Result<Option<u32>> {
+        let v: Option<i64> = self.conn.query_row(
+            "SELECT MAX(ring_timestamp) + 1 FROM events WHERE serial = ?1",
+            params![serial],
+            |r| r.get(0),
+        )?;
+        Ok(v.map(|cursor| cursor as u32))
     }
 
     /// Persist the next sync cursor.

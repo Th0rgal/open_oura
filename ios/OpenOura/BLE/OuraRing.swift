@@ -6,11 +6,27 @@ import os
 
 /// One decoded history event (timestamp in ring deciseconds + decoded JSON).
 struct DecodedEvent: Identifiable {
-    let id = UUID()
     let tag: UInt8
     let timestamp: UInt32
     let name: String
     let json: [String: Any]
+    let identity: String
+
+    var id: String { identity }
+
+    init(tag: UInt8, timestamp: UInt32, name: String, json: [String: Any], identity: String? = nil) {
+        self.tag = tag
+        self.timestamp = timestamp
+        self.name = name
+        self.json = json
+        self.identity = identity ?? "\(tag)-\(timestamp)-\(DecodedEvent.jsonIdentity(json))"
+    }
+
+    private static func jsonIdentity(_ json: [String: Any]) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: json, options: [.sortedKeys]),
+              let s = String(data: data, encoding: .utf8) else { return "{}" }
+        return s
+    }
 }
 
 enum ConnState: Equatable {
@@ -329,7 +345,8 @@ final class OuraRing: NSObject, ObservableObject {
                        | UInt32(p.payload[2]) << 16 | UInt32(p.payload[3]) << 24
                 let body = Data(p.payload[4...])
                 let json = OuraCore.decodeEvent(tag: p.tag, body: body) ?? [:]
-                onEvent(DecodedEvent(tag: p.tag, timestamp: ts, name: OuraCore.eventName(tag: p.tag), json: json))
+                let identity = "\(p.tag)-\(ts)-\(body.base64EncodedString())"
+                onEvent(DecodedEvent(tag: p.tag, timestamp: ts, name: OuraCore.eventName(tag: p.tag), json: json, identity: identity))
             }
             let next = batch.maxTs &+ 1
             let progressed = !batch.events.isEmpty && next > start
@@ -650,9 +667,12 @@ final class OuraRing: NSObject, ObservableObject {
             publish { self.syncing = false; self.status = "Sync timed out - try again closer to the ring" }
             return
         }
-        UserDefaults.standard.set(Int(drain.cursor), forKey: "syncCursor")
         let model = HealthData(events: collected)
-        HealthStore.save(collected)
+        guard HealthStore.save(collected) else {
+            publish { self.syncing = false; self.status = "Sync failed - couldn't save history" }
+            return
+        }
+        UserDefaults.standard.set(Int(drain.cursor), forKey: "syncCursor")
         publish {
             self.events = collected
             self.health = model
@@ -677,14 +697,16 @@ final class OuraRing: NSObject, ObservableObject {
             publish { self.syncing = false; self.status = "Sync timed out - try again closer to the ring" }
             return
         }
-        UserDefaults.standard.set(Int(drain.cursor), forKey: "syncCursor")
-
         var all = HealthStore.load()
-        var seen = Set(all.map { "\($0.tag)-\($0.timestamp)" })
-        for e in fresh where seen.insert("\(e.tag)-\(e.timestamp)").inserted { all.append(e) }
+        var seen = Set(all.map { $0.identity })
+        for e in fresh where seen.insert(e.identity).inserted { all.append(e) }
         if all.count > 100_000 { all = Array(all.suffix(100_000)) }
         let model = HealthData(events: all)
-        HealthStore.save(all)
+        guard HealthStore.save(all) else {
+            publish { self.syncing = false; self.status = "Sync failed - couldn't save history" }
+            return
+        }
+        UserDefaults.standard.set(Int(drain.cursor), forKey: "syncCursor")
         dbg("incremental sync: +\(fresh.count) events (cursor \(start)→\(drain.cursor)), \(all.count) total")
         publish {
             self.events = all
