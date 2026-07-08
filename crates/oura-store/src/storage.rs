@@ -234,12 +234,12 @@ impl Store {
     }
 
     /// All decoded events as `(ring_timestamp_deciseconds, tag, decoded_json,
-    /// captured_unix)`, ordered by ring time. For analysis/reporting commands that
-    /// reconstruct time series from stored events.
+    /// captured_unix)`, ordered by insertion/sync order. The ring timestamp can reset
+    /// after reboots, so callers that reconstruct boot epochs need the real stream order.
     pub fn decoded_events(&self) -> Result<Vec<(i64, u8, String, i64)>> {
         let mut stmt = self.conn.prepare(
             "SELECT ring_timestamp, tag, decoded_json, captured_unix FROM events \
-             WHERE decoded_json IS NOT NULL ORDER BY ring_timestamp",
+             WHERE decoded_json IS NOT NULL ORDER BY id",
         )?;
         let rows = stmt
             .query_map([], |r| {

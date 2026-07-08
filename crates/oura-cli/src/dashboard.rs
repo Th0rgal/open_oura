@@ -365,7 +365,31 @@ async fn handle(
 ) -> Result<()> {
     let mut buf = [0u8; 8192];
     let n = sock.read(&mut buf).await?;
-    let req = String::from_utf8_lossy(&buf[..n]);
+    let mut req_bytes = buf[..n].to_vec();
+    loop {
+        let Some(head_end) = req_bytes.windows(4).position(|w| w == b"\r\n\r\n") else {
+            let n = sock.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            req_bytes.extend_from_slice(&buf[..n]);
+            continue;
+        };
+        let head = String::from_utf8_lossy(&req_bytes[..head_end + 4]);
+        let content_len = header(&head, "content-length")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(0);
+        let needed = head_end + 4 + content_len;
+        if req_bytes.len() >= needed {
+            break;
+        }
+        let n = sock.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        req_bytes.extend_from_slice(&buf[..n]);
+    }
+    let req = String::from_utf8_lossy(&req_bytes);
     let method = req.split_whitespace().next().unwrap_or("GET");
     let target = req.split_whitespace().nth(1).unwrap_or("/");
     // route on the path only — a query string (e.g. cache-buster) must not 404 the API

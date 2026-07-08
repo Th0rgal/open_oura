@@ -70,7 +70,7 @@ pub struct ModelInputs<'a> {
     pub db: &'a Path,
     pub tz: i64,
     pub demo: &'a Demographics,
-    pub sleep_ranges: &'a [[i64; 2]],
+    pub sleep_ranges: &'a [Value],
 }
 
 /// Raw model outputs, matching the Python runners' `--json` shape.
@@ -588,7 +588,8 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
     // `ring_timestamp` (ds) is a per-boot relative deciseconds counter: it resets to ~0
     // every time the ring reboots (battery drain, firmware reset). A single global
     // anchor therefore scatters older boots to nonsense dates. Recover each boot
-    // "epoch" by walking events in real sync order (captured_unix, then ds) and
+    // "epoch" by walking events in real sync order (captured_unix, then insertion
+    // order for ties within the same second) and
     // splitting on any large backward jump in ds, then anchor each epoch independently:
     // its newest ds is pinned to that event's capture time and the rest offset by the
     // decisecond delta. Raw ds is left untouched everywhere else — it is still the DB /
@@ -601,15 +602,15 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
     // A real reboot drops ds by millions; 6 h of slack absorbs minor out-of-order
     // framing within an epoch without ever splitting one.
     const EPOCH_RESET_SLACK_DS: i64 = 6 * 3600 * 10;
-    let mut order: Vec<(i64, i64, usize)> = events
+    let mut order: Vec<(i64, usize, i64)> = events
         .iter()
         .enumerate()
-        .map(|(idx, (ds, _, _, cu))| (*cu, *ds, idx))
+        .map(|(idx, (ds, _, _, cu))| (*cu, idx, *ds))
         .collect();
     order.sort_unstable();
     let mut epochs: Vec<Epoch> = Vec::new();
     let mut event_epochs = vec![0usize; events.len()];
-    for (cu, ds, event_idx) in order {
+    for (cu, event_idx, ds) in order {
         if let Some(epoch_idx) = epochs.len().checked_sub(1) {
             let e = &mut epochs[epoch_idx];
             if ds >= e.max_ds - EPOCH_RESET_SLACK_DS {
@@ -752,7 +753,17 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
     }
 
     // the model seam — sleep / cva / activity (Python subprocess or on-device .ptl)
-    let sleep_ranges: Vec<[i64; 2]> = nights.iter().map(|nt| [nt.start_ds, nt.end_ds]).collect();
+    let sleep_ranges: Vec<Value> = nights
+        .iter()
+        .map(|nt| {
+            json!({
+                "key": format!("{}:{}", nt.epoch_idx, nt.start_ds),
+                "epoch_idx": nt.epoch_idx,
+                "start_ds": nt.start_ds,
+                "end_ds": nt.end_ds,
+            })
+        })
+        .collect();
     let ModelOutputs {
         sleep_batch,
         cva,
@@ -764,12 +775,18 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         sleep_ranges: &sleep_ranges,
     });
 
-    let hyps: std::collections::HashMap<i64, Value> = sleep_batch
+    let hyps: std::collections::HashMap<String, Value> = sleep_batch
         .as_ref()
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
-                .filter_map(|h| Some((h["start_ds"].as_i64()?, h.clone())))
+                .filter_map(|h| {
+                    let key = h["key"]
+                        .as_str()
+                        .map(str::to_string)
+                        .or_else(|| Some(h["start_ds"].as_i64()?.to_string()))?;
+                    Some((key, h.clone()))
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -789,7 +806,10 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
     let mut nights_json = Vec::new();
     let mut asleep_by_night: Vec<i32> = Vec::new(); // oldest-first, for sleep debt
     for nt in &nights {
-        let hyp = hyps.get(&nt.start_ds);
+        let sleep_key = format!("{}:{}", nt.epoch_idx, nt.start_ds);
+        let hyp = hyps
+            .get(&sleep_key)
+            .or_else(|| hyps.get(&nt.start_ds.to_string()));
         let raw_stages: Vec<i64> = hyp
             .and_then(|h| h["stages"].as_array())
             .map(|s| s.iter().filter_map(|x| x.as_i64()).collect())

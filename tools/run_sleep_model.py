@@ -8,9 +8,10 @@ device-relative deciseconds anchored to the latest event's captured_unix.
 
 Usage: python tools/run_sleep_model.py START_DS END_DS [DB] [TZ=1]
        (no args → uses the bedtime_period in the DB)
-       --batch reads a JSON array of [start_ds, end_ds] pairs from stdin and emits
-       a JSON array of results, loading the model + scanning the DB only once (the
-       dashboard uses this to score every night in a single process).
+       --batch reads a JSON array of {key, epoch_idx, start_ds, end_ds} objects
+       (legacy [start_ds, end_ds] pairs also work) and emits a JSON array of results,
+       loading the model + scanning the DB only once (the dashboard uses this to score
+       every night in a single process).
 """
 import sys, json, sqlite3, datetime
 from pathlib import Path
@@ -39,14 +40,15 @@ DB = resolve_db(db_arg, REPO)
 
 con = sqlite3.connect(str(DB))
 rows = con.execute("SELECT ring_timestamp, tag, decoded_json, captured_unix FROM events "
-                   "WHERE decoded_json IS NOT NULL ORDER BY ring_timestamp").fetchall()
+                   "WHERE decoded_json IS NOT NULL ORDER BY id").fetchall()
 # Anchor ring deciseconds to wall-clock per boot epoch (ds resets on reboot; a single
 # global anchor mis-dates older epochs — see epoch_time / crates/oura-summary).
-from epoch_time import build_epochs, make_unix_s
-_epochs = build_epochs([(r[0], r[3]) for r in rows])
+from epoch_time import build_epoch_assignments, make_unix_s, unix_in_epoch
+_epochs, _row_epochs = build_epoch_assignments([(r[0], r[3]) for r in rows])
 _unix_s = make_unix_s(_epochs)
-def ms(ds):  # device deciseconds -> absolute epoch ms (int64), consistent across signals
-    return int(_unix_s(ds) * 1000)
+def ms(ds, epoch_idx=None):  # device deciseconds -> absolute epoch ms (int64), consistent across signals
+    unix_s = unix_in_epoch(_epochs, ds, epoch_idx) if epoch_idx is not None else _unix_s(ds)
+    return int(unix_s * 1000)
 def hm(ms_):
     return datetime.datetime.utcfromtimestamp(ms_/1000 + TZ*3600).strftime("%H:%M")
 
@@ -54,17 +56,19 @@ def hm(ms_):
 MODEL_M = torch.jit.load(MODEL, map_location="cpu").eval()
 
 
-def score_window(start_ds, end_ds):
+def score_window(start_ds, end_ds, epoch_idx=None, key=None):
     """Score one bedtime window. Returns (out_dict, ts, stages) or (err_str, None, None)."""
     lo, hi = start_ds - 6000, end_ds + 6000  # ±10 min margin
     beats, acm, temp = [], [], []
-    for ds, tag, js, _ in rows:
+    for (ds, tag, js, _), row_epoch_idx in zip(rows, _row_epochs):
+        if epoch_idx is not None and row_epoch_idx != epoch_idx:
+            continue
         if not (lo <= ds <= hi):
             continue
         v = json.loads(js)
         if tag in (0x60, 0x80) and v.get("ibi_ms"):  # ibi_and_amplitude + green_ibi_quality
             ibi = v["ibi_ms"]; amp = v.get("amplitude", [0] * len(ibi))
-            t = ms(ds); acc = 0
+            t = ms(ds, row_epoch_idx); acc = 0
             for i, x in enumerate(ibi):
                 if x <= 0:  # zero/negative IBI can't advance the beat clock — skip (matches run_bdi)
                     continue
@@ -72,9 +76,9 @@ def score_window(start_ds, end_ds):
                 valid = 1 if 300 <= x <= 2000 else 0
                 beats.append((t + acc, float(x), float(amp[i] if i < len(amp) else 0), valid))
         elif tag == 0x47 and v.get("motion_seconds") is not None:
-            acm.append((ms(ds), float(v["motion_seconds"])))
+            acm.append((ms(ds, row_epoch_idx), float(v["motion_seconds"])))
         elif tag == 0x46 and v.get("temps_c"):
-            temp.append((ms(ds), float(v["temps_c"][0])))
+            temp.append((ms(ds, row_epoch_idx), float(v["temps_c"][0])))
 
     beats.sort(); acm.sort(); temp.sort()
     if not beats or not any(b[3] == 1 for b in beats):
@@ -88,7 +92,7 @@ def score_window(start_ds, end_ds):
     acm_val = torch.tensor([[a[1]] for a in acm], dtype=torch.float32)
     temp_ts = torch.tensor(col(temp, 0), dtype=torch.int64)
     temp_val = torch.tensor([[t[1]] for t in temp], dtype=torch.float32)
-    bedtime = torch.tensor([ms(start_ds), ms(end_ds)], dtype=torch.int64)
+    bedtime = torch.tensor([ms(start_ds, epoch_idx), ms(end_ds, epoch_idx)], dtype=torch.int64)
     spo2_val = torch.empty(0, 1, dtype=torch.float32)
     spo2_ts = torch.empty(0, dtype=torch.int64)
     scalars = torch.tensor([35, 25, 0, 0, 0], dtype=torch.float32)
@@ -107,6 +111,7 @@ def score_window(start_ds, end_ds):
     asleep = n * 0.5 - mins["WAKE"]
     in_bed = n * 0.5
     out = {
+        "key": key or str(start_ds), "epoch_idx": epoch_idx,
         "start_ds": start_ds, "end_ds": end_ds,
         "start_local": hm(int(ts[0])), "end_local": hm(int(ts[-1])),
         "epochs": n, "in_bed_min": in_bed,
@@ -125,7 +130,15 @@ if BATCH:
     pairs = json.load(sys.stdin)
     results = []
     for p in pairs:
-        out, _, _ = score_window(int(p[0]), int(p[1]))
+        if isinstance(p, dict):
+            out, _, _ = score_window(
+                int(p["start_ds"]),
+                int(p["end_ds"]),
+                int(p["epoch_idx"]) if p.get("epoch_idx") is not None else None,
+                p.get("key"),
+            )
+        else:
+            out, _, _ = score_window(int(p[0]), int(p[1]))
         results.append(out if isinstance(out, dict) else None)
     print(json.dumps(results))
     sys.exit(0)
