@@ -27,6 +27,7 @@ def test_filename_containment():
     assert _safe_filename({"filename": "fw.bin"}) == "fw.bin"
     # Missing filename falls back to a synthesized basename.
     assert _safe_filename({"type": "firmware_oreo", "version": "3.4.3"}) == "firmware_oreo_3.4.3.bin"
+    assert _safe_filename({"filename": "", "type": "../../outside", "version": "1"}) == "outside_1.bin"
 
 
 if __name__ == "__main__":

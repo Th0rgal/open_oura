@@ -55,9 +55,15 @@ def _is_api_url(url: str) -> bool:
 
 def _safe_filename(manifest: dict) -> str:
     """Basename-only output filename so a hostile manifest can't escape out_dir."""
-    fname = os.path.basename(manifest.get("filename") or "")
+    def basename_only(value: object) -> str:
+        fname = os.path.basename(str(value or "").replace("\\", "/"))
+        return "" if fname in ("", ".", "..") else fname
+
+    fname = basename_only(manifest.get("filename"))
     if fname in ("", ".", ".."):
-        fname = f"{manifest.get('type','fw')}_{manifest.get('version','0')}.bin"
+        fname = basename_only(f"{manifest.get('type','fw')}_{manifest.get('version','0')}.bin")
+    if fname in ("", ".", ".."):
+        fname = "fw_0.bin"
     return fname
 # A plausible app UA; the real one comes from EndpointKt.getUserAgent(appConfig).
 USER_AGENT = "okhttp/4.12.0"
