@@ -79,8 +79,6 @@ def nocturnal(rows_for_tag, lo, hi):
 def sleep_metrics(db, start_ds, end_ds, csv, tz):
     cmd = [sys.executable, str(REPO / "tools" / "score_sleep.py"), str(db),
            "--start", str(start_ds), "--end", str(end_ds), "--tz", str(tz), "--json"]
-    if csv:
-        cmd += ["--csv", csv]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         return None
