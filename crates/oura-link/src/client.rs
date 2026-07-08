@@ -367,7 +367,7 @@ impl<T: Transport> OuraClient<T> {
 
             let mut summary: Option<EventBatchSummary> = None;
             let mut max_ts = start;
-            let mut batch_events = 0u32;
+            let mut batch = Vec::new();
             let deadline = tokio::time::Instant::now() + request_timeout;
             loop {
                 let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -383,9 +383,7 @@ impl<T: Transport> OuraClient<T> {
                         } else if p.tag >= protocol::HISTORY_EVENT_PREFIX {
                             let ev = RingEvent::from_packet(&p);
                             max_ts = max_ts.max(ev.timestamp);
-                            batch_events += 1;
-                            total += 1;
-                            on_event(&ev);
+                            batch.push(ev);
                         }
                         // ignore ACM (0x33), control ACKs (0x07), etc.
                     }
@@ -394,7 +392,15 @@ impl<T: Transport> OuraClient<T> {
                 }
             }
 
-            let bytes_left = summary.map(|s| s.bytes_left).unwrap_or(0);
+            let Some(summary) = summary else {
+                break;
+            };
+            let batch_events = batch.len() as u32;
+            for ev in &batch {
+                on_event(ev);
+            }
+            total += batch_events;
+            let bytes_left = summary.bytes_left;
             let next = max_ts.saturating_add(1);
             let progressed = batch_events > 0 && next > start;
             if progressed {

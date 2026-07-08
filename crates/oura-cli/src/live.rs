@@ -35,14 +35,14 @@ type Client = Arc<OuraClient<BleTransport>>;
 
 /// Serve the dashboard at `127.0.0.1:port`. `minutes` is how long each realtime
 /// arming lasts before the poll loop re-arms it (the ring auto-stops otherwise).
-pub async fn run(client: OuraClient<BleTransport>, port: u16, minutes: u16) -> Result<()> {
+pub async fn run(client: OuraClient<BleTransport>, port: u16, minutes: u16, start_cursor: u32) -> Result<()> {
     let client: Client = Arc::new(client);
     let (tx, _) = broadcast::channel::<String>(1024);
     let live = Arc::new(AtomicBool::new(false));
     let clients = Arc::new(AtomicUsize::new(0));
 
     spawn_parser(&client, &tx);
-    spawn_poll_loop(client.clone(), tx.clone(), live.clone(), minutes);
+    spawn_poll_loop(client.clone(), tx.clone(), live.clone(), minutes, start_cursor);
 
     let listener = TcpListener::bind(("127.0.0.1", port)).await?;
     println!("Ready — open http://127.0.0.1:{port}  (press Start in the page)");
@@ -101,11 +101,12 @@ fn spawn_poll_loop(
     tx: broadcast::Sender<String>,
     live: Arc<AtomicBool>,
     minutes: u16,
+    start_cursor: u32,
 ) {
     tokio::spawn(async move {
         let mut was_live = false;
         let mut armed_at: Option<Instant> = None;
-        let mut hr_cursor: u32 = 0;
+        let mut hr_cursor: u32 = start_cursor;
         let mut tick: u64 = 0;
         let rearm_after = Duration::from_secs((minutes.max(1) as u64) * 60 - 20);
 
@@ -126,13 +127,8 @@ fn spawn_poll_loop(
                     .transport()
                     .write(&req_set_feature_mode(feature::SPO2, feature_mode::AUTOMATIC))
                     .await;
-                // Baseline drain (no UI output) to find the newest event timestamp.
-                if let Ok(out) = client
-                    .drain_events_live(0, Duration::from_millis(2500), |_| {})
-                    .await
-                {
-                    hr_cursor = out.next_cursor;
-                }
+                // Start from the persisted sync cursor instead of walking full history.
+                hr_cursor = start_cursor;
                 arm_acm(&client, minutes).await;
                 armed_at = Some(Instant::now());
             }

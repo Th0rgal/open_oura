@@ -590,14 +590,17 @@ final class OuraRing: NSObject, ObservableObject {
         }
         // HRV (RMSSD) from physiologically plausible IBIs
         if let arr = ev.json["ibi_ms"] as? [Any] {
-            for v in arr.compactMap({ ($0 as? NSNumber)?.doubleValue }) where v >= 400 && v <= 1300 {
-                ibiBuffer.append(v)
-            }
-            while ibiBuffer.count > 40 { ibiBuffer.removeFirst() }
-            if let hrv = Self.rmssd(ibiBuffer) {
-                publish {
-                    self.liveHRV = hrv
-                    self.hrvSeries.append(Double(hrv)); if self.hrvSeries.count > 120 { self.hrvSeries.removeFirst() }
+            let ibis = arr.compactMap { ($0 as? NSNumber)?.doubleValue }.filter { $0 >= 400 && $0 <= 1300 }
+            guard !ibis.isEmpty else { return }
+            bleQueue.async { [weak self] in
+                guard let self else { return }
+                self.ibiBuffer.append(contentsOf: ibis)
+                while self.ibiBuffer.count > 40 { self.ibiBuffer.removeFirst() }
+                if let hrv = Self.rmssd(self.ibiBuffer) {
+                    self.publish {
+                        self.liveHRV = hrv
+                        self.hrvSeries.append(Double(hrv)); if self.hrvSeries.count > 120 { self.hrvSeries.removeFirst() }
+                    }
                 }
             }
         }

@@ -265,7 +265,12 @@ async fn main() -> Result<()> {
         Command::Live { port, minutes } => {
             let client = connect(&cli).await?;
             maybe_auth(&client, &key).await?;
-            live::run(client, *port, *minutes).await
+            let serial = client.serial().await.unwrap_or_else(|_| "unknown".into());
+            let start_cursor = Store::open(&cli.db)
+                .ok()
+                .and_then(|store| store.cursor(&serial).ok())
+                .unwrap_or(0);
+            live::run(client, *port, *minutes, start_cursor).await
         }
         Command::Game { port, minutes } => {
             let client = connect(&cli).await?;

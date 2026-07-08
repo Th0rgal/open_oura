@@ -53,7 +53,7 @@ struct HealthData {
                     spo2.append(.init(ts: e.timestamp, value: s))
                 }
             case 0x4b, 0x4e, 0x5a: // sleep phases (hypnogram)
-                if let ph = e.json["phases"] as? [String] { hypnogram.append(contentsOf: ph) }
+                if let ph = e.json["phases"] as? [String] { hypnogram = ph }
             default: break
             }
         }
