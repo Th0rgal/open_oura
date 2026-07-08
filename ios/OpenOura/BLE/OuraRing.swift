@@ -98,6 +98,7 @@ final class OuraRing: NSObject, ObservableObject {
     private var ibiBuffer: [Double] = []
     private var liveListenerID: UUID?
     private var liveTask: Task<Void, Never>?
+    private var liveCursor: UInt32?
     private var restMoves = 0, restWin = 0
 
     override init() {
@@ -550,7 +551,9 @@ final class OuraRing: NSObject, ObservableObject {
         } else {
             dbg("live: no feature-status response")
         }
-        var cursor = UInt32(truncatingIfNeeded: UserDefaults.standard.integer(forKey: "syncCursor"))
+        let savedCursor = UInt32(truncatingIfNeeded: UserDefaults.standard.integer(forKey: "syncCursor"))
+        var cursor = max(liveCursor ?? savedCursor, savedCursor)
+        liveCursor = cursor
         dbg("live: starting cursor=\(cursor)")
         installLiveACMListener()
         await sendAndWait(Req.setRealtime(bitmask: Realtime.acm, minutes: 5, delay: 0))
@@ -568,6 +571,7 @@ final class OuraRing: NSObject, ObservableObject {
                 self?.handleLiveEvent(ev)
             }
             cursor = drain.cursor
+            if drain.complete { liveCursor = cursor }
             dbg("live: tick \(tick) drained \(n) events (\(hr80)×0x80) cursor=\(cursor)")
             if tick % 6 == 0 { await readBattery() }
             tick += 1
@@ -673,6 +677,7 @@ final class OuraRing: NSObject, ObservableObject {
             return
         }
         UserDefaults.standard.set(Int(drain.cursor), forKey: "syncCursor")
+        liveCursor = drain.cursor
         publish {
             self.events = collected
             self.health = model
@@ -707,6 +712,7 @@ final class OuraRing: NSObject, ObservableObject {
             return
         }
         UserDefaults.standard.set(Int(drain.cursor), forKey: "syncCursor")
+        liveCursor = max(liveCursor ?? drain.cursor, drain.cursor)
         dbg("incremental sync: +\(fresh.count) events (cursor \(start)→\(drain.cursor)), \(all.count) total")
         publish {
             self.events = all
@@ -752,6 +758,7 @@ final class OuraRing: NSObject, ObservableObject {
         KeyStore.clear()
         UserDefaults.standard.removeObject(forKey: "ringPeripheralID")
         UserDefaults.standard.removeObject(forKey: "syncCursor")
+        liveCursor = nil
         HealthStore.clear()
         bleQueue.async {
             self.userDisconnecting = true

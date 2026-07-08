@@ -127,8 +127,9 @@ fn spawn_poll_loop(
                     .transport()
                     .write(&req_set_feature_mode(feature::SPO2, feature_mode::AUTOMATIC))
                     .await;
-                // Start from the persisted sync cursor instead of walking full history.
-                hr_cursor = start_cursor;
+                // Keep the live cursor across Stop/Start cycles so the page does
+                // not replay HR events recorded by the previous live session.
+                hr_cursor = hr_cursor.max(start_cursor);
                 arm_acm(&client, minutes).await;
                 armed_at = Some(Instant::now());
             }
