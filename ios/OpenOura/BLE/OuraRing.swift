@@ -344,6 +344,7 @@ final class OuraRing: NSObject, ObservableObject {
 
         guard let resp = await requestUntil(Req.setAuthKey(key), tag: 0x25, ext: nil, timeout: 3.0),
               resp.payload.first == 0x00 else {
+            KeyStore.clear()
             publish { self.state = .failed("SetAuthKey rejected"); self.status = "Pair failed — is the ring factory-reset?" }
             return
         }
@@ -510,6 +511,10 @@ final class OuraRing: NSObject, ObservableObject {
 
         var tick = 0
         while !Task.isCancelled {
+            if tick > 0 && tick % 120 == 0 {
+                await sendAndWait(Req.setRealtime(bitmask: Realtime.acm, minutes: 5, delay: 0))
+                dbg("live: ACM re-armed")
+            }
             var n = 0, hr80 = 0
             cursor = await drainEventsLive(cursor: cursor) { [weak self] ev in
                 n += 1; if ev.tag == 0x80 { hr80 += 1 }
@@ -675,6 +680,7 @@ final class OuraRing: NSObject, ObservableObject {
         _ = await requestUntil(Req.factoryReset, tag: 0x1b, ext: nil, timeout: 2.0)
         KeyStore.clear()
         UserDefaults.standard.removeObject(forKey: "ringPeripheralID")
+        UserDefaults.standard.removeObject(forKey: "syncCursor")
         HealthStore.clear()
         bleQueue.async {
             self.userDisconnecting = true
