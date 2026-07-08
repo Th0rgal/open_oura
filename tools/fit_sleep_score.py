@@ -243,9 +243,18 @@ def score_from_params(params, score_name, metrics):
     to their constant. Returns (final, sub_scores, contributions)."""
     weights = params["weights"][score_name]
     subs, contrib = {}, {}
+
+    def fallback_subscore(spec=None):
+        if spec and spec.get("curve", {}).get("kind") == "mean":
+            curve = load_curve(spec["curve"])
+            return float(np.clip(np.ravel(curve.predict(np.array([0.0])))[0], 1, 100))
+        return 50.0
+
     for c, w in weights.items():
         spec = params["contributors"].get(c)
         if spec is None:
+            subs[c] = fallback_subscore()
+            contrib[c] = w * subs[c] / 100.0
             continue
         curve = load_curve(spec["curve"])
         kind = spec["curve"]["kind"]
@@ -253,8 +262,16 @@ def score_from_params(params, score_name, metrics):
         if kind == "mean":
             x = np.array([0.0])
         elif kind in ("mono", "emp"):
+            if drivers[0] not in metrics or metrics[drivers[0]] is None:
+                subs[c] = fallback_subscore(spec)
+                contrib[c] = w * subs[c] / 100.0
+                continue
             x = np.asarray(metrics[drivers[0]], float)
         else:
+            if any(d not in metrics or metrics[d] is None for d in drivers):
+                subs[c] = fallback_subscore(spec)
+                contrib[c] = w * subs[c] / 100.0
+                continue
             x = np.array([[metrics[d] for d in drivers]])
         subs[c] = float(np.clip(np.ravel(curve.predict(x))[0], 1, 100))
         contrib[c] = w * subs[c] / 100.0

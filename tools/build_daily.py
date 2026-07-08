@@ -160,8 +160,12 @@ def main():
     con.close()
 
     print(f"daily_summary: {len(rows)} night(s) written to {db.name}")
+    def fmt0(v):
+        return "—" if v is None else f"{v:.0f}"
+
     for d in rows:
-        rb = f"hrvσ={d['hrv_avg']:.0f}/{d['hrv_baseline']:.0f}" if d['hrv_baseline'] else f"hrv={d['hrv_avg']:.0f}/—"
+        rb = (f"hrvσ={fmt0(d['hrv_avg'])}/{fmt0(d['hrv_baseline'])}"
+              if d['hrv_baseline'] is not None else f"hrv={fmt0(d['hrv_avg'])}/—")
         print(f"  ds {d['start_ds']:>9}  sleep={d['sleep_score']:>3}  {rb}  "
               f"rhr={d['rhr_low']}/{d['rhr_avg']}  recov={d['recovery_index_h']}h  "
               f"tempΔ={d['temp_dev']:+.2f}  hist={d['n_history']}d")
