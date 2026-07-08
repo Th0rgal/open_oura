@@ -566,33 +566,41 @@ async fn cmd_sync(cli: &Cli, key: &Option<[u8; 16]>, sync_time: bool) -> Result<
             cursor,
             |ev| {
                 if db_err.borrow().is_some() {
-                    return;
+                    return false;
                 }
                 match store.insert_event(&serial, ev) {
                     Ok(true) => inserted += 1,
                     Ok(false) => {}
-                    Err(e) => *db_err.borrow_mut() = Some(e),
+                    Err(e) => {
+                        *db_err.borrow_mut() = Some(e);
+                        return false;
+                    }
                 }
+                true
             },
             // Persist the cursor after each fully-drained batch (so an interrupted
             // sync still makes progress) — but not once a DB write has failed. A
             // failed cursor write is itself recorded so it can't be silently lost.
             |p| {
                 if db_err.borrow().is_some() {
-                    return;
+                    return false;
                 }
                 match store.set_cursor(&serial, p.next_cursor) {
                     Ok(()) => cursor_advanced.set(true),
-                    Err(e) => *db_err.borrow_mut() = Some(e),
+                    Err(e) => {
+                        *db_err.borrow_mut() = Some(e);
+                        return false;
+                    }
                 }
                 println!(
                     "  … {} events so far, ~{:.1} KB left on ring",
                     p.events_synced,
                     p.bytes_left as f64 / 1024.0
                 );
+                true
             },
         )
-        .await?;
+        .await;
     if let Some(e) = db_err.into_inner() {
         let ctx = if cursor_advanced.get() {
             "storing event during sync (cursor advanced through earlier batches)"
@@ -601,6 +609,7 @@ async fn cmd_sync(cli: &Cli, key: &Option<[u8; 16]>, sync_time: bool) -> Result<
         };
         return Err(e).context(ctx);
     }
+    let outcome = outcome?;
 
     store.set_cursor(&serial, outcome.next_cursor)?;
     println!(

@@ -896,8 +896,6 @@ pub struct ExtEventEnvelopeParser {
     len_buf: Vec<u8>,
     expected: Option<usize>,
     payload: Vec<u8>,
-    last_ms: Option<u64>,
-    last_timestamp: Option<u32>,
 }
 
 impl ExtEventEnvelopeParser {
@@ -944,6 +942,8 @@ impl ExtEventEnvelopeParser {
     fn parse_bundle(&mut self) -> Vec<Packet> {
         let mut out = Vec::new();
         let mut i = 0usize;
+        let mut last_ms: Option<u64> = None;
+        let mut last_timestamp: Option<u32> = None;
         while i + 3 <= self.payload.len() {
             let _control = self.payload[i];
             let tag = self.payload[i + 1];
@@ -957,19 +957,19 @@ impl ExtEventEnvelopeParser {
             let Some((encoded_ts, used)) = read_varint(&self.payload[start..end]) else {
                 break;
             };
-            let ms = match self.last_ms {
+            let ms = match last_ms {
                 Some(prev) if encoded_ts < 100_000_000 => prev.saturating_add(encoded_ts),
                 _ => encoded_ts,
             };
-            self.last_ms = Some(ms);
+            last_ms = Some(ms);
 
             let mut timestamp = (ms / 100) as u32;
-            if let Some(prev_ts) = self.last_timestamp {
+            if let Some(prev_ts) = last_timestamp {
                 if encoded_ts > 0 && timestamp <= prev_ts {
                     timestamp = prev_ts.saturating_add(1);
                 }
             }
-            self.last_timestamp = Some(timestamp);
+            last_timestamp = Some(timestamp);
 
             let mut payload = Vec::with_capacity(4 + end.saturating_sub(start + used));
             payload.extend_from_slice(&timestamp.to_le_bytes());
@@ -1093,6 +1093,21 @@ mod tests {
         let ev = RingEvent::from_packet(&out[0]);
         assert_eq!(ev.timestamp, 1);
         assert_eq!(ev.body, vec![0xbb, 0xcc]);
+    }
+
+    #[test]
+    fn ext_envelope_timestamp_deltas_reset_per_envelope() {
+        let mut parser = ExtEventEnvelopeParser::default();
+        // Each completed envelope starts with an absolute millisecond timestamp,
+        // even when that value is small after a ring reboot.
+        let first = Packet::parse(&hex::decode("2f09430600aa430364bbcc").unwrap()).unwrap();
+        let second = Packet::parse(&hex::decode("2f0a430700aa4304c801ddee").unwrap()).unwrap();
+
+        let out1 = parser.push_packet(&first);
+        let out2 = parser.push_packet(&second);
+
+        assert_eq!(RingEvent::from_packet(&out1[0]).timestamp, 1);
+        assert_eq!(RingEvent::from_packet(&out2[0]).timestamp, 2);
     }
 
     #[test]

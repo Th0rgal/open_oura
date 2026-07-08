@@ -438,8 +438,8 @@ impl<T: Transport> OuraClient<T> {
         mut on_batch: G,
     ) -> Result<SyncOutcome>
     where
-        F: FnMut(&RingEvent),
-        G: FnMut(&BatchProgress),
+        F: FnMut(&RingEvent) -> bool,
+        G: FnMut(&BatchProgress) -> bool,
     {
         let mut start = cursor;
         let mut total = 0u32;
@@ -498,18 +498,26 @@ impl<T: Transport> OuraClient<T> {
                     for ep in ext_envelopes.push_packet(p) {
                         if ep.tag >= protocol::HISTORY_EVENT_PREFIX {
                             let ev = RingEvent::from_packet(&ep);
+                            if !on_event(&ev) {
+                                return Err(Error::Protocol(
+                                    "event callback failed; not acknowledging batch".into(),
+                                ));
+                            }
                             max_ts = max_ts.max(ev.timestamp);
                             batch_events += 1;
                             total += 1;
-                            on_event(&ev);
                         }
                     }
                 } else if p.tag >= protocol::HISTORY_EVENT_PREFIX {
                     let ev = RingEvent::from_packet(p);
+                    if !on_event(&ev) {
+                        return Err(Error::Protocol(
+                            "event callback failed; not acknowledging batch".into(),
+                        ));
+                    }
                     max_ts = max_ts.max(ev.timestamp);
                     batch_events += 1;
                     total += 1;
-                    on_event(&ev);
                 }
             }
 
@@ -529,17 +537,23 @@ impl<T: Transport> OuraClient<T> {
             let progressed = batch_events > 0 && next > start;
             if progressed {
                 start = next;
+            }
+            // Report every batch (even an empty terminal one) so callers can
+            // persist the cursor and show progress.
+            if !on_batch(&BatchProgress {
+                next_cursor: start,
+                bytes_left,
+                events_synced: total,
+            }) {
+                return Err(Error::Protocol(
+                    "batch callback failed; not acknowledging batch".into(),
+                ));
+            }
+            if progressed {
                 let _ = self
                     .request_tag(&protocol::req_get_event_ack(start), 0x11)
                     .await;
             }
-            // Report every batch (even an empty terminal one) so callers can
-            // persist the cursor and show progress.
-            on_batch(&BatchProgress {
-                next_cursor: start,
-                bytes_left,
-                events_synced: total,
-            });
             if bytes_left == 0 {
                 break; // drained
             }
