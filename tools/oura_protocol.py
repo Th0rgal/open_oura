@@ -532,8 +532,11 @@ def write_capture(path: Optional[Path], record: dict) -> None:
     if not path:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
+    new = not path.exists()
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True) + "\n")
+    if new:
+        os.chmod(path, 0o600)  # captures hold serials/MAC-derived ids
 
 
 def load_key(args: argparse.Namespace) -> Optional[bytes]:
@@ -589,6 +592,10 @@ async def transact(client: BleakClient, request: bytes, listen_seconds: float, c
         write_capture(capture, record)
         print(f"notification command={name} sender={sender} {describe_packet(payload)}")
 
+    # set_auth_key writes are packet 0x24 || <16-byte ring auth key>; that key
+    # is a secret, so never persist or print the raw bytes.
+    logged_hex = "24<redacted-auth-key>" if name == "set_auth_key" else request.hex()
+
     await client.start_notify(OURA_NOTIFY, on_notify)
     write_capture(
         capture,
@@ -597,10 +604,10 @@ async def transact(client: BleakClient, request: bytes, listen_seconds: float, c
             "command": name,
             "direction": "write",
             "uuid": OURA_WRITE,
-            "hex": request.hex(),
+            "hex": logged_hex,
         },
     )
-    print(f"write command={name} uuid={OURA_WRITE} hex={request.hex()}")
+    print(f"write command={name} uuid={OURA_WRITE} hex={logged_hex}")
     await client.write_gatt_char(OURA_WRITE, request, response=True)
     await asyncio.sleep(listen_seconds)
     await client.stop_notify(OURA_NOTIFY)
@@ -676,8 +683,10 @@ async def main() -> None:
     for name, _, safety in expanded:
         if safety == "state" and not args.include_state:
             raise SystemExit(f"{name} is state-changing; pass --include-state")
-        if safety == "danger" and not args.include_danger:
-            raise SystemExit(f"{name} is dangerous; pass --include-danger")
+        # Raw hex: frames are unclassified -- they can encode any opcode incl.
+        # dangerous ones, so gate them behind --include-danger too.
+        if safety in ("danger", "unknown") and not args.include_danger:
+            raise SystemExit(f"{name} is unclassified/dangerous; pass --include-danger")
 
     key = load_key(args)
     if args.generate_auth_key:
@@ -704,7 +713,7 @@ async def main() -> None:
             if key is None:
                 key = secrets.token_bytes(16)
                 save_key(args.auth_key_file, key)
-                print(f"generated_auth_key file={args.auth_key_file} hex={key.hex()}")
+                print(f"generated_auth_key file={args.auth_key_file} (hex written to file, 0600)")
             await set_auth_key(client, key, args.listen_seconds, capture)
         for name, request, _ in expanded:
             try:
