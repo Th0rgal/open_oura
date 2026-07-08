@@ -60,6 +60,17 @@ tools/oura_tokens.txt
 # Personal profile (age/weight/etc) — not from the ring, local only
 profile.json
 
+# Personal genome files for the /dna explorer — private and large, local only.
+# The curated dna/catalog.json IS committed; the genomes and their indexes are not.
+dna/files/*.vcf.gz
+dna/files/*.vcf.gz.tbi
+dna/files/*.vcf.gz.csi
+dna/files/*.vcf
+# Fetched PGS Catalog scoring files (large public downloads, cached locally).
+dna/scores/*.txt
+dna/scores/*.txt.gz
+dna/scores/*.part
+
 # On-ring feature modes snapshot (local device state)
 feature_modes.json
 
@@ -78,3 +89,11 @@ apps/ios/OuraApp/OuraApp.xcodeproj/
 # local libtorch device build + packaged xcframeworks (large build artifacts)
 apps/ios/libtorch-xcframeworks/
 local/libtorch-ios/pytorch/build_ios_device/
+
+# Local DB backups — contain ring health data and device serials (the *.db rule
+# above doesn't catch the `.db.bak-<ts>-premerge` suffix).
+*.db.bak-*
+*.db.bak
+
+# Working plan drafts kept out of the repo (self-declared "not committed").
+PLAN-*.md

@@ -655,6 +655,25 @@ function sleepReport(d, ymd) {
     mc("Fragmentation", m.frag_index != null ? m.frag_index + " /h" : "—");
   root.append(mg);
 
+  // autonomic recovery resolved by sleep stage. Deep-sleep HRV is the recovery-relevant
+  // number; we deliberately don't show a single overnight HRV "slope" — nocturnal HRV is
+  // stage-driven (deep ↑, REM ↓), so a slope mostly tracks stage order, not recovery.
+  const a = n.autonomic;
+  if (a && [a.hrv_deep, a.hrv_light, a.hrv_rem, a.hr_deep, a.hr_light, a.hr_rem].some((x) => x != null)) {
+    root.append(el("p", "subhead", "Autonomic recovery by stage"));
+    const at = el("div", "metric-grid");
+    const cell = (k, v) => `<div class="mc"><div class="mc-v">${v}</div><div class="mc-k">${k}</div></div>`;
+    const val = (x, u) => (x != null ? x + u : "—");
+    at.innerHTML =
+      cell("HRV · Deep", val(a.hrv_deep, " ms")) +
+      cell("HRV · Light", val(a.hrv_light, " ms")) +
+      cell("HRV · REM", val(a.hrv_rem, " ms")) +
+      cell("HR · Deep", val(a.hr_deep, " bpm")) +
+      cell("HR · Light", val(a.hr_light, " bpm")) +
+      cell("HR · REM", val(a.hr_rem, " bpm"));
+    root.append(at);
+  }
+
   root.append(el("p", "subhead", "Interpretation"), sleepInterpretation(d, n, m));
   return root;
 }

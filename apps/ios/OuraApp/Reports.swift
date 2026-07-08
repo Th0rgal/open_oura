@@ -19,7 +19,36 @@ struct SleepMetrics {
     var remFirstHalfPct: Double?
 }
 
+// Mean HR/HRV per sleep stage — deep-sleep HRV is the recovery-relevant number. Mirror of
+// oura-summary `autonomic_by_stage` (which the iOS FFI leaves null under NoModelRunner).
+// iOS aligns the even-spread `series` to stages by index fraction rather than the server's
+// per-sample timestamps, so values can differ by a hair; see docs/clients-web-and-ios.md.
+struct StageAutonomic {
+    var hrvDeep: Double?; var hrvLight: Double?; var hrvRem: Double?
+    var hrDeep: Double?; var hrLight: Double?; var hrRem: Double?
+    var any: Bool { [hrvDeep, hrvLight, hrvRem, hrDeep, hrLight, hrRem].contains { $0 != nil } }
+}
+
 enum Sleep {
+    /// Mean of each stage's samples, mapping series index → stage by fraction of the night.
+    /// A single overnight HRV slope is intentionally not derived — nocturnal HRV is
+    /// stage-driven (deep ↑, REM ↓), so a slope tracks stage order, not recovery.
+    static func autonomic(hr: [Double], hrv: [Double], stages: [Int]) -> StageAutonomic {
+        func means(_ series: [Double]) -> [Int: Double] {
+            guard series.count > 1, stages.count > 0 else { return [:] }
+            var sum: [Int: Double] = [:], cnt: [Int: Int] = [:]
+            for (i, v) in series.enumerated() where v > 0 {
+                let f = Double(i) / Double(series.count - 1)
+                let s = stages[min(Int(f * Double(stages.count)), stages.count - 1)]
+                sum[s, default: 0] += v; cnt[s, default: 0] += 1
+            }
+            return cnt.reduce(into: [:]) { $0[$1.key] = (sum[$1.key]! / Double($1.value)).rounded() }
+        }
+        let h = means(hr), v = means(hrv)
+        return StageAutonomic(hrvDeep: v[1], hrvLight: v[2], hrvRem: v[3],
+                              hrDeep: h[1], hrLight: h[2], hrRem: h[3])
+    }
+
     /// Mode filter over a centered odd window — removes single-epoch flicker so cycle /
     /// awakening counts reflect real architecture, not 30 s noise.
     static func smooth(_ v: [Int], _ win: Int) -> [Int] {
@@ -438,6 +467,13 @@ struct SleepReport: View {
                 }
                 if let m = metrics { clinicalGrid(m) }
 
+                let auto = Sleep.autonomic(hr: n.series?.hr ?? [], hrv: n.series?.hrv ?? [],
+                                           stages: Sleep.smooth(n.stages ?? [], 5))
+                if auto.any {
+                    Rule("autonomic recovery by stage")
+                    autonomicGrid(auto)
+                }
+
                 Rule("interpretation")
                 interpretation(n, metrics)
             } else {
@@ -479,6 +515,19 @@ struct SleepReport: View {
             ("awakenings", "\(m.awakenings)"),
             ("sleep cycles", "\(m.cycles)"),
             ("fragmentation", String(format: "%.0f /h", m.fragIndex)),
+        ]
+        let cols = [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())]
+        LazyVGrid(columns: cols, alignment: .leading, spacing: 18) {
+            ForEach(cells, id: \.0) { Readout(value: $0.1, caption: $0.0) }
+        }
+    }
+
+    @ViewBuilder private func autonomicGrid(_ a: StageAutonomic) -> some View {
+        let hrv = { (x: Double?) in x.map { "\(Int($0)) ms" } ?? "—" }
+        let hr = { (x: Double?) in x.map { "\(Int($0)) bpm" } ?? "—" }
+        let cells: [(String, String)] = [
+            ("hrv · deep", hrv(a.hrvDeep)), ("hrv · light", hrv(a.hrvLight)), ("hrv · rem", hrv(a.hrvRem)),
+            ("hr · deep", hr(a.hrDeep)), ("hr · light", hr(a.hrLight)), ("hr · rem", hr(a.hrRem)),
         ]
         let cols = [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())]
         LazyVGrid(columns: cols, alignment: .leading, spacing: 18) {

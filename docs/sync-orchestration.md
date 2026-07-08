@@ -83,6 +83,23 @@ bundled events on extended sync. The parser must walk the whole notification or
 bundle. The persisted cursor (`nextEventToSync`) makes sync incremental.
 `sleepAnalysisProgress` is surfaced as progress only, not a block.
 
+Two places where `oura-link` deliberately deviates from the app's literal
+behavior (2026-07-04):
+
+- **Batch termination.** The summary packet is the ring's explicit batch
+  terminator, so the client returns from a request the moment it (or a
+  command's known single response) arrives, instead of waiting out a quiet
+  window after the last frame. The quiet window (1.5 s) remains only as the
+  fallback for errors/dead links. A batch that ends *without* a summary is a
+  hard error (link lost mid-batch), never treated as "drained".
+- **Batch size.** The app requests `max_events = 65535` — effectively the whole
+  backlog as one batch. Since the cursor can only be checkpointed at batch
+  boundaries, one giant batch means a dropped link forfeits all progress and
+  gives no progress feedback. `oura-link` uses 4096-event batches
+  (`EXT_BATCH_MAX_EVENTS`): per-batch overhead is a couple of round-trips
+  (negligible), and every batch yields a cursor checkpoint + a `bytes_left`
+  progress report.
+
 ### Extended event sync status
 
 Ring 5 responds to Android's newer `ExtGetEvent` request:

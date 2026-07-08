@@ -40,9 +40,13 @@ DB = resolve_db(db_arg, REPO)
 con = sqlite3.connect(str(DB))
 rows = con.execute("SELECT ring_timestamp, tag, decoded_json, captured_unix FROM events "
                    "WHERE decoded_json IS NOT NULL ORDER BY ring_timestamp").fetchall()
-max_ds, anchor_unix = max(((r[0], r[3]) for r in rows), key=lambda x: x[0])
+# Anchor ring deciseconds to wall-clock per boot epoch (ds resets on reboot; a single
+# global anchor mis-dates older epochs — see epoch_time / crates/oura-summary).
+from epoch_time import build_epochs, make_unix_s
+_epochs = build_epochs([(r[0], r[3]) for r in rows])
+_unix_s = make_unix_s(_epochs)
 def ms(ds):  # device deciseconds -> absolute epoch ms (int64), consistent across signals
-    return int(anchor_unix * 1000 - (max_ds - ds) * 100)
+    return int(_unix_s(ds) * 1000)
 def hm(ms_):
     return datetime.datetime.utcfromtimestamp(ms_/1000 + TZ*3600).strftime("%H:%M")
 

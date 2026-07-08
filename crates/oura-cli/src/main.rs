@@ -14,7 +14,9 @@ use oura_store::storage::Store;
 
 #[cfg(feature = "torch")]
 mod activity_model;
+mod blood;
 mod dashboard;
+mod dna;
 mod game;
 mod motion_server;
 mod pyrunner;
@@ -209,6 +211,12 @@ enum Command {
         /// Weight (kg) for the CVA model.
         #[arg(long, default_value_t = 75.0)]
         weight: f64,
+        /// Directory to read genome `*.vcf.gz` files from for the /dna explorer.
+        /// Keep your (large, private) genomes anywhere — e.g.
+        /// `--dna-files ~/Documents/health/genomes`. Defaults to the repo's
+        /// `dna/files/`; also settable via `$OURA_DNA_FILES`.
+        #[arg(long, value_name = "DIR")]
+        dna_files: Option<PathBuf>,
     },
 }
 
@@ -366,6 +374,7 @@ async fn main() -> Result<()> {
             age,
             height,
             weight,
+            dna_files,
         } => {
             let seed = dashboard::Demographics {
                 sex: sex.chars().next().unwrap_or('M').to_ascii_uppercase(),
@@ -374,6 +383,8 @@ async fn main() -> Result<()> {
                 weight_kg: *weight,
                 ring_size: 10.0,
             };
+            // where the /dna explorer reads genome files from (flag → env → repo default)
+            dna::set_genomes_dir(dna_files.clone());
             dashboard::serve(
                 *port,
                 cli.db.clone(),
@@ -840,14 +851,19 @@ async fn cmd_sync(cli: &Cli, key: &Option<[u8; 16]>, sync_time: bool) -> Result<
             // Persist the cursor after each fully-drained batch (so an interrupted
             // sync still makes progress) — but not once a DB write has failed. A
             // failed cursor write is itself recorded so it can't be silently lost.
-            |c| {
+            |p| {
                 if db_err.borrow().is_some() {
                     return;
                 }
-                match store.set_cursor(&serial, c) {
+                match store.set_cursor(&serial, p.next_cursor) {
                     Ok(()) => cursor_advanced.set(true),
                     Err(e) => *db_err.borrow_mut() = Some(e),
                 }
+                println!(
+                    "  … {} events so far, ~{:.1} KB left on ring",
+                    p.events_synced,
+                    p.bytes_left as f64 / 1024.0
+                );
             },
         )
         .await?;

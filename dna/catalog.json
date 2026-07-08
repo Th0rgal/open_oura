@@ -1,0 +1,300 @@
+{
+  "build": "GRCh38",
+  "_about": "Editable, local-only trait + polygenic-score catalog for the /dna explorer. Educational, NOT medical advice. Matching is by rsID first (build-independent) then chrom:pos. Alleles are on the VCF reference-forward strand; a genotype the table doesn't list is shown without an interpretation rather than a wrong one. Polygenic scores are illustrative toy models, not validated clinical PRS. Add your own entries freely.",
+  "traits": [
+    {
+      "id": "lactase", "name": "Lactase persistence", "category": "nutrition",
+      "rsid": "rs4988235", "chrom": "2", "pos": 135851076, "ref": "C", "alt": "T",
+      "note": "MCM6/LCT. Whether you keep producing lactase (digest milk) into adulthood.",
+      "source_url": "https://www.snpedia.com/index.php/Rs4988235",
+      "genotypes": {
+        "TT": { "label": "Lactose tolerant", "magnitude": "good", "note": "Lactase-persistent — dairy is usually fine." },
+        "CT": { "label": "Likely tolerant", "magnitude": "neutral", "note": "Usually still persistent." },
+        "CC": { "label": "Likely intolerant", "magnitude": "watch", "note": "Lactase tends to switch off in adulthood." }
+      }
+    },
+    {
+      "id": "caffeine", "name": "Caffeine metabolism", "category": "nutrition",
+      "rsid": "rs762551", "chrom": "15", "pos": 74749576, "ref": "A", "alt": "C",
+      "note": "CYP1A2. How fast you clear caffeine from the blood.",
+      "source_url": "https://www.snpedia.com/index.php/Rs762551",
+      "genotypes": {
+        "AA": { "label": "Fast metabolizer", "magnitude": "good", "note": "Clears caffeine quickly (*1A/*1A)." },
+        "AC": { "label": "Slow metabolizer", "magnitude": "neutral", "note": "Caffeine lingers longer." },
+        "CC": { "label": "Slow metabolizer", "magnitude": "watch", "note": "Caffeine lingers markedly longer — mind late-day coffee." }
+      }
+    },
+    {
+      "id": "alcohol-flush", "name": "Alcohol flush (ALDH2)", "category": "nutrition",
+      "rsid": "rs671", "chrom": "12", "pos": 111803962, "ref": "G", "alt": "A",
+      "note": "ALDH2. The 'Asian flush' — acetaldehyde builds up when the A allele is present.",
+      "source_url": "https://www.snpedia.com/index.php/Rs671",
+      "genotypes": {
+        "GG": { "label": "Normal ALDH2", "magnitude": "neutral", "note": "Typical acetaldehyde clearance." },
+        "AG": { "label": "Reduced ALDH2", "magnitude": "watch", "note": "Facial flushing; higher alcohol sensitivity." },
+        "AA": { "label": "Inactive ALDH2", "magnitude": "watch", "note": "Strong flush reaction — alcohol poorly tolerated." }
+      }
+    },
+    {
+      "id": "adh1b", "name": "Alcohol metabolism (ADH1B)", "category": "nutrition",
+      "rsid": "rs1229984", "chrom": "4", "pos": 99318162, "ref": "A", "alt": "G",
+      "note": "ADH1B His48Arg. The A (His48) allele metabolizes alcohol faster.",
+      "source_url": "https://www.snpedia.com/index.php/Rs1229984",
+      "genotypes": {
+        "AA": { "label": "Very fast", "magnitude": "neutral", "note": "Rapid first-pass alcohol metabolism." },
+        "AG": { "label": "Fast", "magnitude": "neutral", "note": "Faster-than-typical metabolism." },
+        "GG": { "label": "Typical", "magnitude": "neutral", "note": "Common European metabolism rate." }
+      }
+    },
+    {
+      "id": "mthfr-677", "name": "Folate processing (MTHFR C677T)", "category": "nutrition",
+      "rsid": "rs1801133", "chrom": "1", "pos": 11796321, "ref": "G", "alt": "A",
+      "note": "MTHFR 677. The A (T677) allele lowers enzyme activity; forward-strand alleles are G/A.",
+      "source_url": "https://www.snpedia.com/index.php/Rs1801133",
+      "genotypes": {
+        "GG": { "label": "Normal (CC)", "magnitude": "good", "note": "Full MTHFR activity." },
+        "AG": { "label": "Intermediate (CT)", "magnitude": "neutral", "note": "~65% activity." },
+        "AA": { "label": "Reduced (TT)", "magnitude": "watch", "note": "~30% activity — folate-rich diet helps." }
+      }
+    },
+    {
+      "id": "fut2", "name": "B12 & secretor status (FUT2)", "category": "nutrition",
+      "rsid": "rs602662", "chrom": "19", "pos": 48703160, "ref": "G", "alt": "A",
+      "note": "FUT2. Influences serum B12 and whether you secrete blood-group antigens.",
+      "source_url": "https://www.snpedia.com/index.php/Rs602662",
+      "genotypes": {
+        "GG": { "label": "Secretor", "magnitude": "neutral", "note": "Secretor; often lower serum B12." },
+        "AG": { "label": "Secretor", "magnitude": "neutral" },
+        "AA": { "label": "Non-secretor", "magnitude": "neutral", "note": "Non-secretor; often higher serum B12, some infection resistance." }
+      }
+    },
+    {
+      "id": "actn3", "name": "Muscle type (ACTN3)", "category": "fitness",
+      "rsid": "rs1815739", "chrom": "11", "pos": 66560624, "ref": "C", "alt": "T",
+      "note": "ACTN3 R577X — the 'sprint gene'. C makes functional alpha-actinin-3 (power); T is a stop.",
+      "source_url": "https://www.snpedia.com/index.php/Rs1815739",
+      "genotypes": {
+        "CC": { "label": "Power / sprint", "magnitude": "good", "note": "Full ACTN3 — power-oriented muscle." },
+        "CT": { "label": "Mixed", "magnitude": "neutral", "note": "Both power and endurance potential." },
+        "TT": { "label": "Endurance", "magnitude": "neutral", "note": "No ACTN3 — endurance-leaning muscle." }
+      }
+    },
+    {
+      "id": "ppargc1a", "name": "Aerobic capacity (PPARGC1A)", "category": "fitness",
+      "rsid": "rs8192678", "chrom": "4", "pos": 23815662, "ref": "C", "alt": "T",
+      "note": "PPARGC1A Gly482Ser — mitochondrial biogenesis regulator linked to endurance.",
+      "source_url": "https://www.snpedia.com/index.php/Rs8192678",
+      "genotypes": {
+        "CC": { "label": "Gly/Gly", "magnitude": "good", "note": "Associated with higher aerobic capacity." },
+        "CT": { "label": "Gly/Ser", "magnitude": "neutral" },
+        "TT": { "label": "Ser/Ser", "magnitude": "neutral" }
+      }
+    },
+    {
+      "id": "eye-color", "name": "Eye colour", "category": "appearance",
+      "rsid": "rs12913832", "chrom": "15", "pos": 28120472, "ref": "A", "alt": "G",
+      "note": "HERC2/OCA2 — the strongest single predictor of blue vs brown eyes.",
+      "source_url": "https://www.snpedia.com/index.php/Rs12913832",
+      "genotypes": {
+        "GG": { "label": "Brown", "magnitude": "neutral", "note": "Brown eyes very likely." },
+        "AG": { "label": "Brown / hazel", "magnitude": "neutral", "note": "Usually brown or intermediate." },
+        "AA": { "label": "Blue", "magnitude": "neutral", "note": "Blue eyes very likely." }
+      }
+    },
+    {
+      "id": "red-hair", "name": "Red hair (MC1R)", "category": "appearance",
+      "rsid": "rs1805007", "chrom": "16", "pos": 89919709, "ref": "C", "alt": "T",
+      "note": "MC1R R151C. The T allele is one of the classic red-hair / fair-skin variants.",
+      "source_url": "https://www.snpedia.com/index.php/Rs1805007",
+      "genotypes": {
+        "CC": { "label": "Not this variant", "magnitude": "neutral" },
+        "CT": { "label": "Carrier", "magnitude": "neutral", "note": "One red-hair allele; often fair skin / freckles." },
+        "TT": { "label": "Red hair likely", "magnitude": "neutral", "note": "Two alleles — red hair and sun sensitivity likely." }
+      }
+    },
+    {
+      "id": "earwax", "name": "Earwax & body odour (ABCC11)", "category": "appearance",
+      "rsid": "rs17822931", "chrom": "16", "pos": 48258198, "ref": "C", "alt": "T",
+      "note": "ABCC11. The T allele gives dry earwax and much less underarm odour.",
+      "source_url": "https://www.snpedia.com/index.php/Rs17822931",
+      "genotypes": {
+        "TT": { "label": "Dry earwax", "magnitude": "good", "note": "Dry earwax, low body odour." },
+        "CT": { "label": "Wet earwax", "magnitude": "neutral", "note": "Wet earwax (dominant)." },
+        "CC": { "label": "Wet earwax", "magnitude": "neutral", "note": "Wet earwax, typical body odour." }
+      }
+    },
+    {
+      "id": "bitter-taste", "name": "Bitter taste (TAS2R38)", "category": "appearance",
+      "rsid": "rs713598", "chrom": "7", "pos": 141973545, "ref": "C", "alt": "G",
+      "note": "TAS2R38 A49P — whether you taste PTC/PROP bitterness (broccoli, coffee).",
+      "source_url": "https://www.snpedia.com/index.php/Rs713598",
+      "genotypes": {
+        "CC": { "label": "Taster", "magnitude": "neutral", "note": "Strong bitter perception (PAV)." },
+        "CG": { "label": "Intermediate", "magnitude": "neutral" },
+        "GG": { "label": "Non-taster", "magnitude": "neutral", "note": "Little bitter perception (AVI)." }
+      }
+    },
+    {
+      "id": "cilantro", "name": "Cilantro tastes soapy", "category": "appearance",
+      "rsid": "rs72921001", "chrom": "11", "pos": 6845035, "ref": "C", "alt": "A",
+      "note": "Near OR6A2 (olfactory receptor). The C allele is linked to the soapy-cilantro perception.",
+      "source_url": "https://www.snpedia.com/index.php/Rs72921001",
+      "genotypes": {
+        "CC": { "label": "Soapy likely", "magnitude": "neutral", "note": "More likely to find cilantro soapy." },
+        "AC": { "label": "Intermediate", "magnitude": "neutral" },
+        "AA": { "label": "Not soapy", "magnitude": "neutral" }
+      }
+    },
+    {
+      "id": "chronotype", "name": "Chronotype (CLOCK)", "category": "sleep",
+      "rsid": "rs1801260", "chrom": "4", "pos": 55435202, "ref": "A", "alt": "G",
+      "note": "CLOCK 3111T/C. The G allele leans toward eveningness and later sleep timing.",
+      "source_url": "https://www.snpedia.com/index.php/Rs1801260",
+      "genotypes": {
+        "AA": { "label": "Morning-leaning", "magnitude": "neutral", "note": "Tends earlier." },
+        "AG": { "label": "Intermediate", "magnitude": "neutral" },
+        "GG": { "label": "Evening-leaning", "magnitude": "neutral", "note": "Tends toward night-owl timing." }
+      }
+    },
+    {
+      "id": "deep-sleep", "name": "Deep sleep depth (ADA)", "category": "sleep",
+      "rsid": "rs73598374", "chrom": "20", "pos": 44619522, "ref": "C", "alt": "T",
+      "note": "ADA G22A. The T allele is associated with more slow-wave (deep) sleep.",
+      "source_url": "https://www.snpedia.com/index.php/Rs73598374",
+      "genotypes": {
+        "CC": { "label": "Typical deep sleep", "magnitude": "neutral" },
+        "CT": { "label": "More deep sleep", "magnitude": "good", "note": "Linked to greater slow-wave sleep and sleep pressure." },
+        "TT": { "label": "More deep sleep", "magnitude": "good", "note": "Linked to greater slow-wave sleep." }
+      }
+    },
+    {
+      "id": "comt", "name": "Stress style (COMT Val158Met)", "category": "behaviour",
+      "rsid": "rs4680", "chrom": "22", "pos": 19963748, "ref": "G", "alt": "A",
+      "note": "COMT. G (Val, 'warrior') clears dopamine fast; A (Met, 'worrier') keeps more in the prefrontal cortex.",
+      "source_url": "https://www.snpedia.com/index.php/Rs4680",
+      "genotypes": {
+        "GG": { "label": "Warrior (Val/Val)", "magnitude": "neutral", "note": "Steadier under stress, lower resting dopamine." },
+        "AG": { "label": "Balanced (Val/Met)", "magnitude": "neutral" },
+        "AA": { "label": "Worrier (Met/Met)", "magnitude": "neutral", "note": "Higher baseline focus, more stress-sensitive." }
+      }
+    },
+    {
+      "id": "oxtr", "name": "Empathy (OXTR)", "category": "behaviour",
+      "rsid": "rs53576", "chrom": "3", "pos": 8762685, "ref": "A", "alt": "G",
+      "note": "Oxytocin receptor. The G allele is associated with higher empathy and optimism in some studies.",
+      "source_url": "https://www.snpedia.com/index.php/Rs53576",
+      "genotypes": {
+        "GG": { "label": "Higher empathy", "magnitude": "neutral", "note": "Associated with prosociality (weak effect)." },
+        "AG": { "label": "Intermediate", "magnitude": "neutral" },
+        "AA": { "label": "Lower (per studies)", "magnitude": "neutral" }
+      }
+    },
+    {
+      "id": "bdnf", "name": "BDNF Val66Met", "category": "behaviour",
+      "rsid": "rs6265", "chrom": "11", "pos": 27658369, "ref": "C", "alt": "T",
+      "note": "BDNF. The T (Met) allele slightly alters activity-dependent BDNF secretion (memory, plasticity).",
+      "source_url": "https://www.snpedia.com/index.php/Rs6265",
+      "genotypes": {
+        "CC": { "label": "Val/Val", "magnitude": "good", "note": "Typical activity-dependent BDNF." },
+        "CT": { "label": "Val/Met", "magnitude": "neutral" },
+        "TT": { "label": "Met/Met", "magnitude": "neutral" }
+      }
+    },
+    {
+      "id": "oprm1", "name": "Opioid response (OPRM1)", "category": "pharma",
+      "rsid": "rs1799971", "chrom": "6", "pos": 154360797, "ref": "A", "alt": "G",
+      "note": "OPRM1 A118G. The G allele can raise opioid dose requirements. Pharmacogenetic — discuss with a clinician.",
+      "source_url": "https://www.snpedia.com/index.php/Rs1799971",
+      "genotypes": {
+        "AA": { "label": "Typical response", "magnitude": "neutral" },
+        "AG": { "label": "Altered response", "magnitude": "watch", "note": "May need higher opioid doses." },
+        "GG": { "label": "Altered response", "magnitude": "watch", "note": "Often higher opioid dose requirement." }
+      }
+    },
+    {
+      "id": "slco1b1", "name": "Statin myopathy risk (SLCO1B1)", "category": "pharma",
+      "rsid": "rs4149056", "chrom": "12", "pos": 21178615, "ref": "T", "alt": "C",
+      "note": "SLCO1B1. The C allele raises simvastatin muscle-toxicity risk. Pharmacogenetic — inform your prescriber.",
+      "source_url": "https://www.snpedia.com/index.php/Rs4149056",
+      "genotypes": {
+        "TT": { "label": "Normal transport", "magnitude": "good", "note": "Typical statin handling." },
+        "CT": { "label": "Intermediate", "magnitude": "watch", "note": "Somewhat higher myopathy risk on high-dose simvastatin." },
+        "CC": { "label": "Reduced transport", "magnitude": "watch", "note": "Higher myopathy risk — dose/statin choice matters." }
+      }
+    },
+    {
+      "id": "vkorc1", "name": "Warfarin sensitivity (VKORC1)", "category": "pharma",
+      "rsid": "rs9923231", "chrom": "16", "pos": 31096368, "ref": "C", "alt": "T",
+      "note": "VKORC1 -1639G>A. The T (A) allele lowers the warfarin dose needed. Pharmacogenetic.",
+      "source_url": "https://www.snpedia.com/index.php/Rs9923231",
+      "genotypes": {
+        "CC": { "label": "Standard dose", "magnitude": "neutral" },
+        "CT": { "label": "Increased sensitivity", "magnitude": "watch", "note": "Lower warfarin dose likely." },
+        "TT": { "label": "High sensitivity", "magnitude": "watch", "note": "Much lower warfarin dose likely." }
+      }
+    },
+    {
+      "id": "tcf7l2", "name": "Type 2 diabetes signal (TCF7L2)", "category": "health",
+      "rsid": "rs7903146", "chrom": "10", "pos": 112998590, "ref": "C", "alt": "T",
+      "note": "TCF7L2 — the strongest common type-2-diabetes variant. The T allele raises risk.",
+      "source_url": "https://www.snpedia.com/index.php/Rs7903146",
+      "genotypes": {
+        "CC": { "label": "Lower risk", "magnitude": "good" },
+        "CT": { "label": "Intermediate", "magnitude": "neutral" },
+        "TT": { "label": "Higher risk", "magnitude": "watch", "note": "~2x relative risk vs CC — diet & activity matter." }
+      }
+    },
+    {
+      "id": "apoe-e4", "name": "APOE variant (rs429358)", "category": "health",
+      "rsid": "rs429358", "chrom": "19", "pos": 44908684, "ref": "T", "alt": "C",
+      "note": "One of two SNPs defining APOE ε2/ε3/ε4. The C allele here marks ε4 (Alzheimer's risk). Read together with rs7412.",
+      "source_url": "https://www.snpedia.com/index.php/Rs429358",
+      "genotypes": {
+        "TT": { "label": "No ε4 here", "magnitude": "good" },
+        "CT": { "label": "One ε4 allele", "magnitude": "watch", "note": "Combine with rs7412 for full ε genotype." },
+        "CC": { "label": "Two ε4 alleles", "magnitude": "watch", "note": "ε4/ε4 if rs7412 is C/C — higher Alzheimer's risk." }
+      }
+    },
+    {
+      "id": "apoe-e2", "name": "APOE variant (rs7412)", "category": "health",
+      "rsid": "rs7412", "chrom": "19", "pos": 44908822, "ref": "C", "alt": "T",
+      "note": "The second APOE SNP. The T allele marks ε2 (protective). Read together with rs429358.",
+      "source_url": "https://www.snpedia.com/index.php/Rs7412",
+      "genotypes": {
+        "CC": { "label": "No ε2 here", "magnitude": "neutral" },
+        "CT": { "label": "One ε2 allele", "magnitude": "good", "note": "Combine with rs429358 for full ε genotype." },
+        "TT": { "label": "Two ε2 alleles", "magnitude": "good", "note": "ε2/ε2 if rs429358 is T/T." }
+      }
+    }
+  ],
+  "scores": [
+    {
+      "id": "t2d-illustrative", "name": "Type 2 diabetes (illustrative)", "category": "health",
+      "note": "A toy 4-SNP weighted sum, NOT a validated clinical risk score. Weights are approximate log-odds from GWAS. Educational only.",
+      "bands": [
+        { "max": 0.35, "label": "Lower than average", "magnitude": "good" },
+        { "max": 0.70, "label": "About average", "magnitude": "neutral" },
+        { "label": "Higher than average", "magnitude": "watch" }
+      ],
+      "snps": [
+        { "rsid": "rs7903146", "chrom": "10", "pos": 112998590, "effect_allele": "T", "weight": 0.30 },
+        { "rsid": "rs5219", "chrom": "11", "pos": 17387083, "effect_allele": "T", "weight": 0.10 },
+        { "rsid": "rs13266634", "chrom": "8", "pos": 117172544, "effect_allele": "C", "weight": 0.10 },
+        { "rsid": "rs1111875", "chrom": "10", "pos": 92703125, "effect_allele": "C", "weight": 0.08 }
+      ]
+    },
+    {
+      "id": "caffeine-sensitivity", "name": "Caffeine sensitivity (illustrative)", "category": "nutrition",
+      "note": "A toy 2-SNP model: slower clearance (CYP1A2) plus a caffeine-anxiety signal (ADORA2A). Higher = more sensitive. Educational only.",
+      "bands": [
+        { "max": 1.0, "label": "Low sensitivity", "magnitude": "good" },
+        { "max": 2.0, "label": "Moderate", "magnitude": "neutral" },
+        { "label": "High sensitivity", "magnitude": "watch" }
+      ],
+      "snps": [
+        { "rsid": "rs762551", "chrom": "15", "pos": 74749576, "effect_allele": "C", "weight": 1.0 },
+        { "rsid": "rs5751876", "chrom": "22", "pos": 24437953, "effect_allele": "T", "weight": 0.5 }
+      ]
+    }
+  ]
+}

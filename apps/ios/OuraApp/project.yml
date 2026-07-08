@@ -39,10 +39,15 @@ targets:
         SWIFT_OBJC_BRIDGING_HEADER: TorchBridge.h
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: TORCH
         CLANG_CXX_LANGUAGE_STANDARD: "c++17"
-        HEADER_SEARCH_PATHS:
+        # SYSTEM (not user) header search paths: libtorch headers are third-party
+        # and trip -Wdocumentation / -Wshorten-64-to-32 warnings we can't fix —
+        # system headers are exempt from warnings, keeping the build log clean.
+        SYSTEM_HEADER_SEARCH_PATHS:
           - $(SRCROOT)/../../../local/libtorch-ios/pytorch/build_ios/install/include
           - $(SRCROOT)/../../../local/libtorch-ios/pytorch/build_ios/install/include/torch/csrc/api/include
-        OTHER_LDFLAGS: [-lc++, -lsqlite3]
+        # no -lc++ here: TorchBridge.mm makes this a C++ target, so Xcode already
+        # links libc++ — passing it again makes ld warn about a duplicate library.
+        OTHER_LDFLAGS: [-lsqlite3]
         LD_RUNPATH_SEARCH_PATHS: [$(inherited), "@executable_path/Frameworks"]
     sources:
       - path: OuraApp.swift

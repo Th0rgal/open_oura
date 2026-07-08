@@ -1,0 +1,218 @@
+/* DNA explorer — layers on top of styles.css, reusing its tokens + panel/tile/gauge look. */
+
+.dna-sub {
+  font: 500 12px/1 var(--sans);
+  color: var(--muted);
+  padding-left: 8px;
+  margin-left: 6px;
+  border-left: 1px solid var(--line);
+  align-self: center;
+}
+
+/* one rule for every inline accent link on the page (rsID / PGS / source links) */
+.digest a,
+.dna-pick-meta a,
+.dna-score-source a,
+.dna-rec-note a,
+.dna-card-rs a { color: var(--accent); text-decoration: none; }
+.digest a:hover,
+.dna-pick-meta a:hover,
+.dna-score-source a:hover,
+.dna-rec-note a:hover,
+.dna-card-rs a:hover { text-decoration: underline; }
+
+/* controls: genome + score selection */
+.dna-controls { display: flex; gap: 20px; flex-wrap: wrap; }
+.dna-ctl { display: flex; flex-direction: column; gap: 8px; min-width: 180px; }
+.dna-ctl-grow { flex: 1; min-width: 300px; }
+.dna-ctl-label { font: 600 11px/1 var(--sans); text-transform: uppercase; letter-spacing: .08em; color: var(--faint); }
+.dna-ctl-label-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.dna-hint { font: 400 12px/1.3 var(--muted, inherit); color: var(--faint); }
+
+.dna-select {
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  font: 500 13px/1 var(--sans);
+  cursor: pointer;
+  max-width: 100%;
+}
+.dna-select:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
+
+/* score picker */
+.dna-picker { display: flex; flex-direction: column; gap: 4px; max-height: 260px; overflow-y: auto; }
+.dna-pick {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  cursor: pointer;
+}
+.dna-pick:hover { border-color: var(--hover-line); background: var(--hover-fill); }
+.dna-pick input { margin-top: 2px; accent-color: var(--accent); }
+.dna-pick-body { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
+.dna-pick-name { font: 600 13px/1.2 var(--sans); }
+.dna-pick-meta { font: 400 11px/1 var(--mono); color: var(--faint); }
+
+.dna-badge {
+  font: 700 9px/1 var(--sans);
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  padding: 3px 5px;
+  border-radius: 4px;
+}
+.dna-badge.pgs { background: var(--accent-soft); color: var(--accent); }
+.dna-badge.builtin { background: color-mix(in oklab, var(--faint) 18%, transparent); color: var(--muted); }
+
+/* add-from-PGS form */
+.dna-add { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+.dna-add .ic { flex: none; }
+.dna-add input {
+  flex: 1;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  font: 400 13px/1 var(--mono);
+}
+.dna-add input:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
+.dna-add-status { font: 400 12px/1.4 var(--sans); min-height: 1em; }
+.dna-add-status.busy { color: var(--muted); }
+.dna-add-status.ok { color: var(--accent); }
+.dna-add-status.err { color: var(--warn); }
+
+.dna-caveat-tag { font: 500 11px/1 var(--sans); color: var(--faint); cursor: help; }
+
+/* informational banner (e.g. a CNV/SV file was selected) */
+.dna-notice {
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  font: 400 13px/1.55 var(--sans);
+  color: var(--text);
+}
+
+/* search */
+.dna-search { display: flex; gap: 8px; }
+.dna-search input {
+  flex: 1;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  font: 400 14px/1.2 var(--mono);
+}
+.dna-search input:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
+.dna-lookup:empty { display: none; }
+.dna-lookup { margin-top: 12px; }
+
+/* the variant card + trait cards share a compact "record" look */
+.dna-rec {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  background: var(--surface-2);
+}
+.dna-rec-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.dna-rec-name { font: 600 14px/1.2 var(--sans); }
+.dna-geno {
+  font: 700 20px/1 var(--mono);
+  letter-spacing: 1px;
+  color: var(--text);
+}
+.dna-rec-meta { margin-top: 6px; font: 400 12px/1.4 var(--mono); color: var(--faint); }
+.dna-rec-note { margin-top: 6px; font: 400 13px/1.45 var(--sans); color: var(--muted); }
+
+/* trait grid grouped by category */
+.dna-cat { margin-top: 18px; }
+.dna-cat:first-child { margin-top: 4px; }
+.dna-cat-h {
+  font: 600 11px/1 var(--sans);
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: var(--faint);
+  margin: 0 0 10px;
+}
+.dna-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 10px;
+}
+.dna-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  background: var(--surface-2);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.dna-card.miss { opacity: .55; }
+.dna-card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.dna-card-name { font: 600 13px/1.25 var(--sans); }
+.dna-card-geno { font: 700 16px/1 var(--mono); letter-spacing: 1px; }
+.dna-card-sub { font: 400 12px/1.4 var(--sans); color: var(--muted); }
+.dna-card-rs { font: 400 11px/1 var(--mono); color: var(--faint); }
+
+/* accent stripe by magnitude */
+.dna-card.good { border-left: 3px solid var(--good); }
+.dna-card.watch { border-left: 3px solid var(--warn); }
+.dna-card.neutral { border-left: 3px solid var(--line); }
+
+/* polygenic score blocks — auto-fit so 1 card fills the row and N wrap evenly */
+.dna-scores { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+.dna-score {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 14px 16px;
+  background: var(--surface-2);
+}
+.dna-score-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.dna-score-name { font: 600 14px/1.25 var(--sans); }
+.dna-score-source { margin-top: 3px; font: 400 11px/1 var(--mono); color: var(--faint); }
+.dna-score-value { margin-top: 10px; display: flex; align-items: baseline; gap: 8px; }
+.dna-score-value b { font: 700 24px/1 var(--mono); letter-spacing: .5px; }
+.dna-score-value span { font: 400 11px/1 var(--sans); color: var(--faint); text-transform: uppercase; letter-spacing: .05em; }
+.dna-score-note { margin-top: 8px; font: 400 12px/1.45 var(--sans); color: var(--muted); }
+.dna-score-gauge { margin-top: 10px; }
+.dna-score-caveat {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-left: 2px solid var(--warn);
+  background: color-mix(in oklab, var(--warn) 7%, transparent);
+  border-radius: 4px;
+  font: 400 11.5px/1.5 var(--sans);
+  color: var(--muted);
+}
+
+/* rigor stats row */
+.dna-stats { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px; }
+.dna-stat {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 8px; border-radius: 999px; border: 1px solid var(--line);
+}
+.dna-stat .k { font: 500 10px/1 var(--sans); text-transform: uppercase; letter-spacing: .05em; color: var(--faint); }
+.dna-stat .v { font: 600 11px/1 var(--mono); color: var(--text); }
+
+.dna-contribs-label { margin-top: 12px; font: 600 10px/1 var(--sans); text-transform: uppercase; letter-spacing: .07em; color: var(--faint); }
+.dna-contribs { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
+.dna-chip {
+  font: 500 11px/1 var(--mono);
+  padding: 4px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+.dna-chip.up { border-color: color-mix(in oklab, var(--warn) 45%, var(--line)); }
+.dna-chip.down { border-color: color-mix(in oklab, var(--accent) 40%, var(--line)); }
+.dna-chip.miss { opacity: .5; text-decoration: line-through; }
+

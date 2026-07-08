@@ -20,7 +20,7 @@ Default port `8090`; loopback-only.
 
 - **Sync button** (header): drains the ring over Bluetooth without leaving the page
   (runs `oura sync` for you, then refreshes). Pass `--name`/`--key-file` so it can
-  reach your ring, e.g. `--name "Oura Ring 5" --key-file captures/ring5.key`.
+  reach your ring, e.g. `--name "Oura Ring 5" --key-file captures/android/oura-android-auth.key`.
 - **Battery**: read offline from the ring's stored `battery_level_changed` debug
   events; shown in the header and the Device panel.
 - **Your details** (the person icon): edit age / sex / height / weight / ring size.

@@ -24,6 +24,10 @@
 	<true/>
 	<key>MinimumOSVersion</key>
 	<string>17.0</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>bluetooth-central</string>
+	</array>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>open_oura connects to your Oura ring over Bluetooth to read your health data on-device.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
@@ -32,10 +36,6 @@
 	<string>open_oura can read selected Apple Health data to compare it with your ring metrics on-device.</string>
 	<key>NSHealthUpdateUsageDescription</key>
 	<string>open_oura can write selected ring-derived metrics to Apple Health if you enable Health export.</string>
-	<key>UIDeviceFamily</key>
-	<array>
-		<integer>1</integer>
-	</array>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>

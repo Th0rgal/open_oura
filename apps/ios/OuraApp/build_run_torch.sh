@@ -24,8 +24,10 @@ cp "$REPO/target/aarch64-apple-ios-sim/release/liboura_core.a" "$XCF/liboura_cor
 
 echo "==> compile TorchBridge.mm (lite interpreter)"
 rm -rf "$BUILD"; mkdir -p "$APP"
+# -isystem (not -I): libtorch headers are third-party and trip warnings we
+# can't fix; system headers are exempt, keeping the build output clean.
 xcrun -sdk iphonesimulator clang++ -std=c++17 -fobjc-arc -O1 -target "$TRIPLE" \
-    -I"$LT/include" -I"$LT/include/torch/csrc/api/include" \
+    -isystem "$LT/include" -isystem "$LT/include/torch/csrc/api/include" \
     -c "$APPDIR/TorchBridge.mm" -o "$BUILD/TorchBridge.o"
 
 echo "==> compile SwiftUI app (TORCH) + UniFFI bindings, link core + torch"

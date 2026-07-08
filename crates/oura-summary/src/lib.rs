@@ -230,6 +230,63 @@ struct Night {
     temp: Vec<f64>,
     spo2: Vec<f64>,
     motion: Vec<f64>,
+    // timestamped (time_ds, value) HRV/HR samples for stage-resolved autonomics — the
+    // flat `rmssd`/`hr` vecs above drop timing, which we need to map each sample to its
+    // hypnogram stage.
+    hrv_t: Vec<(i64, f64)>,
+    hr_t: Vec<(i64, f64)>,
+}
+
+/// Mean HR / HRV within each sleep stage, mapping each timestamped sample to the
+/// hypnogram epoch it falls in (stages tile [start_ds, end_ds] uniformly). Codes
+/// 1=deep 2=light 3=rem; wake is excluded (not recovery). Returns per-stage means where
+/// samples exist, else `null`.
+///
+/// We deliberately expose per-stage means (esp. deep-sleep HRV, the cleanest recovery
+/// signal) rather than a single overnight HRV slope: nocturnal HRV is stage-driven
+/// (deep ↑, REM ↓), so a naive slope mostly tracks stage ordering, not recovery — a point
+/// the sleep-HRV literature makes explicitly and which Oura's own app avoids.
+fn autonomic_by_stage(
+    hrv_t: &[(i64, f64)],
+    hr_t: &[(i64, f64)],
+    stages: &[i64],
+    start_ds: i64,
+    end_ds: i64,
+) -> Value {
+    if stages.is_empty() {
+        return Value::Null;
+    }
+    let span = (end_ds - start_ds).max(1) as f64;
+    let n = stages.len();
+    let stage_at = |time_ds: i64| -> Option<i64> {
+        let f = (time_ds - start_ds) as f64 / span;
+        if !(0.0..=1.0).contains(&f) {
+            return None;
+        }
+        Some(stages[((f * n as f64) as usize).min(n - 1)])
+    };
+    // per stage code: (hrv_sum, hrv_n, hr_sum, hr_n)
+    let mut acc: std::collections::HashMap<i64, (f64, u32, f64, u32)> = Default::default();
+    for &(t, v) in hrv_t {
+        if let Some(s) = stage_at(t) {
+            let e = acc.entry(s).or_default();
+            e.0 += v;
+            e.1 += 1;
+        }
+    }
+    for &(t, v) in hr_t {
+        if let Some(s) = stage_at(t) {
+            let e = acc.entry(s).or_default();
+            e.2 += v;
+            e.3 += 1;
+        }
+    }
+    let hrv = |c: i64| acc.get(&c).filter(|e| e.1 > 0).map(|e| (e.0 / e.1 as f64).round());
+    let hr = |c: i64| acc.get(&c).filter(|e| e.3 > 0).map(|e| (e.2 / e.3 as f64).round());
+    json!({
+        "hrv_deep": hrv(1), "hrv_light": hrv(2), "hrv_rem": hrv(3),
+        "hr_deep":  hr(1),  "hr_light":  hr(2),  "hr_rem":  hr(3),
+    })
 }
 
 /// Count maximal runs of `code` at least `min_len` epochs long.
@@ -517,21 +574,66 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
             db.display()
         ));
     }
-    let (max_ds, anchor_unix) = events
-        .iter()
-        .map(|(ds, _, _, cu)| (*ds, *cu))
-        .max_by_key(|(ds, _)| *ds)
-        .unwrap();
-    let min_ds = events.iter().map(|(ds, _, _, _)| *ds).min().unwrap();
-    let unix_s = |ds: i64| -> f64 { anchor_unix as f64 - (max_ds - ds) as f64 / 10.0 };
+    // `ring_timestamp` (ds) is a per-boot relative deciseconds counter: it resets to ~0
+    // every time the ring reboots (battery drain, firmware reset). A single global
+    // anchor therefore scatters older boots to nonsense dates. Recover each boot
+    // "epoch" by walking events in real sync order (captured_unix, then ds) and
+    // splitting on any large backward jump in ds, then anchor each epoch independently:
+    // its newest ds is pinned to that event's capture time and the rest offset by the
+    // decisecond delta. Raw ds is left untouched everywhere else — it is still the DB /
+    // model query key; only the ds→wall-clock mapping becomes epoch-aware.
+    struct Epoch {
+        min_ds: i64,
+        max_ds: i64,
+        anchor_unix: i64,
+    }
+    // A real reboot drops ds by millions; 6 h of slack absorbs minor out-of-order
+    // framing within an epoch without ever splitting one.
+    const EPOCH_RESET_SLACK_DS: i64 = 6 * 3600 * 10;
+    let mut order: Vec<(i64, i64)> = events.iter().map(|(ds, _, _, cu)| (*cu, *ds)).collect();
+    order.sort_unstable();
+    let mut epochs: Vec<Epoch> = Vec::new();
+    for (cu, ds) in order {
+        match epochs.last_mut() {
+            Some(e) if ds >= e.max_ds - EPOCH_RESET_SLACK_DS => {
+                if ds >= e.max_ds {
+                    e.max_ds = ds;
+                    e.anchor_unix = cu;
+                }
+                e.min_ds = e.min_ds.min(ds);
+            }
+            _ => epochs.push(Epoch {
+                min_ds: ds,
+                max_ds: ds,
+                anchor_unix: cu,
+            }),
+        }
+    }
+    // Map a raw ds to wall-clock seconds via the epoch it belongs to. Epochs are usually
+    // disjoint in ds (a fresh boot starts near 0); if ranges overlap, prefer the
+    // narrowest epoch containing ds, falling back to the newest epoch.
+    let unix_s = |ds: i64| -> f64 {
+        let e = epochs
+            .iter()
+            .filter(|e| {
+                ds >= e.min_ds - EPOCH_RESET_SLACK_DS && ds <= e.max_ds + EPOCH_RESET_SLACK_DS
+            })
+            .min_by_key(|e| e.max_ds - e.min_ds)
+            .unwrap_or_else(|| epochs.last().expect("events is non-empty"));
+        e.anchor_unix as f64 - (e.max_ds - ds) as f64 / 10.0
+    };
+    // Newest epoch's capture time — a wall-clock "now" reference and fallback anchor.
+    let anchor_unix = epochs.iter().map(|e| e.anchor_unix).max().unwrap();
 
     let mut beds: Vec<(i64, i64)> = Vec::new();
     let mut present_recent = std::collections::HashSet::new();
-    let recent_cut = max_ds - 10 * 86_400;
+    // "recent" = within 10 days of the newest data, measured in wall-clock so it never
+    // sweeps in an older epoch that happens to share a high raw ds.
+    let recent_cut_unix = anchor_unix as f64 - 10.0 * 86_400.0;
     let name_of = |tag: u8| oura_protocol::events::event_name(tag);
     for (ds, tag, jstr, _) in &events {
         let n = name_of(*tag);
-        if *ds >= recent_cut {
+        if unix_s(*ds) >= recent_cut_unix {
             present_recent.insert(n);
         }
         if n == "bedtime_period" {
@@ -573,15 +675,30 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         };
         match n {
             "hrv_event" => {
+                // Each array element is an `interval_min`-minute average starting at the
+                // event's ring timestamp, so element i sits at ds + i·interval (in
+                // deciseconds: minutes × 600). Keep both the flat vecs (mean/min) and the
+                // timestamped samples (stage-resolved autonomics).
+                let step_ds = v["interval_min"].as_i64().unwrap_or(5).max(1) * 600;
                 if let Some(a) = v["rmssd_ms"].as_array() {
-                    nights[idx]
-                        .rmssd
-                        .extend(a.iter().filter_map(|x| x.as_f64()).filter(|&x| x > 0.0));
+                    for (i, x) in a.iter().enumerate() {
+                        if let Some(val) = x.as_f64() {
+                            if val > 0.0 {
+                                nights[idx].rmssd.push(val);
+                                nights[idx].hrv_t.push((*ds + i as i64 * step_ds, val));
+                            }
+                        }
+                    }
                 }
                 if let Some(a) = v["hr_bpm"].as_array() {
-                    nights[idx]
-                        .hr
-                        .extend(a.iter().filter_map(|x| x.as_f64()).filter(|&x| x > 0.0));
+                    for (i, x) in a.iter().enumerate() {
+                        if let Some(val) = x.as_f64() {
+                            if val > 0.0 {
+                                nights[idx].hr.push(val);
+                                nights[idx].hr_t.push((*ds + i as i64 * step_ds, val));
+                            }
+                        }
+                    }
                 }
             }
             "temp_event" | "sleep_temp_event" => {
@@ -665,6 +782,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         let in_bed_s = (nt.end_ds - nt.start_ds) as f64 / 10.0;
         let (metrics, asleep_s) = sleep_metrics(&full_stages, in_bed_s);
         asleep_by_night.push(asleep_s);
+        let autonomic = autonomic_by_stage(&nt.hrv_t, &nt.hr_t, &full_stages, nt.start_ds, nt.end_ds);
         nights_json.push(json!({
             "date": date_label(unix_s(nt.start_ds), tz),
             "ymd": ymd_label(unix_s(nt.start_ds), tz),
@@ -693,6 +811,9 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
                 "motion": series(&nt.motion, 0),
             },
             "metrics": metrics,
+            // mean HR/HRV per sleep stage (deep/light/rem) — deep-sleep HRV is the
+            // recovery-relevant number; null when there's no hypnogram.
+            "autonomic": autonomic,
         }));
     }
     nights_json.reverse();
@@ -742,7 +863,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
             if let Some(met) = v["met"].as_array() {
                 for (i, m) in met.iter().enumerate() {
                     let mv = m.as_f64().unwrap_or(1.0);
-                    let unix = anchor_unix as f64 - (max_ds - ds) as f64 / 10.0 + i as f64 * 60.0;
+                    let unix = unix_s(*ds) + i as f64 * 60.0;
                     let local = unix + tz as f64 * 3600.0;
                     let day_idx = (local / 86400.0).floor() as i64;
                     let (y, mo, dd) = civil(day_idx);
@@ -971,7 +1092,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         "synced": synced_unix.map(|s| date_label(s, tz)),
         "synced_hm": synced_unix.map(|s| hm(s, tz)),
         "fresh_hours": synced_unix.map(|s| ((now - s) / 3600.0 * 10.0).round() / 10.0),
-        "days_of_data": ((max_ds - min_ds) as f64 / 10.0 / 86400.0 * 10.0).round() / 10.0,
+        "days_of_data": ((epochs.iter().map(|e| (e.max_ds - e.min_ds) as f64).sum::<f64>() / 10.0 / 86400.0) * 10.0).round() / 10.0,
         "total_events": events.len(),
         "nights": nights.len(),
         "battery_pct": battery.map(|b| b.0),

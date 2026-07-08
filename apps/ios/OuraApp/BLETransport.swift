@@ -77,6 +77,9 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
     // same ring many times a second; log each device once, and again when its name
     // first arrives via scan response. Only touched on the (serial) CB queue.
     private var loggedAds = Set<String>()
+    // distinct non-ring devices seen this scan: proves the radio works when the ring
+    // itself never shows up (written on the CB queue, read under `lock` at timeout).
+    private var otherDevices = Set<UUID>()
     // delegate callbacks land on a concurrent queue; this serialises take-and-resume
     // of the continuations so a success and a timeout can't both resume one (a crash).
     private let lock = NSLock()
@@ -118,7 +121,20 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
             let work = DispatchWorkItem { [weak self] in
                 guard let self else { return }
                 self.central.stopScan()
-                self.lock.lock(); let at = self.stage; self.lock.unlock()
+                self.lock.lock()
+                var at = self.stage
+                let others = self.otherDevices.count
+                self.lock.unlock()
+                // Distinguish "the ring isn't advertising" from "Bluetooth is dead":
+                // the unfiltered scan tells us whether ANY advertisements arrived.
+                if at.hasPrefix("scanning") {
+                    at = others > 0
+                        ? "scanning — saw \(others) other BLE device(s) but no Oura ring: "
+                            + "the ring is connected to another device (phone with the "
+                            + "official app? Mac?), off its charger and asleep, or out of battery"
+                        : "scanning — saw NO BLE advertisements at all: Bluetooth may be "
+                            + "off, restricted, or the permission was revoked"
+                }
                 dlog("ble", "TIMEOUT while \(at)")
                 self.finishConnect(.failure(BLEError.timedOut(stage: at)))
             }
@@ -156,13 +172,17 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
 
     private func startScan() {
         lock.lock(); stage = "scanning — no ring advertisement seen yet"; lock.unlock()
-        dlog("ble", "scanning for service \(RingUUID.service) (allow duplicates)")
+        dlog("ble", "scanning (unfiltered, allow duplicates) — matching service \(RingUUID.service)")
+        // UNFILTERED scan, matching done in didDiscover: an OS-side service filter
+        // reports nothing when the ring isn't advertising, which is indistinguishable
+        // from broken Bluetooth. Seeing (and counting) other devices' advertisements
+        // proves the radio works and pins the failure on the ring itself.
         // Allow duplicate discovery reports: the ring's ADV packet is full (flags +
         // 128-bit service UUID + manufacturer data), so its name only arrives in the
         // scan response, which a worn ring in low-power mode answers lazily. Without
         // duplicates iOS may coalesce the ring into a single early, name-less report.
         central.scanForPeripherals(
-            withServices: [RingUUID.service],
+            withServices: nil,
             options: [CBCentralManagerScanOptionAllowDuplicatesKey: true])
     }
 
@@ -170,6 +190,24 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
     /// (instead of waiting out the quiet-window) — used when a write fails so the sync
     /// surfaces the error promptly rather than proceeding as if the frame was sent.
     func abort() { notifyContinuation?.finish() }
+
+    /// Release the ring: cancel the GATT connection (and any scan) and finish the
+    /// stream. The ring has a SINGLE BLE link and only advertises when nothing holds
+    /// it — an app that keeps the connection after a sync blocks the official app,
+    /// the Mac, and its own next scan.
+    func disconnect() {
+        lock.lock()
+        let p = peripheral
+        peripheral = nil
+        writeChar = nil
+        lock.unlock()
+        central.stopScan()
+        notifyContinuation?.finish()
+        if let p {
+            central.cancelPeripheralConnection(p)
+            dlog("ble", "disconnected — ring link released")
+        }
+    }
 
     /// Write a request frame and await the ring's GATT acknowledgement, so the caller
     /// (Rust `OuraClient`, which drives requests sequentially) knows the frame landed
@@ -213,23 +251,32 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
         guard active else { central.stopScan(); return }
         let advName = (advertisementData[CBAdvertisementDataLocalNameKey] as? String)
             ?? peripheral.name ?? ""
+        let advServices = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? []
+        // A ring advertises the proprietary Oura service UUID; accept on that even
+        // when the name is missing (the name lives in the scan response, which a worn
+        // ring may not have answered yet). Name match covers factory-reset shapes.
+        let isRing = advServices.contains(RingUUID.service)
+            || (!advName.isEmpty && advName.lowercased().contains(nameContains.lowercased()))
+        if !isRing {
+            // count distinct non-ring devices as radio liveness proof; log the first
+            // few so the transcript shows what the scan IS seeing.
+            lock.lock()
+            let inserted = otherDevices.insert(peripheral.identifier).inserted
+            let count = otherDevices.count
+            lock.unlock()
+            if inserted && count <= 5 {
+                dlog("scan", "other device '\(advName.isEmpty ? "<no name>" : advName)' rssi=\(RSSI) — not a ring (\(count) distinct so far)")
+            }
+            return
+        }
         // full advertisement dump, once per (device, name) so allow-duplicates doesn't
         // flood the transcript but a late-arriving scan-response name still shows up.
         let adKey = "\(peripheral.identifier.uuidString)|\(advName)"
         if loggedAds.insert(adKey).inserted {
-            let svc = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID])?
-                .map(\.uuidString).joined(separator: ",") ?? "—"
+            let svc = advServices.map(\.uuidString).joined(separator: ",")
             let mfr = (advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data)?.hexString ?? "—"
             let conn = advertisementData[CBAdvertisementDataIsConnectable] as? Bool
             dlog("scan", "saw '\(advName.isEmpty ? "<no name>" : advName)' id=\(peripheral.identifier.uuidString.suffix(12)) rssi=\(RSSI) services=[\(svc)] mfr=\(mfr) connectable=\(conn.map(String.init) ?? "?")")
-        }
-        // The scan is already filtered on Oura's proprietary service UUID, so any
-        // report IS a ring — connect even when the name is missing (the name lives in
-        // the scan response, which a worn ring may not have answered yet). Only skip
-        // a NAMED device that contradicts the requested name.
-        if !advName.isEmpty, !advName.lowercased().contains(nameContains.lowercased()) {
-            dlog("scan", "'\(advName)' doesn't match '\(nameContains)' — ignoring")
-            return
         }
         central.stopScan()
         dlog("ble", "matched '\(advName.isEmpty ? "<no name yet>" : advName)' rssi=\(RSSI) — GATT connect…")

@@ -97,17 +97,22 @@ def main():
     if not rows:
         sys.exit(f"error: no decoded events in {db} (run `oura sync` first)")
 
-    # Anchor ring deciseconds to wall-clock via the latest event's capture time.
-    max_ds, anchor_unix = max(((r[0], r[3]) for r in rows), key=lambda x: x[0])
-    min_ds = min(r[0] for r in rows)
+    # Anchor ring deciseconds to wall-clock per boot epoch (the ring's ds counter
+    # resets on reboot; a single global anchor mis-dates older epochs — see epoch_time).
+    from epoch_time import build_epochs, make_unix_s
+    epochs = build_epochs([(r[0], r[3]) for r in rows])
+    _unix_s = make_unix_s(epochs)
+    anchor_unix = max(e[2] for e in epochs)  # newest epoch's capture time ≈ "now"
 
     def _unix_min(ds):
-        return (anchor_unix - (max_ds - ds) / 10.0) / 60.0
+        return _unix_s(ds) / 60.0
 
     # Rebase by whole days: keeps time-of-day (model uses min%1440) but keeps
     # values small enough to be EXACT in float32 (unix-minutes ~29.7M exceed
     # 2^24 integer precision and silently break the model's time alignment).
-    OFFSET = int(_unix_min(min_ds) // 1440) * 1440
+    # Base the offset on the earliest wall-clock (not the smallest ds — after a reset
+    # the smallest ds belongs to the newest epoch and is NOT the earliest in time).
+    OFFSET = int(min(_unix_min(r[0]) for r in rows) // 1440) * 1440
 
     def tmin(ds):
         return int(round(_unix_min(ds))) - OFFSET
@@ -193,7 +198,7 @@ def main():
             if b2 is None:
                 continue
             data.append(unpack27(b1, b2))
-            tsms.append(int((anchor_unix - (max_ds - ts) / 10.0) * 1000))  # unix ms
+            tsms.append(int(_unix_s(ts) * 1000))  # unix ms
         if not data:
             return None
         dec = torch.jit.load(str(dec_path), map_location="cpu").eval()

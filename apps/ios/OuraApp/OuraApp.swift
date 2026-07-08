@@ -130,7 +130,7 @@ struct SyncView: View {
                     Text("Pair your ring").font(Obs.prose(20, .semibold)).foregroundStyle(Obs.ink)
                     // the ring advertises reliably only ON its charger, and its single
                     // BLE link is usually held by any phone running the official app.
-                    Text("Put the ring on its charger next to this iPhone, turn off Bluetooth on any phone with the official Oura app, then paste the auth key you exported on your computer.")
+                    Text("Put the ring on its charger next to this iPhone, turn off Bluetooth on any phone with the official Oura app, then paste the auth key you exported on your computer. The first sync pulls the ring's full history and can take a while — keep the app open; if the connection drops it reconnects and resumes automatically.")
                         .font(Obs.mono(12)).foregroundStyle(Obs.ink2).fixedSize(horizontal: false, vertical: true)
                     TextField("32-hex auth key", text: $key)
                         .font(Obs.mono(13)).foregroundStyle(Obs.ink)

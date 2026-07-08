@@ -16,9 +16,9 @@ enum SleepStaging {
         let events = EventStore.decodedEvents(dbPath: DB.readPath())
         guard !events.isEmpty else { return ([:], nil) }
 
-        // anchor = (ds, captured_unix) at the largest ds; ms(ds) → absolute epoch ms
-        let a = EventStore.anchor(events)
-        func ms(_ ds: Int64) -> Int64 { Int64(Double(a.unix) * 1000 - Double(a.maxDs - ds) * 100) }
+        // ms(ds) → absolute epoch ms, epoch-aware (ds resets on ring reboot; see EventStore)
+        let eps = EventStore.epochs(events)
+        func ms(_ ds: Int64) -> Int64 { Int64(EventStore.unixSeconds(ds, eps) * 1000) }
 
         // distinct bedtime periods (dedup by start, keep longest), newest first
         var beds: [Int64: Int64] = [:]

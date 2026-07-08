@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light dark" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%230d9488'/%3E%3Ccircle cx='16' cy='16' r='6' fill='none' stroke='%23ffffff' stroke-width='4' opacity='.55'/%3E%3C/svg%3E" />
+  <title>open_oura — DNA explorer</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <link rel="stylesheet" href="/dna.css" />
+</head>
+<body>
+  <div class="wrap">
+    <header class="top">
+      <div class="brand">
+        <span class="mark" aria-hidden="true"></span>
+        <span class="word">open_oura</span>
+        <span class="dna-sub">DNA explorer</span>
+      </div>
+      <div class="actions">
+        <a class="action" href="/" title="Back to dashboard">
+          <span class="ic" style="--i:url(/icons/arrow-left.svg)"></span>
+          <span>Dashboard</span>
+        </a>
+      </div>
+    </header>
+
+    <p class="digest" id="lede">
+      Score your genome against single-SNP traits and polygenic scores — the illustrative
+      built-ins, or real scores from the <a href="https://www.pgscatalog.org/" target="_blank" rel="noopener">PGS&nbsp;Catalog</a>.
+      Everything is computed here; your genome never leaves this machine.
+    </p>
+
+    <!-- controls: which genome + which scores -->
+    <section class="panel" id="controls">
+      <div class="dna-controls">
+        <div class="dna-ctl">
+          <label class="dna-ctl-label" for="file">Genome</label>
+          <select id="file" class="dna-select" aria-label="Genome file"></select>
+          <span class="dna-hint" id="genome-dir"></span>
+        </div>
+        <div class="dna-ctl dna-ctl-grow">
+          <div class="dna-ctl-label-row">
+            <span class="dna-ctl-label">Scores to apply</span>
+            <span class="dna-hint" id="scores-hint"></span>
+          </div>
+          <div id="score-picker" class="dna-picker"><div class="skeleton skeleton-text">&nbsp;</div></div>
+          <form class="dna-add" id="add-form">
+            <span class="ic" style="--i:url(/icons/flask.svg)"></span>
+            <input id="pgs-id" type="text" placeholder="Add from PGS Catalog — e.g. PGS000004" autocomplete="off" spellcheck="false" />
+            <button class="btn-primary" id="add-btn" type="submit">Fetch</button>
+          </form>
+          <div id="add-status" class="dna-add-status"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel" id="search-panel">
+      <div class="panel-head"><h2><span class="ic" style="--i:url(/icons/magnifying-glass.svg)"></span>Look up a variant</h2></div>
+      <div class="dna-search">
+        <input id="q" type="search" placeholder="rsID (rs4988235) or position (chr2:135851076)…" autocomplete="off" spellcheck="false" />
+        <button id="q-btn" class="btn-primary" type="button">Search</button>
+      </div>
+      <div id="q-result" class="dna-lookup"></div>
+    </section>
+
+    <section class="panel" id="scores-panel">
+      <div class="panel-head">
+        <h2><span class="ic" style="--i:url(/icons/flask.svg)"></span>Polygenic scores</h2>
+        <span class="dna-caveat-tag" title="A raw polygenic sum only becomes a percentile against an ancestry-matched reference population, which is not shipped.">raw scores · no population reference</span>
+      </div>
+      <div id="scores" class="dna-scores"><div class="skeleton skeleton-block"></div></div>
+    </section>
+
+    <section class="panel" id="traits-panel">
+      <div class="panel-head">
+        <h2><span class="ic" style="--i:url(/icons/dna.svg)"></span>Traits</h2>
+        <div class="legend">
+          <span><i class="sw" style="background:var(--good)"></i>Notable</span>
+          <span><i class="sw" style="background:var(--warn)"></i>Worth a look</span>
+          <span><i class="sw" style="background:var(--faint)"></i>Neutral</span>
+        </div>
+      </div>
+      <div id="traits" class="dna-traits"><div class="skeleton skeleton-block"></div></div>
+    </section>
+
+    <footer class="foot">
+      <span>Educational, not medical advice. Positions are <span id="build">GRCh38</span>; matched by rsID first, then chrom:pos. PGS scores use strict effect/other-allele matching.</span>
+      <span id="foot-meta"></span>
+    </footer>
+  </div>
+
+  <script src="/dna.js"></script>
+</body>
+</html>

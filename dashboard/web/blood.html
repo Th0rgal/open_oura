@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light dark" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%230d9488'/%3E%3Ccircle cx='16' cy='16' r='6' fill='none' stroke='%23ffffff' stroke-width='4' opacity='.55'/%3E%3C/svg%3E" />
+  <title>open_oura — blood panel</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <link rel="stylesheet" href="/blood.css" />
+</head>
+<body>
+  <div class="wrap">
+    <header class="top">
+      <div class="brand">
+        <span class="mark" aria-hidden="true"></span>
+        <span class="word">open_oura</span>
+        <span class="dna-sub">blood panel</span>
+      </div>
+      <div class="actions">
+        <a class="action" href="/" title="Back to dashboard">
+          <span class="ic" style="--i:url(/icons/arrow-left.svg)"></span>
+          <span>Dashboard</span>
+        </a>
+      </div>
+    </header>
+
+    <p class="digest" id="lede">
+      Import a lab PDF and every marker is extracted, tracked over time, and read against its
+      reference range — with plain-language notes on what moved and why. Everything is computed
+      on this machine; your results never leave it.
+    </p>
+
+    <!-- imports + summary -->
+    <section class="panel" id="imports-panel">
+      <div class="panel-head">
+        <h2><span class="ic" style="--i:url(/icons/test-tube.svg)"></span>Imported reports</h2>
+        <span class="bl-caveat-tag" title="Extraction and caching run on the backend once wired up. This preview ships a real transcribed panel.">preview · sample panel</span>
+      </div>
+
+      <div class="bl-summary" id="summary">
+        <div class="skeleton skeleton-block" style="grid-column:1/-1"></div>
+      </div>
+
+      <div class="bl-import-row">
+        <button class="bl-import" id="import-btn" type="button">
+          <span class="ic" style="--i:url(/icons/upload-simple.svg)"></span>
+          <span>Import a report (PDF)</span>
+        </button>
+        <span class="dna-hint" id="import-hint"></span>
+      </div>
+      <div id="imports" class="bl-imports"><div class="skeleton skeleton-text">&nbsp;</div></div>
+    </section>
+
+    <!-- flagged markers -->
+    <section class="panel" id="attention-panel" hidden>
+      <div class="panel-head">
+        <h2><span class="ic" style="--i:url(/icons/warning.svg)"></span>Worth attention</h2>
+        <span class="dna-hint" id="attention-count"></span>
+      </div>
+      <div id="attention" class="bl-attention"></div>
+    </section>
+
+    <!-- all panels -->
+    <section class="panel" id="markers-panel">
+      <div class="panel-head">
+        <h2><span class="ic" style="--i:url(/icons/drop.svg)"></span>All markers</h2>
+        <div class="legend">
+          <span><i class="sw" style="background:var(--warn)"></i>Out of range</span>
+          <span><i class="sw" style="background:var(--accent)"></i>In range</span>
+        </div>
+      </div>
+      <div id="markers" class="bl-panels"><div class="skeleton skeleton-block"></div></div>
+    </section>
+
+    <footer class="foot">
+      <span>Educational, not medical advice. Reference ranges are the lab's; “optimal” notes reflect common prevention targets. Discuss any flagged result with a clinician.</span>
+      <span id="foot-meta"></span>
+    </footer>
+  </div>
+
+  <!-- marker detail: full time-series + advice -->
+  <dialog id="marker-dialog" class="dialog bl-dialog">
+    <form method="dialog" id="marker-form">
+      <div class="bl-dd-head">
+        <div>
+          <h3 id="dd-name">—</h3>
+          <div class="bl-dd-sub" id="dd-sub"></div>
+        </div>
+        <button type="submit" class="dd-close" aria-label="Close">✕</button>
+      </div>
+      <div id="dd-body"></div>
+    </form>
+  </dialog>
+
+  <script src="/blood.js"></script>
+</body>
+</html>

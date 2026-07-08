@@ -28,10 +28,12 @@ enum ActivityModel {
         let events = EventStore.decodedEvents(dbPath: DB.readPath())
         guard !events.isEmpty else { return ([], nil) }
 
-        let a = EventStore.anchor(events)
-        let anchor = a.unix
-        func unixMin(_ ds: Int64) -> Double { (Double(a.unix) - Double(a.maxDs - ds) / 10.0) / 60.0 }
-        let offset = Int((unixMin(a.minDs) / 1440).rounded(.down)) * 1440
+        let eps = EventStore.epochs(events)
+        let anchor = eps.map { $0.anchorUnix }.max()!  // newest epoch's capture ≈ "now" for context
+        func unixMin(_ ds: Int64) -> Double { EventStore.unixSeconds(ds, eps) / 60.0 }
+        // Base the offset on the earliest wall-clock (not the smallest ds — after a reset
+        // the smallest ds belongs to the newest epoch and is NOT the earliest in time).
+        let offset = Int((events.map { unixMin($0.ds) }.min()! / 1440).rounded(.down)) * 1440
         func tmin(_ ds: Int64) -> Int { Int(unixMin(ds).rounded()) - offset }
         let nan = Float.nan
         func num(_ v: Any?) -> Float { (v as? NSNumber)?.floatValue ?? 0 }

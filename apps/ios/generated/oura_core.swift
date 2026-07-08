@@ -431,6 +431,22 @@ fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
+    typealias FfiType = UInt64
+    typealias SwiftType = UInt64
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt64 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterInt64: FfiConverterPrimitive {
     typealias FfiType = Int64
     typealias SwiftType = Int64
@@ -535,9 +551,13 @@ public protocol RingSessionProtocol : AnyObject {
     
     /**
      * Authenticate, set up the app stream, and drain history events into the DB at
-     * `db_path`. `key_hex` is the 32-char ring auth key. Returns the sync counts.
+     * `db_path`. `key_hex` is the 32-char ring auth key. `progress` receives stage
+     * changes and per-batch drain progress. Returns the sync counts.
+     *
+     * The drain checkpoints its cursor after every batch, so a failed call can be
+     * retried (reconnect + call again) and resumes where it left off.
      */
-    func sync(dbPath: String, keyHex: String) async throws  -> SyncReport
+    func sync(dbPath: String, keyHex: String, progress: SyncProgressListener) async throws  -> SyncReport
     
 }
 
@@ -615,15 +635,19 @@ open func pushFrame(data: Data) {try! rustCall() {
     
     /**
      * Authenticate, set up the app stream, and drain history events into the DB at
-     * `db_path`. `key_hex` is the 32-char ring auth key. Returns the sync counts.
+     * `db_path`. `key_hex` is the 32-char ring auth key. `progress` receives stage
+     * changes and per-batch drain progress. Returns the sync counts.
+     *
+     * The drain checkpoints its cursor after every batch, so a failed call can be
+     * retried (reconnect + call again) and resumes where it left off.
      */
-open func sync(dbPath: String, keyHex: String)async throws  -> SyncReport {
+open func sync(dbPath: String, keyHex: String, progress: SyncProgressListener)async throws  -> SyncReport {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_oura_core_fn_method_ringsession_sync(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(dbPath),FfiConverterString.lower(keyHex)
+                    FfiConverterString.lower(dbPath),FfiConverterString.lower(keyHex),FfiConverterCallbackInterfaceSyncProgressListener.lower(progress)
                 )
             },
             pollFunc: ffi_oura_core_rust_future_poll_rust_buffer,
@@ -934,6 +958,115 @@ extension FfiConverterCallbackInterfaceBleWriter : FfiConverter {
     }
 }
 
+
+
+
+/**
+ * Swift implements this to receive sync progress. `stage` is a short machine
+ * tag ("auth" / "setup" / "sync"); during "sync", `bytes_left` is the ring's
+ * own count of event bytes still to transfer (0 = unknown/finished) and
+ * `events_synced` the events pulled so far this session.
+ */
+public protocol SyncProgressListener : AnyObject {
+    
+    func onProgress(stage: String, bytesLeft: UInt64, eventsSynced: UInt32) 
+    
+}
+
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceSyncProgressListener {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    static var vtable: UniffiVTableCallbackInterfaceSyncProgressListener = UniffiVTableCallbackInterfaceSyncProgressListener(
+        onProgress: { (
+            uniffiHandle: UInt64,
+            stage: RustBuffer,
+            bytesLeft: UInt64,
+            eventsSynced: UInt32,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceSyncProgressListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onProgress(
+                     stage: try FfiConverterString.lift(stage),
+                     bytesLeft: try FfiConverterUInt64.lift(bytesLeft),
+                     eventsSynced: try FfiConverterUInt32.lift(eventsSynced)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            let result = try? FfiConverterCallbackInterfaceSyncProgressListener.handleMap.remove(handle: uniffiHandle)
+            if result == nil {
+                print("Uniffi callback interface SyncProgressListener: handle missing in uniffiFree")
+            }
+        }
+    )
+}
+
+private func uniffiCallbackInitSyncProgressListener() {
+    uniffi_oura_core_fn_init_callback_vtable_syncprogresslistener(&UniffiCallbackInterfaceSyncProgressListener.vtable)
+}
+
+// FfiConverter protocol for callback interfaces
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterCallbackInterfaceSyncProgressListener {
+    fileprivate static var handleMap = UniffiHandleMap<SyncProgressListener>()
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+extension FfiConverterCallbackInterfaceSyncProgressListener : FfiConverter {
+    typealias SwiftType = SyncProgressListener
+    typealias FfiType = UInt64
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lift(_ handle: UInt64) throws -> SwiftType {
+        try handleMap.get(handle: handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lower(_ v: SwiftType) -> UInt64 {
+        return handleMap.insert(obj: v)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func write(_ v: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(v))
+    }
+}
+
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -1086,7 +1219,7 @@ private var initializationResult: InitializationResult = {
     if (uniffi_oura_core_checksum_method_ringsession_push_frame() != 19557) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_oura_core_checksum_method_ringsession_sync() != 37594) {
+    if (uniffi_oura_core_checksum_method_ringsession_sync() != 10321) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_oura_core_checksum_constructor_ringsession_new() != 7650) {
@@ -1095,8 +1228,12 @@ private var initializationResult: InitializationResult = {
     if (uniffi_oura_core_checksum_method_blewriter_write() != 56807) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_oura_core_checksum_method_syncprogresslistener_on_progress() != 32063) {
+        return InitializationResult.apiChecksumMismatch
+    }
 
     uniffiCallbackInitBleWriter()
+    uniffiCallbackInitSyncProgressListener()
     return InitializationResult.ok
 }()
 

@@ -25,6 +25,12 @@ pub use oura_summary::{read_profile, write_feature_mode, write_profile, Demograp
 const INDEX_HTML: &str = include_str!("../../../dashboard/web/index.html");
 const STYLES_CSS: &str = include_str!("../../../dashboard/web/styles.css");
 const APP_JS: &str = include_str!("../../../dashboard/web/app.js");
+const DNA_HTML: &str = include_str!("../../../dashboard/web/dna.html");
+const DNA_JS: &str = include_str!("../../../dashboard/web/dna.js");
+const DNA_CSS: &str = include_str!("../../../dashboard/web/dna.css");
+const BLOOD_HTML: &str = include_str!("../../../dashboard/web/blood.html");
+const BLOOD_JS: &str = include_str!("../../../dashboard/web/blood.js");
+const BLOOD_CSS: &str = include_str!("../../../dashboard/web/blood.css");
 
 fn read_ring_key(path: Option<&Path>) -> Result<String> {
     let path = path.ok_or_else(|| anyhow!("dashboard was started without --key-file"))?;
@@ -281,6 +287,47 @@ fn asset(name: &str, embedded: &'static str) -> Vec<u8> {
     embedded.as_bytes().to_vec()
 }
 
+/// Look up a `key` in a `a=b&c=d` query string, percent-decoding the value.
+fn query_param(query: &str, key: &str) -> Option<String> {
+    query.split('&').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        (k == key).then(|| percent_decode(v))
+    })
+}
+
+/// Minimal application/x-www-form-urlencoded decode: `%XX` escapes and `+` → space.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let hex = |c: u8| (c as char).to_digit(16);
+                match (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                    (Some(h), Some(l)) => {
+                        out.push((h * 16 + l) as u8);
+                        i += 3;
+                    }
+                    _ => {
+                        out.push(b'%');
+                        i += 1;
+                    }
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 fn header<'a>(req: &'a str, name: &str) -> Option<&'a str> {
     req.lines().find_map(|l| {
         let (k, v) = l.split_once(':')?;
@@ -323,6 +370,7 @@ async fn handle(
     let target = req.split_whitespace().nth(1).unwrap_or("/");
     // route on the path only — a query string (e.g. cache-buster) must not 404 the API
     let path = target.split('?').next().unwrap_or(target);
+    let query = target.split_once('?').map(|(_, q)| q).unwrap_or("");
     let body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
 
     // Loopback-only (DNS-rebind guard).
@@ -356,6 +404,7 @@ async fn handle(
             | ("POST", "/api/feature")
             | ("POST", "/api/ring-key")
             | ("GET", "/api/ring-key")
+            | ("POST", "/api/dna/fetch")
     ) && !csrf_ok;
     if forbid {
         return write_resp(&mut sock, "403 Forbidden", "text/plain", b"forbidden").await;
@@ -388,6 +437,101 @@ async fn handle(
                 &asset("app.js", APP_JS),
             )
             .await
+        }
+        (_, "/dna") | (_, "/dna.html") => {
+            write_resp(
+                &mut sock,
+                "200 OK",
+                "text/html; charset=utf-8",
+                &asset("dna.html", DNA_HTML),
+            )
+            .await
+        }
+        (_, "/dna.js") => {
+            write_resp(
+                &mut sock,
+                "200 OK",
+                "text/javascript; charset=utf-8",
+                &asset("dna.js", DNA_JS),
+            )
+            .await
+        }
+        (_, "/dna.css") => {
+            write_resp(
+                &mut sock,
+                "200 OK",
+                "text/css; charset=utf-8",
+                &asset("dna.css", DNA_CSS),
+            )
+            .await
+        }
+        (_, "/blood") | (_, "/blood.html") => {
+            write_resp(
+                &mut sock,
+                "200 OK",
+                "text/html; charset=utf-8",
+                &asset("blood.html", BLOOD_HTML),
+            )
+            .await
+        }
+        (_, "/blood.js") => {
+            write_resp(
+                &mut sock,
+                "200 OK",
+                "text/javascript; charset=utf-8",
+                &asset("blood.js", BLOOD_JS),
+            )
+            .await
+        }
+        (_, "/blood.css") => {
+            write_resp(
+                &mut sock,
+                "200 OK",
+                "text/css; charset=utf-8",
+                &asset("blood.css", BLOOD_CSS),
+            )
+            .await
+        }
+        ("GET", "/api/blood/report") => {
+            let v = tokio::task::spawn_blocking(crate::blood::report)
+                .await
+                .map_err(|e| anyhow!(e))?;
+            json_resp(&mut sock, &v).await
+        }
+        ("GET", "/api/dna/files") => {
+            let v = tokio::task::spawn_blocking(crate::dna::list_files)
+                .await
+                .map_err(|e| anyhow!(e))?;
+            json_resp(&mut sock, &v).await
+        }
+        ("GET", "/api/dna/report") => {
+            // parsing a genome is CPU/IO-heavy → off the async executor; cached per
+            // (genome, selected scores).
+            let file = query_param(query, "file").unwrap_or_default();
+            let scores = query_param(query, "scores").unwrap_or_default();
+            let v = tokio::task::spawn_blocking(move || crate::dna::report(&file, &scores))
+                .await
+                .map_err(|e| anyhow!(e))?;
+            json_resp(&mut sock, &v).await
+        }
+        ("POST", "/api/dna/fetch") => {
+            // downloads a PUBLIC PGS Catalog score definition from EBI (no genome
+            // data leaves). CSRF-gated like the other action endpoints.
+            let req =
+                serde_json::from_str::<Value>(body.trim_end_matches('\0')).unwrap_or(Value::Null);
+            let id = req["pgs_id"].as_str().unwrap_or("").to_string();
+            let v = tokio::task::spawn_blocking(move || crate::dna::fetch(&id))
+                .await
+                .map_err(|e| anyhow!(e))?;
+            json_resp(&mut sock, &v).await
+        }
+        ("GET", "/api/dna/lookup") => {
+            let file = query_param(query, "file").unwrap_or_default();
+            let q = query_param(query, "q").unwrap_or_default();
+            let v = tokio::task::spawn_blocking(move || crate::dna::lookup(&file, &q))
+                .await
+                .map_err(|e| anyhow!(e))?;
+            json_resp(&mut sock, &v).await
         }
         ("GET", "/api/summary") => {
             // building the summary shells out to torch models → off the async

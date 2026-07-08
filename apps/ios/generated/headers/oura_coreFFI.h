@@ -258,12 +258,27 @@ typedef void (*UniffiCallbackInterfaceBleWriterMethod0)(uint64_t, RustBuffer, vo
     );
 
 #endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_SYNC_PROGRESS_LISTENER_METHOD0
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_SYNC_PROGRESS_LISTENER_METHOD0
+typedef void (*UniffiCallbackInterfaceSyncProgressListenerMethod0)(uint64_t, RustBuffer, uint64_t, uint32_t, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
 #ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_BLE_WRITER
 #define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_BLE_WRITER
 typedef struct UniffiVTableCallbackInterfaceBleWriter {
     UniffiCallbackInterfaceBleWriterMethod0 _Nonnull write;
     UniffiCallbackInterfaceFree _Nonnull uniffiFree;
 } UniffiVTableCallbackInterfaceBleWriter;
+
+#endif
+#ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_SYNC_PROGRESS_LISTENER
+#define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_SYNC_PROGRESS_LISTENER
+typedef struct UniffiVTableCallbackInterfaceSyncProgressListener {
+    UniffiCallbackInterfaceSyncProgressListenerMethod0 _Nonnull onProgress;
+    UniffiCallbackInterfaceFree _Nonnull uniffiFree;
+} UniffiVTableCallbackInterfaceSyncProgressListener;
 
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_OURA_CORE_FN_CLONE_RINGSESSION
@@ -288,12 +303,17 @@ void uniffi_oura_core_fn_method_ringsession_push_frame(void*_Nonnull ptr, RustBu
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_OURA_CORE_FN_METHOD_RINGSESSION_SYNC
 #define UNIFFI_FFIDEF_UNIFFI_OURA_CORE_FN_METHOD_RINGSESSION_SYNC
-uint64_t uniffi_oura_core_fn_method_ringsession_sync(void*_Nonnull ptr, RustBuffer db_path, RustBuffer key_hex
+uint64_t uniffi_oura_core_fn_method_ringsession_sync(void*_Nonnull ptr, RustBuffer db_path, RustBuffer key_hex, uint64_t progress
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_OURA_CORE_FN_INIT_CALLBACK_VTABLE_BLEWRITER
 #define UNIFFI_FFIDEF_UNIFFI_OURA_CORE_FN_INIT_CALLBACK_VTABLE_BLEWRITER
 void uniffi_oura_core_fn_init_callback_vtable_blewriter(UniffiVTableCallbackInterfaceBleWriter* _Nonnull vtable
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OURA_CORE_FN_INIT_CALLBACK_VTABLE_SYNCPROGRESSLISTENER
+#define UNIFFI_FFIDEF_UNIFFI_OURA_CORE_FN_INIT_CALLBACK_VTABLE_SYNCPROGRESSLISTENER
+void uniffi_oura_core_fn_init_callback_vtable_syncprogresslistener(UniffiVTableCallbackInterfaceSyncProgressListener* _Nonnull vtable
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_OURA_CORE_FN_FUNC_CORE_VERSION
@@ -642,6 +662,12 @@ uint16_t uniffi_oura_core_checksum_constructor_ringsession_new(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_OURA_CORE_CHECKSUM_METHOD_BLEWRITER_WRITE
 #define UNIFFI_FFIDEF_UNIFFI_OURA_CORE_CHECKSUM_METHOD_BLEWRITER_WRITE
 uint16_t uniffi_oura_core_checksum_method_blewriter_write(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OURA_CORE_CHECKSUM_METHOD_SYNCPROGRESSLISTENER_ON_PROGRESS
+#define UNIFFI_FFIDEF_UNIFFI_OURA_CORE_CHECKSUM_METHOD_SYNCPROGRESSLISTENER_ON_PROGRESS
+uint16_t uniffi_oura_core_checksum_method_syncprogresslistener_on_progress(void
     
 );
 #endif

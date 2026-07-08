@@ -112,6 +112,15 @@ pub trait BleWriter: Send + Sync {
     fn write(&self, data: Vec<u8>);
 }
 
+/// Swift implements this to receive sync progress. `stage` is a short machine
+/// tag ("auth" / "setup" / "sync"); during "sync", `bytes_left` is the ring's
+/// own count of event bytes still to transfer (0 = unknown/finished) and
+/// `events_synced` the events pulled so far this session.
+#[uniffi::export(callback_interface)]
+pub trait SyncProgressListener: Send + Sync {
+    fn on_progress(&self, stage: String, bytes_left: u64, events_synced: u32);
+}
+
 #[derive(uniffi::Record)]
 pub struct SyncReport {
     pub serial: String,
@@ -168,8 +177,17 @@ impl RingSession {
     }
 
     /// Authenticate, set up the app stream, and drain history events into the DB at
-    /// `db_path`. `key_hex` is the 32-char ring auth key. Returns the sync counts.
-    pub async fn sync(&self, db_path: String, key_hex: String) -> Result<SyncReport, SyncError> {
+    /// `db_path`. `key_hex` is the 32-char ring auth key. `progress` receives stage
+    /// changes and per-batch drain progress. Returns the sync counts.
+    ///
+    /// The drain checkpoints its cursor after every batch, so a failed call can be
+    /// retried (reconnect + call again) and resumes where it left off.
+    pub async fn sync(
+        &self,
+        db_path: String,
+        key_hex: String,
+        progress: Box<dyn SyncProgressListener>,
+    ) -> Result<SyncReport, SyncError> {
         let fail = |e: String| SyncError::Failed(e);
         let key =
             parse_key(&key_hex).ok_or_else(|| fail("auth key must be 32 hex chars".into()))?;
@@ -179,10 +197,12 @@ impl RingSession {
         };
         let client = OuraClient::new(transport);
 
+        progress.on_progress("auth".into(), 0, 0);
         client
             .authenticate(&key)
             .await
             .map_err(|e| fail(e.to_string()))?;
+        progress.on_progress("setup".into(), 0, 0);
         client
             .setup_app_stream()
             .await
@@ -206,6 +226,7 @@ impl RingSession {
 
         let inserted = AtomicU32::new(0);
         let db_err: Mutex<Option<String>> = Mutex::new(None);
+        progress.on_progress("sync".into(), 0, 0);
         let outcome = client
             .drain_events(
                 cursor,
@@ -221,11 +242,12 @@ impl RingSession {
                         Err(e) => *db_err.lock().unwrap() = Some(e.to_string()),
                     }
                 },
-                |c| {
+                |p| {
+                    progress.on_progress("sync".into(), p.bytes_left as u64, p.events_synced);
                     if db_err.lock().unwrap().is_some() {
                         return;
                     }
-                    if let Err(e) = store.lock().unwrap().set_cursor(&serial, c) {
+                    if let Err(e) = store.lock().unwrap().set_cursor(&serial, p.next_cursor) {
                         *db_err.lock().unwrap() = Some(e.to_string());
                     }
                 },
