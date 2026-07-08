@@ -251,7 +251,7 @@ impl<'a> ScoreAccumulator<'a> {
         let known_ref = ref_allele.or(v.ref_allele.as_deref());
         let m = known_ref
             .map(|r| match_homref(v, r))
-            .unwrap_or(Match::Dosage(0));
+            .unwrap_or(Match::Ambiguous);
         self.add_match(variant_idx, m);
     }
 
@@ -502,6 +502,17 @@ mod tests {
         acc.add_homref(0, None);
         let r = acc.finish();
         assert_eq!(r.matched, 1);
+        assert_eq!(r.value, 0.0);
+    }
+
+    #[test]
+    fn homref_unknown_ref_does_not_inflate_coverage() {
+        let s = spec("beta", vec![var("A", None, 0.75)]);
+        let mut acc = ScoreAccumulator::new(&s);
+        acc.add_homref(0, None);
+        let r = acc.finish();
+        assert_eq!(r.matched, 0);
+        assert_eq!(r.ambiguous, 1);
         assert_eq!(r.value, 0.0);
     }
 }

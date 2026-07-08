@@ -92,40 +92,39 @@ def main():
     con = sqlite3.connect(str(db))
     rows = con.execute(
         "SELECT ring_timestamp, tag, decoded_json, captured_unix FROM events "
-        "WHERE decoded_json IS NOT NULL ORDER BY ring_timestamp"
+        "WHERE decoded_json IS NOT NULL ORDER BY id"
     ).fetchall()
     if not rows:
         sys.exit(f"error: no decoded events in {db} (run `oura sync` first)")
 
     # Anchor ring deciseconds to wall-clock per boot epoch (the ring's ds counter
     # resets on reboot; a single global anchor mis-dates older epochs — see epoch_time).
-    from epoch_time import build_epochs, make_unix_s
-    epochs = build_epochs([(r[0], r[3]) for r in rows])
-    _unix_s = make_unix_s(epochs)
+    from epoch_time import build_epoch_assignments, unix_in_epoch
+    epochs, event_epochs = build_epoch_assignments((r[0], r[3]) for r in rows)
     anchor_unix = max(e[2] for e in epochs)  # newest epoch's capture time ≈ "now"
 
-    def _unix_min(ds):
-        return _unix_s(ds) / 60.0
+    def _unix_min(ds, epoch_idx):
+        return unix_in_epoch(epochs, ds, epoch_idx) / 60.0
 
     # Rebase by whole days: keeps time-of-day (model uses min%1440) but keeps
     # values small enough to be EXACT in float32 (unix-minutes ~29.7M exceed
     # 2^24 integer precision and silently break the model's time alignment).
     # Base the offset on the earliest wall-clock (not the smallest ds — after a reset
     # the smallest ds belongs to the newest epoch and is NOT the earliest in time).
-    OFFSET = int(min(_unix_min(r[0]) for r in rows) // 1440) * 1440
+    OFFSET = int(min(_unix_min(r[0], event_epochs[i]) for i, r in enumerate(rows)) // 1440) * 1440
 
-    def tmin(ds):
-        return int(round(_unix_min(ds))) - OFFSET
+    def tmin(ds, epoch_idx):
+        return int(round(_unix_min(ds, epoch_idx))) - OFFSET
 
     met, motion, temp, hr = [], [], [], []
     import os
     acm_scale = float(os.environ.get("ACM_SCALE", "1"))
-    for ds, tag, js, _ in rows:
+    for row_idx, (ds, tag, js, _) in enumerate(rows):
         try:
             v = jsonlib.loads(js)
         except Exception:
             continue
-        t = tmin(ds)
+        t = tmin(ds, event_epochs[row_idx])
         if tag == 0x50 and isinstance(v.get("met"), list):  # activity_information
             for i, m in enumerate(v["met"]):
                 met.append((t + i, float(m)))

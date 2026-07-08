@@ -237,20 +237,41 @@ impl Store {
     /// captured_unix)`, ordered by insertion/sync order. The ring timestamp can reset
     /// after reboots, so callers that reconstruct boot epochs need the real stream order.
     pub fn decoded_events(&self) -> Result<Vec<(i64, u8, String, i64)>> {
-        let mut stmt = self.conn.prepare(
+        self.decoded_events_for_serial_opt(None)
+    }
+
+    /// Decoded events for one device serial, ordered by insertion/sync order.
+    pub fn decoded_events_for_serial(&self, serial: &str) -> Result<Vec<(i64, u8, String, i64)>> {
+        self.decoded_events_for_serial_opt(Some(serial))
+    }
+
+    fn decoded_events_for_serial_opt(
+        &self,
+        serial: Option<&str>,
+    ) -> Result<Vec<(i64, u8, String, i64)>> {
+        let serial_filter = if serial.is_some() {
+            " AND serial = ?1"
+        } else {
+            ""
+        };
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT ring_timestamp, tag, decoded_json, captured_unix FROM events \
-             WHERE decoded_json IS NOT NULL ORDER BY id",
-        )?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, i64>(1)? as u8,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, i64>(3)?,
-                ))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+                 WHERE decoded_json IS NOT NULL{} ORDER BY id",
+            serial_filter
+        ))?;
+        let map_row = |r: &rusqlite::Row<'_>| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)? as u8,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        };
+        let rows = match serial {
+            Some(serial) => stmt.query_map(params![serial], map_row)?,
+            None => stmt.query_map([], map_row)?,
+        }
+        .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
 

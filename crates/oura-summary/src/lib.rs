@@ -578,7 +578,13 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
     let db = db_abs.as_path();
     let demo = read_profile(db);
     let store = Store::open(db).context("opening DB")?;
-    let events = store.decoded_events().context("reading events")?;
+    let dev = store.device_info().ok().flatten();
+    let events = match dev.as_ref().map(|d| d.0.as_str()) {
+        Some(serial) => store
+            .decoded_events_for_serial(serial)
+            .with_context(|| format!("reading events for serial {serial}"))?,
+        None => store.decoded_events().context("reading events")?,
+    };
     if events.is_empty() {
         return Err(anyhow!(
             "no decoded events in {} — run `oura sync` first",
@@ -1118,7 +1124,6 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         }
     }
 
-    let dev = store.device_info().ok().flatten();
     let last_sync = dev.as_ref().map(|d| d.6).filter(|&t| t > 0);
     let synced_unix = last_sync.map(|t| t as f64);
 
