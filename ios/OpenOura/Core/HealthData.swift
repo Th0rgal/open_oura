@@ -49,7 +49,7 @@ struct HealthData {
                 let v = nums(e.json["temps_c"]).filter { $0 > 20 && $0 < 45 }
                 if let m = v.last { temp.append(.init(ts: e.timestamp, value: m)) }
             case 0x6f, 0x70, 0x77: // spo2
-                if let s = (e.json["spo2_percent"] as? NSNumber)?.doubleValue, s > 50 {
+                if let s = nums(e.json["spo2_percent"]).filter({ $0 > 50 }).last {
                     spo2.append(.init(ts: e.timestamp, value: s))
                 }
             case 0x4b, 0x4e, 0x5a: // sleep phases (hypnogram)

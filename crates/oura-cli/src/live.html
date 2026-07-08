@@ -154,7 +154,8 @@ function feed(m){
   const d=m.d||{};const arr=(d.temps_c||d.temps||[]).filter(x=>x>20&&x<45);
   if(arr.length){const t=arr[arr.length-1];$('tp').textContent=t.toFixed(2);tpC.push(t);}
  } else if(m.t==='spo2e'){
-  const d=m.d||{};const v=d.spo2_percent??d.spo2??d.pct;
+  const d=m.d||{};const raw=d.spo2_percent??d.spo2??d.pct;
+  const arr=Array.isArray(raw)?raw:[raw];const v=arr.filter(x=>Number.isFinite(x)).at(-1);
   if(v>50){$('sp').textContent=v;spC.push(v);$('spsub').textContent='measured';}
  } else if(m.t==='batt'){
   $('bt').textContent=m.pct;btC.push(m.pct);

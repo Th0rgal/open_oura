@@ -340,12 +340,18 @@ final class OuraRing: NSObject, ObservableObject {
         let key = Data(keyBytes)
         // Persist before installing, so a crash mid-pair never loses the only copy
         // of a key that may already be live on the ring.
-        _ = KeyStore.saveHex(key.map { String(format: "%02x", $0) }.joined())
+        guard KeyStore.saveHex(key.map { String(format: "%02x", $0) }.joined()) else {
+            publish { self.state = .failed("Keychain error"); self.status = "Pair failed - couldn't save key" }
+            return
+        }
 
-        guard let resp = await requestUntil(Req.setAuthKey(key), tag: 0x25, ext: nil, timeout: 3.0),
-              resp.payload.first == 0x00 else {
+        guard let resp = await requestUntil(Req.setAuthKey(key), tag: 0x25, ext: nil, timeout: 3.0) else {
+            publish { self.state = .failed("SetAuthKey timed out"); self.status = "Pair uncertain - reconnect to verify" }
+            return
+        }
+        guard resp.payload.first == 0x00 else {
             KeyStore.clear()
-            publish { self.state = .failed("SetAuthKey rejected"); self.status = "Pair failed — is the ring factory-reset?" }
+            publish { self.state = .failed("SetAuthKey rejected"); self.status = "Pair failed - is the ring factory-reset?" }
             return
         }
         publish { self.status = "Key installed — authenticating…" }
