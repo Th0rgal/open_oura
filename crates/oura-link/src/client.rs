@@ -384,6 +384,12 @@ impl<T: Transport> OuraClient<T> {
     /// accepts these commands; they make the session closer to the official app
     /// before event fetches or live feature work.
     pub async fn setup_app_stream(&self) -> Result<()> {
+        let hw = self.hardware_id().await.unwrap_or_default();
+        let is_ring5 = hw.rsplit('_').next() == Some("05");
+        if !is_ring5 {
+            tracing::debug!("skipping Ring 5 app-stream setup for hardware_id={hw:?}");
+            return Ok(());
+        }
         self.request_tag(&protocol::req_stream_subscribe(0x02), 0x17)
             .await?;
         // Official app category masks observed by open_ring. These are
