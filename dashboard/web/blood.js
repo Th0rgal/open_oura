@@ -168,7 +168,7 @@ function renderImports(imports) {
       h("span", { class: "bl-imp-name" }, im.file),
       h("span", { class: "bl-imp-date" }, fmtDate(im.date)),
       h("span", { class: "bl-imp-meta" }, `${im.markers} markers · ${im.lab || "lab"} · ${im.status || "ok"} · ${fmtSize(im.size)}`),
-      ...(im.warnings && im.warnings.length ? [h("span", { class: "bl-imp-warn" }, im.warnings.join("; "))] : []))));
+      ...(im.warnings && im.warnings.length ? [h("span", { class: "bl-imp-warn" }, im.warnings.join("; "))] : [])));
   });
 }
 

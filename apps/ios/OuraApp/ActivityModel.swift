@@ -28,20 +28,20 @@ enum ActivityModel {
         let events = EventStore.decodedEvents(dbPath: DB.readPath())
         guard !events.isEmpty else { return ([], nil) }
 
-        let eps = EventStore.epochs(events)
+        let (eps, eventEpochs) = EventStore.epochsWithAssignments(events)
         let anchor = eps.map { $0.anchorUnix }.max()!  // newest epoch's capture ≈ "now" for context
-        func unixMin(_ ds: Int64) -> Double { EventStore.unixSeconds(ds, eps) / 60.0 }
+        func unixMin(_ ds: Int64, _ epochIdx: Int) -> Double { EventStore.unixSeconds(ds, epochIdx: epochIdx, eps) / 60.0 }
         // Base the offset on the earliest wall-clock (not the smallest ds — after a reset
         // the smallest ds belongs to the newest epoch and is NOT the earliest in time).
-        let offset = Int((events.map { unixMin($0.ds) }.min()! / 1440).rounded(.down)) * 1440
-        func tmin(_ ds: Int64) -> Int { Int(unixMin(ds).rounded()) - offset }
+        let offset = Int((events.enumerated().map { unixMin($0.element.ds, eventEpochs[$0.offset]) }.min()! / 1440).rounded(.down)) * 1440
+        func tmin(_ ds: Int64, _ epochIdx: Int) -> Int { Int(unixMin(ds, epochIdx).rounded()) - offset }
         let nan = Float.nan
         func num(_ v: Any?) -> Float { (v as? NSNumber)?.floatValue ?? 0 }
 
         var metD: [Int: (Float, Float)] = [:]   // round(t) → (t, met)
         var motion: [[Float]] = [], temp: [[Float]] = [], hr: [[Float]] = []
-        for e in events {
-            let t = Float(tmin(e.ds))
+        for (eventIdx, e) in events.enumerated() {
+            let t = Float(tmin(e.ds, eventEpochs[eventIdx]))
             switch e.tag {
             case 0x50:
                 if let met = e.json["met"] as? [NSNumber] {

@@ -17,29 +17,35 @@ enum SleepStaging {
         guard !events.isEmpty else { return ([:], nil) }
 
         // ms(ds) → absolute epoch ms, epoch-aware (ds resets on ring reboot; see EventStore)
-        let eps = EventStore.epochs(events)
-        func ms(_ ds: Int64) -> Int64 { Int64(EventStore.unixSeconds(ds, eps) * 1000) }
+        let (eps, eventEpochs) = EventStore.epochsWithAssignments(events)
+        func ms(_ ds: Int64, _ epochIdx: Int) -> Int64 { Int64(EventStore.unixSeconds(ds, epochIdx: epochIdx, eps) * 1000) }
 
         // distinct bedtime periods (dedup by start, keep longest), newest first
-        var beds: [Int64: Int64] = [:]
-        for e in events where e.tag == 0x76 {
+        var beds: [(start: Int64, end: Int64, epochIdx: Int)] = []
+        for (eventIdx, e) in events.enumerated() where e.tag == 0x76 {
             if let s = (e.json["bedtime_start_ds"] as? NSNumber)?.int64Value,
                let en = (e.json["bedtime_end_ds"] as? NSNumber)?.int64Value {
-                beds[s] = max(beds[s] ?? 0, en)
+                let epochIdx = eventEpochs[eventIdx]
+                if let i = beds.firstIndex(where: { $0.start == s && $0.epochIdx == epochIdx }) {
+                    beds[i].end = max(beds[i].end, en)
+                } else {
+                    beds.append((s, en, epochIdx))
+                }
             }
         }
 
         var result: [String: [Int]] = [:]
-        for (startDs, endDs) in beds.sorted(by: { $0.key > $1.key }) {
+        let sortedBeds = beds.sorted { EventStore.unixSeconds($0.start, epochIdx: $0.epochIdx, eps) > EventStore.unixSeconds($1.start, epochIdx: $1.epochIdx, eps) }
+        for (startDs, endDs, epochIdx) in sortedBeds {
             let lo = startDs - 6000, hi = endDs + 6000
             var beats: [(Int64, Float, Float, Float)] = []
             var acm: [(Int64, Float)] = [], temp: [(Int64, Float)] = []
-            for e in events where e.ds >= lo && e.ds <= hi {
+            for (eventIdx, e) in events.enumerated() where eventEpochs[eventIdx] == epochIdx && e.ds >= lo && e.ds <= hi {
                 switch e.tag {
                 case 0x60, 0x80:
                     guard let ibi = e.json["ibi_ms"] as? [NSNumber] else { continue }
                     let amp = (e.json["amplitude"] as? [NSNumber]) ?? []
-                    let t = ms(e.ds); var acc: Int64 = 0
+                    let t = ms(e.ds, eventEpochs[eventIdx]); var acc: Int64 = 0
                     for (i, xn) in ibi.enumerated() {
                         let x = xn.int64Value
                         if x <= 0 { continue }
@@ -48,9 +54,9 @@ enum SleepStaging {
                         beats.append((t + acc, Float(x), i < amp.count ? amp[i].floatValue : 0, valid))
                     }
                 case 0x47:
-                    if let mo = (e.json["motion_seconds"] as? NSNumber)?.floatValue { acm.append((ms(e.ds), mo)) }
+                    if let mo = (e.json["motion_seconds"] as? NSNumber)?.floatValue { acm.append((ms(e.ds, eventEpochs[eventIdx]), mo)) }
                 case 0x46:
-                    if let temps = e.json["temps_c"] as? [NSNumber], let c = temps.first?.floatValue { temp.append((ms(e.ds), c)) }
+                    if let temps = e.json["temps_c"] as? [NSNumber], let c = temps.first?.floatValue { temp.append((ms(e.ds, eventEpochs[eventIdx]), c)) }
                 default: break
                 }
             }
@@ -66,7 +72,7 @@ enum SleepStaging {
                                   &ibiTs, &ibiVal, Int32(beats.count),
                                   &acmTs, &acmVal, Int32(acm.count),
                                   &tempTs, &tempVal, Int32(temp.count),
-                                  ms(startDs), ms(endDs), &out, 4096)
+                                  ms(startDs, epochIdx), ms(endDs, epochIdx), &out, 4096)
             if n > 0 {
                 // key by the exact bedtime start_ds (matches the summary's night.start_ds)
                 // so two sleeps on one calendar day stay distinct.
