@@ -148,9 +148,6 @@ enum Command {
         /// Timezone offset (hours from UTC) for the bedtime clock.
         #[arg(long, default_value_t = 0)]
         tz_offset: i64,
-        /// Trends CSV for calibration (default: auto-find ~/Desktop/oura_*trends.csv).
-        #[arg(long)]
-        csv: Option<PathBuf>,
         /// Emit machine-readable JSON instead of a table.
         #[arg(long)]
         json: bool,
@@ -286,7 +283,10 @@ fn open_store_or_warn(db: &Path) -> Option<Store> {
     match Store::open(db) {
         Ok(s) => Some(s),
         Err(e) => {
-            eprintln!("warning: live readings won't be saved — can't open {}: {e}", db.display());
+            eprintln!(
+                "warning: live readings won't be saved — can't open {}: {e}",
+                db.display()
+            );
             None
         }
     }
@@ -363,11 +363,7 @@ async fn main() -> Result<()> {
             threshold,
             json,
         } => cmd_sessions(&cli, *tz_offset, *threshold, *json),
-        Command::SleepScore {
-            tz_offset,
-            csv,
-            json,
-        } => cmd_sleep_score(&cli, *tz_offset, csv.clone(), *json),
+        Command::SleepScore { tz_offset, json } => cmd_sleep_score(&cli, *tz_offset, *json),
         Command::ReadinessScore { tz_offset, json } => cmd_readiness_score(&cli, *tz_offset, *json),
         Command::Subscribe { feature, mode } => cmd_subscribe(&cli, &key, feature, mode).await,
         Command::FeatureMode { feature, mode } => cmd_feature_mode(&cli, &key, feature, mode).await,
@@ -398,6 +394,7 @@ async fn main() -> Result<()> {
                 cli.db.clone(),
                 *tz_offset,
                 cli.name.clone(),
+                cli.address.clone(),
                 cli.key_file.clone(),
                 seed,
             )
@@ -591,11 +588,9 @@ fn cmd_sessions(cli: &Cli, tz_offset: i64, threshold: f64, json: bool) -> Result
 /// tools/score_sleep.py (SleepNet hypnogram + calibrated contributor curves +
 /// combiner weights). Always shells out to Python, which already owns the torch
 /// model path; there is no native LibTorch backend for the scorer.
-fn cmd_sleep_score(cli: &Cli, tz_offset: i64, csv: Option<PathBuf>, json: bool) -> Result<()> {
-    let root = pyrunner::require_repo_root(
-        Path::new("tools/score_sleep.py"),
-        "tools/score_sleep.py",
-    )?;
+fn cmd_sleep_score(cli: &Cli, tz_offset: i64, json: bool) -> Result<()> {
+    let root =
+        pyrunner::require_repo_root(Path::new("tools/score_sleep.py"), "tools/score_sleep.py")?;
     let db = pyrunner::resolve_db(&cli.db)?;
 
     use std::process::Command as Proc;
@@ -606,9 +601,6 @@ fn cmd_sleep_score(cli: &Cli, tz_offset: i64, csv: Option<PathBuf>, json: bool) 
         .arg(&db)
         .arg("--tz")
         .arg(tz_offset.to_string());
-    if let Some(c) = csv {
-        cmd.arg("--csv").arg(c);
-    }
     if json {
         cmd.arg("--json");
     }

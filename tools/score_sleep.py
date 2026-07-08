@@ -12,7 +12,7 @@ Restfulness here uses only ring-derivable drivers (awake fraction + efficiency);
 its movement-based micro-inputs aren't reproducible from the export's units, and
 they carry little marginal signal once awake-fraction is in.
 
-Usage: python tools/score_sleep.py [DB] [--csv TRENDS.csv] [--start DS --end DS] [--json]
+Usage: python tools/score_sleep.py [DB] [--start DS --end DS] [--json]
 """
 import argparse
 import json
@@ -112,6 +112,7 @@ def main():
     ap.add_argument("--start", type=int, help="bedtime start (deciseconds)")
     ap.add_argument("--end", type=int, help="bedtime end (deciseconds)")
     ap.add_argument("--tz", type=int, default=1, help="hours offset for local bedtime clock")
+    ap.add_argument("--csv", help=argparse.SUPPRESS)
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
 

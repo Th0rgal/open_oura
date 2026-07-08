@@ -187,17 +187,29 @@ def main():
         if not dec_path.exists():
             return None
         srows = con.execute(
-            "SELECT ring_timestamp, tag, body FROM events WHERE tag IN (126, 127) ORDER BY ring_timestamp"
+            "SELECT ring_timestamp, tag, body, captured_unix FROM events "
+            "WHERE tag IN (126, 127) AND body IS NOT NULL ORDER BY id"
         ).fetchall()
-        f1 = [(ts, b) for ts, tag, b in srows if tag == 0x7E and b and len(b) == 14]
-        f2 = {ts: b for ts, tag, b in srows if tag == 0x7F and b and len(b) == 14}
+        if not srows:
+            return None
+        step_epochs, step_event_epochs = build_epoch_assignments((r[0], r[3]) for r in srows)
+        f1 = [
+            (idx, ts, b, step_event_epochs[idx])
+            for idx, (ts, tag, b, _) in enumerate(srows)
+            if tag == 0x7E and b and len(b) == 14
+        ]
+        f2 = {
+            (ts, step_event_epochs[idx]): b
+            for idx, (ts, tag, b, _) in enumerate(srows)
+            if tag == 0x7F and b and len(b) == 14
+        }
         data, tsms = [], []
-        for ts, b1 in f1:
-            b2 = f2.get(ts + 1)  # feature_2 is emitted right after feature_1
+        for _, ts, b1, epoch_idx in f1:
+            b2 = f2.get((ts + 1, epoch_idx))  # feature_2 is emitted right after feature_1
             if b2 is None:
                 continue
             data.append(unpack27(b1, b2))
-            tsms.append(int(_unix_s(ts) * 1000))  # unix ms
+            tsms.append(int(unix_in_epoch(step_epochs, ts, epoch_idx) * 1000))  # unix ms
         if not data:
             return None
         dec = torch.jit.load(str(dec_path), map_location="cpu").eval()

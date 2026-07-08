@@ -15,7 +15,7 @@ baselines (hrv/rhr/temp/sleep/met) used as each metric's personal reference.
 
 Re-runnable: rebuilds every night each time (cheap). Persists into oura.db.
 
-Usage: python tools/build_daily.py [DB] [--csv TRENDS.csv] [--tz N]
+Usage: python tools/build_daily.py [DB] [--tz N]
 """
 import argparse
 import json
@@ -76,11 +76,9 @@ def nocturnal(rows_for_tag, lo, hi):
     return [(ds, j) for ds, j in rows_for_tag if lo <= ds <= hi]
 
 
-def sleep_metrics(db, start_ds, end_ds, csv, tz):
+def sleep_metrics(db, start_ds, end_ds, tz):
     cmd = [sys.executable, str(REPO / "tools" / "score_sleep.py"), str(db),
            "--start", str(start_ds), "--end", str(end_ds), "--tz", str(tz), "--json"]
-    if csv:
-        cmd += ["--csv", csv]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         return None
@@ -90,7 +88,7 @@ def sleep_metrics(db, start_ds, end_ds, csv, tz):
 def main():
     ap = argparse.ArgumentParser(description="Build daily_summary + baselines from ring data")
     ap.add_argument("db", nargs="?")
-    ap.add_argument("--csv", help="trends export for Sleep-Score calibration")
+    ap.add_argument("--csv", help=argparse.SUPPRESS)
     ap.add_argument("--tz", type=int, default=1)
     args = ap.parse_args()
     db = resolve_db(args.db, REPO)
@@ -112,7 +110,7 @@ def main():
 
     days = []
     for start_ds, end_ds in bts:
-        sm = sleep_metrics(db, start_ds, end_ds, args.csv, args.tz)
+        sm = sleep_metrics(db, start_ds, end_ds, args.tz)
         if not sm:
             continue
         m = sm["metrics"]

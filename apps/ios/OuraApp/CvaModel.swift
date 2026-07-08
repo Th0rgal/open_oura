@@ -23,20 +23,23 @@ enum CvaModel {
         guard sqlite3_open(dbPath, &db) == SQLITE_OK else { return (nil, "couldn't open the database for CVA") }
         defer { sqlite3_close(db) }
 
-        // raw PPG bodies in time order (tag 129)
-        var tss: [Int64] = [], bodies: [[UInt8]] = []
+        // raw PPG bodies in insertion order (tag 129). The ring timestamp resets on
+        // reboot, so segment boundaries also track boot epochs.
+        var tss: [Int64] = [], bodies: [[UInt8]] = [], rawEvents: [EventStore.Ev] = []
         var stmt: OpaquePointer?
-        if sqlite3_prepare_v2(db, "SELECT ring_timestamp, body FROM events WHERE tag=129 AND body IS NOT NULL ORDER BY ring_timestamp", -1, &stmt, nil) == SQLITE_OK {
+        if sqlite3_prepare_v2(db, "SELECT ring_timestamp, body, captured_unix FROM events WHERE tag=129 AND body IS NOT NULL ORDER BY id", -1, &stmt, nil) == SQLITE_OK {
             while sqlite3_step(stmt) == SQLITE_ROW {
                 let ts = sqlite3_column_int64(stmt, 0)
                 let n = Int(sqlite3_column_bytes(stmt, 1))
                 guard n > 0, let p = sqlite3_column_blob(stmt, 1) else { continue }
                 tss.append(ts)
                 bodies.append([UInt8](UnsafeBufferPointer(start: p.assumingMemoryBound(to: UInt8.self), count: n)))
+                rawEvents.append(EventStore.Ev(ds: ts, tag: 129, json: [:], cu: sqlite3_column_int64(stmt, 2)))
             }
         }
         sqlite3_finalize(stmt)
         guard !bodies.isEmpty else { return (nil, nil) }  // no PPG captured — benign
+        let eventEpochs = EventStore.epochsWithAssignments(rawEvents).eventEpochs
 
         // split into contiguous measurement runs, decode + chunk into 1500-sample segments
         var segments: [Float] = []   // flattened n_segs × 1500
@@ -48,7 +51,11 @@ enum CvaModel {
             while s + SEG_LEN <= wave.count { segments.append(contentsOf: wave[s..<s + SEG_LEN]); nSegs += 1; s += SEG_LEN }
         }
         for i in 1..<bodies.count {
-            if tss[i] - tss[i - 1] > GAP_DS { flush(run); run = [] }
+            let delta = tss[i] - tss[i - 1]
+            if eventEpochs[i] != eventEpochs[i - 1] || delta < 0 || delta > GAP_DS {
+                flush(run)
+                run = []
+            }
             run.append(bodies[i])
         }
         flush(run)

@@ -254,6 +254,7 @@ pub async fn serve(
     db: PathBuf,
     tz: i64,
     name: String,
+    address: Option<String>,
     key_file: Option<PathBuf>,
     seed: Demographics,
 ) -> Result<()> {
@@ -268,9 +269,10 @@ pub async fn serve(
     println!("open_oura dashboard running — open http://127.0.0.1:{port} in your browser");
     loop {
         let (sock, _) = listener.accept().await?;
-        let (db, name, key_file) = (db.clone(), name.clone(), key_file.clone());
+        let (db, name, address, key_file) =
+            (db.clone(), name.clone(), address.clone(), key_file.clone());
         tokio::spawn(async move {
-            let _ = handle(sock, port, db, tz, name, key_file).await;
+            let _ = handle(sock, port, db, tz, name, address, key_file).await;
         });
     }
 }
@@ -361,6 +363,7 @@ async fn handle(
     db: PathBuf,
     tz: i64,
     name: String,
+    address: Option<String>,
     key_file: Option<PathBuf>,
 ) -> Result<()> {
     let mut buf = [0u8; 8192];
@@ -610,10 +613,11 @@ async fn handle(
             }
         }
         ("POST", "/api/sync") => {
-            let res =
-                tokio::task::spawn_blocking(move || run_sync(&db, &name, key_file.as_deref()))
-                    .await
-                    .map_err(|e| anyhow!(e))?;
+            let res = tokio::task::spawn_blocking(move || {
+                run_sync(&db, &name, address.as_deref(), key_file.as_deref())
+            })
+            .await
+            .map_err(|e| anyhow!(e))?;
             let v = match res {
                 Ok(msg) => json!({ "ok": true, "message": msg }),
                 Err(e) => json!({ "ok": false, "message": e.to_string() }),
@@ -626,7 +630,14 @@ async fn handle(
             let feature = req["feature"].as_str().unwrap_or("").to_string();
             let mode = req["mode"].as_str().unwrap_or("").to_string();
             let res = tokio::task::spawn_blocking(move || {
-                run_feature(&db, &name, key_file.as_deref(), &feature, &mode)
+                run_feature(
+                    &db,
+                    &name,
+                    address.as_deref(),
+                    key_file.as_deref(),
+                    &feature,
+                    &mode,
+                )
             })
             .await
             .map_err(|e| anyhow!(e))?;
@@ -647,7 +658,12 @@ async fn handle(
 /// all for a few seconds after a disconnect), so a single short scan often misses a
 /// ring that is right there. We use a longer scan window and retry the transient
 /// "no matching ring" miss a couple of times before giving up.
-fn run_sync(db: &Path, name: &str, key_file: Option<&Path>) -> Result<String> {
+fn run_sync(
+    db: &Path,
+    name: &str,
+    address: Option<&str>,
+    key_file: Option<&Path>,
+) -> Result<String> {
     let exe = std::env::current_exe().context("locating oura binary")?;
     let mut last = String::from("sync failed");
     for attempt in 0..3 {
@@ -658,6 +674,9 @@ fn run_sync(db: &Path, name: &str, key_file: Option<&Path>) -> Result<String> {
             .arg(name)
             .arg("--scan-timeout")
             .arg("40"); // global flag; wider than the 25 s default
+        if let Some(address) = address {
+            c.arg("--address").arg(address);
+        }
         if let Some(k) = key_file {
             c.arg("--key-file").arg(k);
         }
@@ -699,6 +718,7 @@ fn run_sync(db: &Path, name: &str, key_file: Option<&Path>) -> Result<String> {
 fn run_feature(
     db: &Path,
     name: &str,
+    address: Option<&str>,
     key_file: Option<&Path>,
     feature: &str,
     mode: &str,
@@ -731,8 +751,11 @@ fn run_feature(
             .arg("--name")
             .arg(name)
             .arg("--scan-timeout")
-            .arg("40")
-            .arg("--key-file")
+            .arg("40");
+        if let Some(address) = address {
+            c.arg("--address").arg(address);
+        }
+        c.arg("--key-file")
             .arg(key_file)
             .arg("feature-mode")
             .arg(feature)
