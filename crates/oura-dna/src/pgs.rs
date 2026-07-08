@@ -197,6 +197,7 @@ pub fn load(path: &Path) -> Result<ScoreSpec> {
             chrom,
             pos,
             effect,
+            ref_allele: None,
             other,
             weight,
         });

@@ -649,7 +649,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
             }
         }
     }
-    beds.sort();
+    beds.sort_by(|a, b| unix_s(a.0).total_cmp(&unix_s(b.0)));
 
     let mut nights: Vec<Night> = beds
         .iter()

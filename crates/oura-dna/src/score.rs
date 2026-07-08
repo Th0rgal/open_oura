@@ -47,6 +47,9 @@ pub struct ScoreVariant {
     pub chrom: String,
     pub pos: u64,
     pub effect: String,
+    /// Known reference allele for this target, when the score source carries it.
+    /// Exact hom-ref VCF records override this with their REF column.
+    pub ref_allele: Option<String>,
     /// The non-effect allele, when the source provides it (PGS files do; the toy
     /// catalog scores may not). Enables strict allele-set + strand matching.
     pub other: Option<String>,
@@ -136,7 +139,37 @@ fn match_variant(variant: &ScoreVariant, geno: &Genotype) -> Match {
 }
 
 fn count(alleles: &[String], target: &str) -> u8 {
-    alleles.iter().filter(|a| a.eq_ignore_ascii_case(target)).count() as u8
+    alleles
+        .iter()
+        .filter(|a| a.eq_ignore_ascii_case(target))
+        .count() as u8
+}
+
+/// Resolve effect-allele dosage for a homozygous-reference call. Unlike a normal
+/// variant record, a gVCF reference block may not expose the target's alternate
+/// allele, so we use the known REF allele directly.
+fn match_homref(variant: &ScoreVariant, ref_allele: &str) -> Match {
+    let r = ref_allele.trim().to_ascii_uppercase();
+    if r.is_empty() {
+        return Match::Dosage(0);
+    }
+    let e = variant.effect.to_ascii_uppercase();
+    if let Some(other) = &variant.other {
+        let o = other.to_ascii_uppercase();
+        if e == r || o == r {
+            return Match::Dosage(if e == r { 2 } else { 0 });
+        }
+        let (ec, oc) = (complement(&e), complement(&o));
+        if !is_palindromic(&e, &o) && (ec == r || oc == r) {
+            return Match::Dosage(if ec == r { 2 } else { 0 });
+        }
+        if is_palindromic(&e, &o) && (ec == r || oc == r) {
+            return Match::Ambiguous;
+        }
+        return Match::Mismatch;
+    }
+
+    Match::Dosage(if e == r { 2 } else { 0 })
 }
 
 /// The kept part of a per-variant contribution (for the "top contributors" list).
@@ -182,7 +215,12 @@ impl<'a> ScoreAccumulator<'a> {
     /// Feed the genotype observed at `variant_idx`.
     pub fn add(&mut self, variant_idx: usize, geno: &Genotype) {
         let v = &self.spec.variants[variant_idx];
-        match match_variant(v, geno) {
+        self.add_match(variant_idx, match_variant(v, geno));
+    }
+
+    fn add_match(&mut self, variant_idx: usize, m: Match) {
+        let v = &self.spec.variants[variant_idx];
+        match m {
             Match::Dosage(d) => {
                 self.matched += 1;
                 let w = self.spec.effective_weight(v.weight);
@@ -205,16 +243,16 @@ impl<'a> ScoreAccumulator<'a> {
     }
 
     /// Feed a **homozygous-reference** call at `variant_idx` — the sample matches
-    /// the reference genome here (e.g. a gVCF reference block). Under the standard
-    /// reference-dosage convention (the PGS `other_allele` is the reference), the
-    /// effect-allele dosage is 0: the variant is *matched* but contributes nothing.
-    /// This is what makes coverage on a gVCF ~complete instead of only counting
-    /// the sites where the sample carries a non-reference allele.
-    pub fn add_homref(&mut self, variant_idx: usize) {
+    /// the reference genome here (e.g. a gVCF reference block). When the target
+    /// REF allele is known and is the effect allele, the dosage is 2; otherwise
+    /// the matched reference call contributes dosage 0.
+    pub fn add_homref(&mut self, variant_idx: usize, ref_allele: Option<&str>) {
         let v = &self.spec.variants[variant_idx];
-        self.matched += 1;
-        self.span += 2.0 * self.spec.effective_weight(v.weight).abs();
-        // dosage 0 → no contribution, not a top contributor
+        let known_ref = ref_allele.or(v.ref_allele.as_deref());
+        let m = known_ref
+            .map(|r| match_homref(v, r))
+            .unwrap_or(Match::Dosage(0));
+        self.add_match(variant_idx, m);
     }
 
     fn record_top(&mut self, c: Contributor) {
@@ -223,12 +261,12 @@ impl<'a> ScoreAccumulator<'a> {
             self.top.push(c);
             return;
         }
-        if let Some((i, min)) = self
-            .top
-            .iter()
-            .enumerate()
-            .min_by(|a, b| a.1.contribution.abs().partial_cmp(&b.1.contribution.abs()).unwrap())
-        {
+        if let Some((i, min)) = self.top.iter().enumerate().min_by(|a, b| {
+            a.1.contribution
+                .abs()
+                .partial_cmp(&b.1.contribution.abs())
+                .unwrap()
+        }) {
             if c.contribution.abs() > min.contribution.abs() {
                 self.top[i] = c;
             }
@@ -237,7 +275,10 @@ impl<'a> ScoreAccumulator<'a> {
 
     pub fn finish(mut self) -> ScoreResult {
         self.top.sort_by(|a, b| {
-            b.contribution.abs().partial_cmp(&a.contribution.abs()).unwrap()
+            b.contribution
+                .abs()
+                .partial_cmp(&a.contribution.abs())
+                .unwrap()
         });
         let total = self.spec.variants.len();
         let band = band_for(&self.spec.bands, self.sum);
@@ -365,6 +406,7 @@ mod tests {
             chrom: "1".into(),
             pos: 100,
             effect: effect.into(),
+            ref_allele: None,
             other: other.map(|s| s.into()),
             weight: w,
         }
@@ -437,5 +479,29 @@ mod tests {
         let r = acc.finish();
         assert_eq!(r.matched, 0);
         assert_eq!(r.mismatched, 1);
+    }
+
+    #[test]
+    fn homref_effect_allele_counts_as_two() {
+        let mut v = var("A", Some("G"), 0.75);
+        v.ref_allele = Some("A".into());
+        let s = spec("beta", vec![v]);
+        let mut acc = ScoreAccumulator::new(&s);
+        acc.add_homref(0, None);
+        let r = acc.finish();
+        assert_eq!(r.matched, 1);
+        assert!((r.value - 1.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn homref_other_allele_is_zero_dosage() {
+        let mut v = var("A", Some("G"), 0.75);
+        v.ref_allele = Some("G".into());
+        let s = spec("beta", vec![v]);
+        let mut acc = ScoreAccumulator::new(&s);
+        acc.add_homref(0, None);
+        let r = acc.finish();
+        assert_eq!(r.matched, 1);
+        assert_eq!(r.value, 0.0);
     }
 }

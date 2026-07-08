@@ -91,6 +91,8 @@ pub struct ScoreDefSnp {
     pub rsid: String,
     pub chrom: String,
     pub pos: u64,
+    #[serde(default)]
+    pub ref_allele: Option<String>,
     pub effect_allele: String,
     #[serde(default)]
     pub other_allele: Option<String>,
@@ -144,6 +146,7 @@ impl Catalog {
                         chrom: v.chrom.clone(),
                         pos: v.pos,
                         effect: v.effect_allele.clone(),
+                        ref_allele: v.ref_allele.clone(),
                         other: v.other_allele.clone(),
                         weight: v.weight,
                     })

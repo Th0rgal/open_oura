@@ -147,6 +147,7 @@ fn resolve_target(
     tpos: u64,
     chrom: &str,
     mode: RecMode,
+    homref_ref: Option<&str>,
     real: Option<&Genotype>,
 ) {
     match t {
@@ -172,7 +173,7 @@ fn resolve_target(
                             accs[score].add(variant, g);
                         }
                     }
-                    RecMode::HomRef => accs[score].add_homref(variant),
+                    RecMode::HomRef => accs[score].add_homref(variant, homref_ref),
                     RecMode::NoCall => {} // explicit no-call → excluded from coverage
                 }
                 *remaining -= 1;
@@ -259,7 +260,8 @@ pub fn build_report(src: &VcfSource, catalog: &Catalog, scores: &[ScoreSpec]) ->
             };
             let real = matches!(mode, RecMode::Variant).then(|| vcf::genotype_from_record(rec));
             for t in &hits {
-                resolve_target(&mut trait_geno, &mut accs, &mut consumed, &mut remaining, catalog, *t, rec.pos, rec.chrom, mode, real.as_ref());
+                let homref_ref = matches!(mode, RecMode::HomRef).then_some(rec.ref_allele);
+                resolve_target(&mut trait_geno, &mut accs, &mut consumed, &mut remaining, catalog, *t, rec.pos, rec.chrom, mode, homref_ref, real.as_ref());
             }
         }
 
@@ -279,7 +281,7 @@ pub fn build_report(src: &VcfSource, catalog: &Catalog, scores: &[ScoreSpec]) ->
                         if list[i].0 > rec.pos {
                             // pos == POS was handled in Step A above
                             for t in &list[i].1 {
-                                resolve_target(&mut trait_geno, &mut accs, &mut consumed, &mut remaining, catalog, *t, list[i].0, rec.chrom, RecMode::HomRef, None);
+                                resolve_target(&mut trait_geno, &mut accs, &mut consumed, &mut remaining, catalog, *t, list[i].0, rec.chrom, RecMode::HomRef, None, None);
                             }
                         }
                         i += 1;
@@ -352,7 +354,11 @@ mod tests {
     const HEADER: &str = "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSAMPLE\n";
 
     fn tmpdir() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("oura-dna-lib-{}", std::process::id()));
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let d = std::env::temp_dir().join(format!("oura-dna-lib-{}-{nanos}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         d
     }

@@ -367,10 +367,7 @@ fn parse_pdf(path: &Path) -> Result<ParsedReport> {
     if collection_date == "unknown" {
         warnings.push("collection date not found".to_string());
     }
-    let mut markers = parse_markers(&text, &mut warnings);
-    if markers.len() < MIN_EXPECTED_MARKERS {
-        merge_fallback_markers(&mut markers, llm_fallback_markers(&text, &mut warnings));
-    }
+    let markers = parse_markers(&text, &mut warnings);
     let status = if markers.len() >= MIN_EXPECTED_MARKERS {
         "ok"
     } else {
@@ -458,99 +455,6 @@ fn parse_markers(text: &str, warnings: &mut Vec<String>) -> Vec<ParsedMarker> {
         }
     }
     out.into_values().collect()
-}
-
-fn merge_fallback_markers(markers: &mut Vec<ParsedMarker>, fallback: Vec<ParsedMarker>) {
-    for row in fallback {
-        if !markers.iter().any(|m| m.key == row.key) {
-            markers.push(row);
-        }
-    }
-}
-
-fn llm_fallback_markers(text: &str, warnings: &mut Vec<String>) -> Vec<ParsedMarker> {
-    let Ok(key) = std::env::var("AGENT_BACKEND_API_KEY") else {
-        warnings.push("deterministic parse was sparse; AGENT_BACKEND_API_KEY not set for fallback normalizer".to_string());
-        return Vec::new();
-    };
-    let candidates = fallback_candidate_lines(text);
-    if candidates.is_empty() {
-        return Vec::new();
-    }
-    let allowed: Vec<&str> = marker_defs().iter().map(|d| d.key).collect();
-    let prompt = format!(
-        "Extract blood test marker rows from these pdftotext lines. Return strict JSON only, no prose, shaped as {{\"markers\":[{{\"key\":\"ldl\",\"raw_name\":\"...\",\"value\":158.0,\"unit\":\"mg/dL\",\"ref_low\":null,\"ref_high\":116.0,\"ref_text\":\"< 116\"}}]}}. Allowed keys: {}. Omit rows without a numeric result.\n\n{}",
-        allowed.join(", "),
-        candidates.join("\n")
-    );
-    let body = json!({
-        "messages": [
-            { "role": "system", "content": "You normalize lab PDF text into strict JSON." },
-            { "role": "user", "content": prompt }
-        ],
-        "response_format": { "type": "json_object" }
-    });
-    let auth = format!("Bearer {key}");
-    let resp = ureq::post("https://agent-backend.thomas.md/v1")
-        .set("Authorization", &auth)
-        .set("Content-Type", "application/json")
-        .send_string(&body.to_string());
-    let text = match resp {
-        Ok(r) => match r.into_string() {
-            Ok(s) => s,
-            Err(e) => {
-                warnings.push(format!("fallback normalizer response could not be read: {e}"));
-                return Vec::new();
-            }
-        },
-        Err(e) => {
-            warnings.push(format!("fallback normalizer failed: {e}"));
-            return Vec::new();
-        }
-    };
-    parse_llm_marker_json(&text, warnings)
-}
-
-fn fallback_candidate_lines(text: &str) -> Vec<String> {
-    text.lines()
-        .filter_map(|line| {
-            let (name, cells) = split_result_line(line)?;
-            (cells.iter().any(|c| parse_value_unit(c).is_some()) && !looks_like_header(&name))
-                .then(|| line.trim().to_string())
-        })
-        .take(120)
-        .collect()
-}
-
-fn parse_llm_marker_json(text: &str, warnings: &mut Vec<String>) -> Vec<ParsedMarker> {
-    let parsed: Value = match serde_json::from_str(text) {
-        Ok(v) => v,
-        Err(e) => {
-            warnings.push(format!("fallback normalizer did not return JSON: {e}"));
-            return Vec::new();
-        }
-    };
-    let defs = marker_defs();
-    let Some(rows) = parsed["markers"].as_array() else {
-        warnings.push("fallback normalizer JSON had no markers array".to_string());
-        return Vec::new();
-    };
-    rows.iter()
-        .filter_map(|r| {
-            let key = r["key"].as_str()?;
-            let def = defs.iter().find(|d| d.key == key)?;
-            let value = r["value"].as_f64()?;
-            Some(ParsedMarker {
-                key: key.to_string(),
-                raw_name: r["raw_name"].as_str().unwrap_or(def.name).to_string(),
-                value,
-                unit: r["unit"].as_str().unwrap_or(def.unit).to_string(),
-                low: r["ref_low"].as_f64().or(def.low),
-                high: r["ref_high"].as_f64().or(def.high),
-                ref_text: r["ref_text"].as_str().map(str::to_string).or_else(|| def.ref_text.map(str::to_string)),
-            })
-        })
-        .collect()
 }
 
 fn split_result_line(line: &str) -> Option<(String, Vec<String>)> {
