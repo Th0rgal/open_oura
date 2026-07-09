@@ -33,6 +33,11 @@ enum ConnState: Equatable {
     case idle, scanning, connecting, authenticating, ready, failed(String)
 }
 
+private final class KeepAwakeToken: @unchecked Sendable {
+    var bgTask: UIBackgroundTaskIdentifier = .invalid
+    var ended = false
+}
+
 /// CoreBluetooth client + protocol orchestration for an Oura ring. Mirrors the
 /// Rust `OuraClient`: request/response with a quiet-window collector, a bounded
 /// single-response wait, and a stream-safe incremental event drain.
@@ -100,6 +105,7 @@ final class OuraRing: NSObject, ObservableObject {
     private var liveTask: Task<Void, Never>?
     private var liveCursor: UInt32?
     private var restMoves = 0, restWin = 0
+    @MainActor private var keepAwakeCount = 0
 
     override init() {
         super.init()
@@ -118,6 +124,53 @@ final class OuraRing: NSObject, ObservableObject {
     private func dbg(_ msg: String) {
         log.info("\(msg, privacy: .public)")
         print("[ble] \(msg)")
+    }
+
+    private static func centralStateName(_ state: CBManagerState) -> String {
+        switch state {
+        case .unknown: return "unknown"
+        case .resetting: return "resetting"
+        case .unsupported: return "unsupported"
+        case .unauthorized: return "unauthorized"
+        case .poweredOff: return "poweredOff"
+        case .poweredOn: return "poweredOn"
+        @unknown default: return "unknown(\(state.rawValue))"
+        }
+    }
+
+    private static func peripheralStateName(_ state: CBPeripheralState) -> String {
+        switch state {
+        case .disconnected: return "disconnected"
+        case .connecting: return "connecting"
+        case .connected: return "connected"
+        case .disconnecting: return "disconnecting"
+        @unknown default: return "unknown(\(state.rawValue))"
+        }
+    }
+
+    @MainActor private func beginKeepAwake(_ name: String) -> KeepAwakeToken {
+        keepAwakeCount += 1
+        UIApplication.shared.isIdleTimerDisabled = true
+        let token = KeepAwakeToken()
+        token.bgTask = UIApplication.shared.beginBackgroundTask(withName: name) {
+            Task { @MainActor in
+                guard !token.ended, token.bgTask != .invalid else { return }
+                UIApplication.shared.endBackgroundTask(token.bgTask)
+                token.ended = true
+                token.bgTask = .invalid
+            }
+        }
+        return token
+    }
+
+    @MainActor private func endKeepAwake(_ token: KeepAwakeToken) {
+        if !token.ended, token.bgTask != .invalid {
+            UIApplication.shared.endBackgroundTask(token.bgTask)
+            token.ended = true
+            token.bgTask = .invalid
+        }
+        keepAwakeCount = max(0, keepAwakeCount - 1)
+        if keepAwakeCount == 0 { UIApplication.shared.isIdleTimerDisabled = false }
     }
 
     private func writeRaw(_ data: Data) {
@@ -176,7 +229,7 @@ final class OuraRing: NSObject, ObservableObject {
         case .unsupported:
             failConnect("BLE unsupported", "BLE unsupported on this device")
         case .unknown, .resetting:
-            dbg("bluetooth state \(self.central.state.rawValue) — waiting")
+            dbg("bluetooth state \(Self.centralStateName(self.central.state)) — waiting")
         @unknown default: break
         }
     }
@@ -288,12 +341,12 @@ final class OuraRing: NSObject, ObservableObject {
     }
 
     /// One `GetEvent` batch: collect event frames until the `0x11` summary or timeout.
-    private func getEventBatch(start: UInt32, timeout: TimeInterval) async -> (events: [Packet], bytesLeft: UInt32, maxTs: UInt32, gotSummary: Bool) {
+    private func getEventBatch(start: UInt32, timeout: TimeInterval) async -> (events: [Packet], bytesLeft: UInt32?, maxTs: UInt32, gotSummary: Bool) {
         await withCheckedContinuation { cont in
             bleQueue.async {
                 var evs: [Packet] = []
                 var maxTs = start
-                var bytesLeft: UInt32 = 0
+                var bytesLeft: UInt32?
                 var gotSummary = false
                 let id = UUID()
                 var done = false
@@ -340,6 +393,10 @@ final class OuraRing: NSObject, ObservableObject {
                 dbg("GetEvent timed out before summary at cursor \(start)")
                 return (start, false)
             }
+            guard let bytesLeft = batch.bytesLeft else {
+                dbg("GetEvent summary missing bytes-left at cursor \(start)")
+                return (start, false)
+            }
             for p in batch.events {
                 guard p.payload.count >= 4 else { continue }
                 let ts = UInt32(p.payload[0]) | UInt32(p.payload[1]) << 8
@@ -349,12 +406,21 @@ final class OuraRing: NSObject, ObservableObject {
                 let identity = "\(p.tag)-\(ts)-\(body.base64EncodedString())"
                 onEvent(DecodedEvent(tag: p.tag, timestamp: ts, name: OuraCore.eventName(tag: p.tag), json: json, identity: identity))
             }
-            let next = batch.maxTs &+ 1
+            guard batch.maxTs < UInt32.max else {
+                dbg("GetEvent cursor overflow at \(batch.maxTs)")
+                return (start, false)
+            }
+            let next = batch.maxTs + 1
             let progressed = !batch.events.isEmpty && next > start
             if progressed { start = next }
-            if batch.bytesLeft == 0 || !progressed { break }
+            if bytesLeft == 0 { return (start, true) }
+            if !progressed {
+                dbg("GetEvent stalled at cursor \(start) with \(bytesLeft) bytes left")
+                return (start, false)
+            }
         }
-        return (start, true)
+        dbg("GetEvent drain hit batch limit at cursor \(start)")
+        return (start, false)
     }
 
     // MARK: - High-level flows
@@ -363,6 +429,8 @@ final class OuraRing: NSObject, ObservableObject {
     /// random 16-byte key, install it with `SetAuthKey`, store it in the Keychain,
     /// then authenticate. No key typing — pairing *creates* the key.
     func pairNewRing() async {
+        let activity = await beginKeepAwake("oura-pair")
+        defer { Task { await self.endKeepAwake(activity) } }
         if writeChar == nil || !notifyReady {
             if writeChar == nil { connect() }
             await waitUntilReady()
@@ -403,6 +471,8 @@ final class OuraRing: NSObject, ObservableObject {
     /// Connect (if needed) via the interactive scan flow, authenticate, then
     /// auto-sync if enabled. Used by the guide's Connect button.
     func authenticateAndLoad() async {
+        let activity = await beginKeepAwake("oura-connect-sync")
+        defer { Task { await self.endKeepAwake(activity) } }
         if writeChar == nil {
             connect()
             await waitUntilReady()
@@ -662,7 +732,9 @@ final class OuraRing: NSObject, ObservableObject {
     /// Full re-sync from scratch (manual "Sync now"). Replaces the cached history.
     func syncHistory() async {
         guard state == .ready, !syncing, !liveActive else { return }
-        publish { self.syncing = true }
+        let activity = await beginKeepAwake("oura-full-sync")
+        defer { Task { await self.endKeepAwake(activity) } }
+        publish { self.syncing = true; self.status = "Syncing…" }
         // Drain into a scratch buffer; the displayed model is only swapped in once
         // the sync *completes*, so the UI never shows a half-synced state.
         var collected: [DecodedEvent] = []
@@ -683,7 +755,7 @@ final class OuraRing: NSObject, ObservableObject {
             self.health = model
             self.syncing = false
             self.lastSync = HealthStore.lastSync
-            self.status = "Connected"
+            self.status = "Synced"
         }
     }
 
@@ -692,9 +764,9 @@ final class OuraRing: NSObject, ObservableObject {
     /// it can finish when the app was woken in the background by state restoration.
     func autoSyncIncremental() async {
         guard state == .ready, !syncing, !liveActive else { return }
-        let bg = await beginBG()
-        defer { Task { await endBG(bg) } }
-        publish { self.syncing = true }
+        let activity = await beginKeepAwake("oura-incremental-sync")
+        defer { Task { await self.endKeepAwake(activity) } }
+        publish { self.syncing = true; self.status = "Syncing…" }
         let start = UInt32(truncatingIfNeeded: UserDefaults.standard.integer(forKey: "syncCursor"))
         var fresh: [DecodedEvent] = []
         let drain = await drainEventsLive(cursor: start) { fresh.append($0) }
@@ -719,19 +791,8 @@ final class OuraRing: NSObject, ObservableObject {
             self.health = model
             self.syncing = false
             self.lastSync = HealthStore.lastSync
-            self.status = "Connected"
+            self.status = fresh.isEmpty ? "Already synced" : "Synced"
         }
-    }
-
-    @MainActor private func beginBG() -> UIBackgroundTaskIdentifier {
-        var id: UIBackgroundTaskIdentifier = .invalid
-        id = UIApplication.shared.beginBackgroundTask(withName: "oura-sync") {
-            UIApplication.shared.endBackgroundTask(id)
-        }
-        return id
-    }
-    @MainActor private func endBG(_ id: UIBackgroundTaskIdentifier) {
-        if id != .invalid { UIApplication.shared.endBackgroundTask(id) }
     }
 
     /// Load the last synced history from disk so the UI has real data immediately.
@@ -791,7 +852,7 @@ extension OuraRing: CBCentralManagerDelegate, CBPeripheralDelegate {
     }
 
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
-        dbg("central state -> \(central.state.rawValue)")
+        dbg("central state -> \(Self.centralStateName(central.state))")
         // Resume a restored peripheral (state restoration) before anything else.
         if central.state == .poweredOn, let p = peripheral, connecting, writeChar == nil {
             if p.state == .connected {
@@ -810,6 +871,12 @@ extension OuraRing: CBCentralManagerDelegate, CBPeripheralDelegate {
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral,
                         advertisementData: [String: Any], rssi RSSI: NSNumber) {
         dbg("discovered \(peripheral.name ?? "ring") rssi \(RSSI)")
+        let knownID = UserDefaults.standard.string(forKey: "ringPeripheralID")
+        let knownRing = knownID == peripheral.identifier.uuidString
+        if !autoScanning, !knownRing, RSSI.intValue < -85 {
+            dbg("ignoring weak unknown ring advertisement rssi \(RSSI)")
+            return
+        }
         central.stopScan()
         scanTimer?.cancel()
         self.peripheral = peripheral
@@ -829,8 +896,8 @@ extension OuraRing: CBCentralManagerDelegate, CBPeripheralDelegate {
         t.schedule(deadline: .now() + 30)
         t.setEventHandler { [weak self] in
             guard let self, self.writeChar == nil else { return }
-            let st = self.peripheral?.state.rawValue ?? -1
-            self.dbg("connect timeout (peripheral.state=\(st); 0=disc 1=connecting 2=connected)")
+            let st = self.peripheral.map { Self.peripheralStateName($0.state) } ?? "none"
+            self.dbg("connect timeout (peripheral.state=\(st))")
             self.failConnect("Couldn't connect", "Couldn't connect to the ring. Wear it (or put it on the charger) and keep the phone right next to it, then try again.")
         }
         t.resume(); connectTimer = t
