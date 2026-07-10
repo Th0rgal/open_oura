@@ -7,6 +7,7 @@
 pub mod ble;
 pub mod client;
 pub mod error;
+mod history;
 pub mod transport;
 
 pub use client::OuraClient;

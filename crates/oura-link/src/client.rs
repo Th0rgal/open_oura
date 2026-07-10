@@ -3,12 +3,11 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::error::{Error, Result};
+use crate::history::decode_batch;
 use crate::transport::{transact_until, Transport};
 use oura_protocol::auth::{encrypt_nonce, AuthResult};
 use oura_protocol::device::{self, Battery, Capability, DeviceInfo};
-use oura_protocol::events::{
-    EventBatchSummary, ExtEventBatchSummary, ExtEventEnvelopeParser, RingEvent,
-};
+use oura_protocol::events::RingEvent;
 use oura_protocol::protocol::{self, feature, feature_mode, Packet};
 
 /// Default quiet window for collecting responses to a request.
@@ -491,53 +490,25 @@ impl<T: Transport> OuraClient<T> {
                 );
             }
 
-            let mut summary: Option<u32> = None;
             let mut max_ts = start;
             let mut batch_events = 0u32;
-            let mut ext_envelopes = ExtEventEnvelopeParser::default();
-            for p in &packets {
-                if p.tag == 0x11 {
-                    summary = EventBatchSummary::parse(p).map(|s| s.bytes_left);
-                } else if p.tag == 0x2f && p.payload.first().copied() == Some(0x42) {
-                    summary = ExtEventBatchSummary::parse(p).map(|s| s.bytes_left);
-                } else if p.tag == 0x2f && p.payload.first().copied() == Some(0x43) {
-                    for ep in ext_envelopes.push_packet(p) {
-                        if ep.tag >= protocol::HISTORY_EVENT_PREFIX {
-                            let ev = RingEvent::from_packet(&ep);
-                            if !on_event(&ev) {
-                                return Err(Error::Protocol(
-                                    "event callback failed; not acknowledging batch".into(),
-                                ));
-                            }
-                            max_ts = max_ts.max(ev.timestamp);
-                            batch_events += 1;
-                            total += 1;
-                        }
-                    }
-                } else if p.tag >= protocol::HISTORY_EVENT_PREFIX {
-                    let ev = RingEvent::from_packet(p);
-                    if !on_event(&ev) {
-                        return Err(Error::Protocol(
-                            "event callback failed; not acknowledging batch".into(),
-                        ));
-                    }
-                    max_ts = max_ts.max(ev.timestamp);
-                    batch_events += 1;
-                    total += 1;
+            let batch = decode_batch(&packets).map_err(|e| {
+                Error::Protocol(format!(
+                    "{e} — BLE link lost mid-batch? cursor {start} is checkpointed; \
+                     reconnect and sync again to resume"
+                ))
+            })?;
+            for ev in batch.events {
+                if !on_event(&ev) {
+                    return Err(Error::Protocol(
+                        "event callback failed; not acknowledging batch".into(),
+                    ));
                 }
+                max_ts = max_ts.max(ev.timestamp);
+                batch_events += 1;
+                total += 1;
             }
-
-            // No summary = the link died mid-batch (the summary is the ring's
-            // explicit batch terminator). Erroring — instead of treating it as
-            // "drained" — is what lets the caller notice and reconnect/resume.
-            let Some(bytes_left) = summary else {
-                return Err(Error::Protocol(format!(
-                    "event batch ended without a summary packet ({} packet(s) received) — \
-                     BLE link lost mid-batch? cursor {start} is checkpointed; \
-                     reconnect and sync again to resume",
-                    packets.len()
-                )));
-            };
+            let bytes_left = batch.bytes_left;
             // Advance the cursor past the newest event seen.
             let next = max_ts.saturating_add(1);
             let progressed = batch_events > 0 && next > start;
