@@ -10,6 +10,7 @@ to tools/oura_tokens.txt (gitignored).
 """
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -28,8 +29,11 @@ def _emit(label: str, value: str, host: str) -> None:
         return
     _seen.add(key)
     ctx.log.alert(f"[OURA TOKEN] {host} {label}: {value}")
+    new = not OUT.exists()
     with OUT.open("a") as f:
         f.write(f"{host}\t{label}\t{value}\n")
+    if new:
+        os.chmod(OUT, 0o600)  # file holds full account tokens
 
 
 def _scan_json(obj, host: str, path: str = "") -> None:

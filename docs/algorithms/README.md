@@ -13,6 +13,12 @@ addresses refer to functions in the decompiled `libappecore.so` (see
 `native-decoder.md` for the Ghidra method). Per-metric detail files are added as
 each is ported; this index is the status table.
 
+> **Models are not included in this repo.** Where the table says a metric runs via
+> a decrypted PyTorch model (`tools/run_*.py`), those `.pt` files are Oura's
+> proprietary IP and are **not committed** (gitignored under `notes/models/`) —
+> you supply your own locally-decrypted copies. See
+> [`docs/model-runners.md`](../model-runners.md).
+
 ## Status
 
 | Metric | ecore source | Rust impl | Status |
@@ -30,7 +36,7 @@ each is ported; this index is the status table.
 | Activity score + contributors | `get_activity_score_raw @ 0x1d5788` (per-contributor pw-interp, Y=[0,25,95,100]); combiner `@ 0x1d781c` | - | ◐ contributor curves + X-tables recovered; final-combiner divisor ambiguous - needs careful re-read |
 | Activity targets / cals / MET | `actinfo_target_to_cal @ 0x1cd2c8`, `actinfo_update_5_min_classification @ 0x1cd640` | `oura-analysis::metabolic` | ◐ VO2max/BMR/steps→m ported+tested; MET-class ordering + calorie/step regression best-effort |
 | Cycle prediction / tracking | `cycle_prediction_calculate @ 0x1e2864`, `cycle_tracking_calculate @ 0x1e4244` | - | ◐ day-type thresholds + 0.18–0.30 sine band recovered; fit_sin/sine_from_range unresolved - deferred |
-| **Sleep hypnogram (staging)** | SleepNet PyTorch model (`sleepstaging_2_6_0.pt.enc`) - not in ecore | - | ❌ blocked: AES-256-GCM decryption RE'd, but the key is **server-delivered** (see [sleepnet.md](sleepnet.md)) |
+| **Sleep hypnogram (staging)** | SleepNet PyTorch model - not in ecore | `tools/run_sleep_model.py`, `tools/run_models.py bdi` | ✅ **decrypted + running**: we produce a DEEP/LIGHT/REM/WAKE hypnogram offline with the decrypted `sleepnet_moonstone_1_2_0` (and `sleepnet_bdi_0_4_0` for apnea). The model key was extracted, so decryption is no longer blocked. `sleepstaging_2_6_0` itself won't load (needs a custom op `oura_ops::oura_create_windows` our torch runtime lacks) — moonstone covers staging. See [model-runners.md](../model-runners.md) |
 
 ## Device vs cloud (corrected)
 
