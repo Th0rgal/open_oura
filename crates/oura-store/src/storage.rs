@@ -239,7 +239,7 @@ impl Store {
     pub fn decoded_events(&self) -> Result<Vec<(i64, u8, String, i64)>> {
         let mut stmt = self.conn.prepare(
             "SELECT ring_timestamp, tag, decoded_json, captured_unix FROM events \
-             WHERE decoded_json IS NOT NULL ORDER BY ring_timestamp",
+             WHERE decoded_json IS NOT NULL ORDER BY captured_unix, id",
         )?;
         let rows = stmt
             .query_map([], |r| {
@@ -299,5 +299,27 @@ mod tests {
 
         let counts = store.event_counts("S1").unwrap();
         assert_eq!(counts, vec![("debug_event".to_string(), 1)]);
+    }
+
+    #[test]
+    fn decoded_events_preserve_capture_order_across_clock_reset() {
+        let store = Store::open_in_memory().unwrap();
+        for timestamp in [5_000_000, 10] {
+            let event = RingEvent {
+                tag: 0x42,
+                name: "time_sync",
+                timestamp,
+                body: vec![0, 0, 0, 0],
+                decoded: Some(serde_json::json!({"unix_time": 1_700_000_000})),
+            };
+            assert!(store.insert_event("S1", &event).unwrap());
+        }
+        let timestamps: Vec<i64> = store
+            .decoded_events()
+            .unwrap()
+            .into_iter()
+            .map(|row| row.0)
+            .collect();
+        assert_eq!(timestamps, [5_000_000, 10]);
     }
 }
