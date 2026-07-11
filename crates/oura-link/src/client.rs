@@ -937,8 +937,31 @@ mod tests {
 
     #[test]
     fn rejects_cursor_poison_from_misaligned_extended_envelope() {
-        assert!(plausible_history_timestamp(6_906_561, 6_906_620));
-        assert!(!plausible_history_timestamp(6_906_561, 2_390_248_269));
-        assert!(!plausible_history_timestamp(6_906_561, 3_970_646_538));
+        // Exact tail records extracted from a physical Ring 5 drain on 2026-07-11.
+        // The first record is the last well-formed event; the remaining six came
+        // from two misaligned extended envelopes (their bodies contained fragments
+        // of subsequent events), and must never influence a persisted cursor.
+        let batch_start = 6_906_561;
+        let valid = [(0x7e, 6_906_620)];
+        let corrupt = [
+            (0xd1, 2_390_248_269),
+            (0x8c, 3_970_646_416),
+            (0x46, 3_970_646_462),
+            (0x60, 3_970_646_516),
+            (0x45, 3_970_646_537),
+            (0x61, 3_970_646_538),
+        ];
+        for (tag, timestamp) in valid {
+            assert!(
+                plausible_history_timestamp(batch_start, timestamp),
+                "valid tag {tag:#04x} at {timestamp}"
+            );
+        }
+        for (tag, timestamp) in corrupt {
+            assert!(
+                !plausible_history_timestamp(batch_start, timestamp),
+                "corrupt tag {tag:#04x} at {timestamp}"
+            );
+        }
     }
 }
