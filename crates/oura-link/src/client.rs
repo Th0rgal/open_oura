@@ -3,7 +3,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::error::{Error, Result};
-use crate::history::decode_batch;
+use crate::history::{decode_batch, validate_batch};
 use crate::transport::{transact_until, Transport};
 use oura_protocol::auth::{encrypt_nonce, AuthResult};
 use oura_protocol::device::{self, Battery, Capability, DeviceInfo};
@@ -100,15 +100,6 @@ const DRAIN_QUIET: Duration = Duration::from_secs(6);
 /// the per-batch round-trip overhead negligible while bounding what a drop can
 /// lose and yielding regular `bytes_left` progress updates.
 const EXT_BATCH_MAX_EVENTS: u16 = 4096;
-// A retained history batch may legitimately jump over quiet periods, but never by
-// years. Corrupt/misaligned extended envelopes otherwise poison the persisted cursor
-// with a near-u32::MAX timestamp and force every later sync to replay from zero.
-const MAX_BATCH_CURSOR_ADVANCE_DS: u32 = 180 * 24 * 60 * 60 * 10;
-
-fn plausible_history_timestamp(batch_start: u32, timestamp: u32) -> bool {
-    timestamp <= batch_start.saturating_add(MAX_BATCH_CURSOR_ADVANCE_DS)
-}
-
 /// A feature's reported status (`0x2f` ext `0x21`): mode/status/state/subscription.
 #[derive(Clone, Copy, Debug)]
 pub struct FeatureStatus {
@@ -498,42 +489,32 @@ impl<T: Transport> OuraClient<T> {
                 );
             }
 
-            let mut max_ts = start;
-            let mut batch_events = 0u32;
-            let mut rejected_events = 0u32;
             let batch = decode_batch(&packets).map_err(|e| {
                 Error::Protocol(format!(
                     "{e} — BLE link lost mid-batch? cursor {start} is checkpointed; \
                      reconnect and sync again to resume"
                 ))
             })?;
-            for ev in batch.events {
-                if !plausible_history_timestamp(start, ev.timestamp) {
-                    rejected_events += 1;
-                    continue;
-                }
-                if !on_event(&ev) {
+            let batch = validate_batch(batch, start);
+            for ev in &batch.events {
+                if !on_event(ev) {
                     return Err(Error::Protocol(
                         "event callback failed; not acknowledging batch".into(),
                     ));
                 }
-                max_ts = max_ts.max(ev.timestamp);
-                batch_events += 1;
                 total += 1;
             }
-            if rejected_events > 0 {
+            if batch.rejected_events > 0 {
                 tracing::warn!(
-                    rejected_events,
+                    rejected_events = batch.rejected_events,
                     cursor = start,
                     "discarded history events with impossible cursor jumps"
                 );
             }
             let bytes_left = batch.bytes_left;
-            // Advance the cursor past the newest event seen.
-            let next = max_ts.saturating_add(1);
-            let progressed = batch_events > 0 && next > start;
+            let progressed = batch.progressed(start);
             if progressed {
-                start = next;
+                start = batch.next_cursor;
             }
             // Report every batch (even an empty terminal one) so callers can
             // persist the cursor and show progress.
@@ -933,35 +914,5 @@ mod tests {
         let s = parse_live_hr_frame(&frame).unwrap();
         assert_eq!(s.ibi_ms, 857);
         assert_eq!(s.bpm, 70);
-    }
-
-    #[test]
-    fn rejects_cursor_poison_from_misaligned_extended_envelope() {
-        // Exact tail records extracted from a physical Ring 5 drain on 2026-07-11.
-        // The first record is the last well-formed event; the remaining six came
-        // from two misaligned extended envelopes (their bodies contained fragments
-        // of subsequent events), and must never influence a persisted cursor.
-        let batch_start = 6_906_561;
-        let valid = [(0x7e, 6_906_620)];
-        let corrupt = [
-            (0xd1, 2_390_248_269),
-            (0x8c, 3_970_646_416),
-            (0x46, 3_970_646_462),
-            (0x60, 3_970_646_516),
-            (0x45, 3_970_646_537),
-            (0x61, 3_970_646_538),
-        ];
-        for (tag, timestamp) in valid {
-            assert!(
-                plausible_history_timestamp(batch_start, timestamp),
-                "valid tag {tag:#04x} at {timestamp}"
-            );
-        }
-        for (tag, timestamp) in corrupt {
-            assert!(
-                !plausible_history_timestamp(batch_start, timestamp),
-                "corrupt tag {tag:#04x} at {timestamp}"
-            );
-        }
     }
 }
