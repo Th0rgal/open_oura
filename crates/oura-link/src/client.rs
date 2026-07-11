@@ -100,6 +100,14 @@ const DRAIN_QUIET: Duration = Duration::from_secs(6);
 /// the per-batch round-trip overhead negligible while bounding what a drop can
 /// lose and yielding regular `bytes_left` progress updates.
 const EXT_BATCH_MAX_EVENTS: u16 = 4096;
+// A retained history batch may legitimately jump over quiet periods, but never by
+// years. Corrupt/misaligned extended envelopes otherwise poison the persisted cursor
+// with a near-u32::MAX timestamp and force every later sync to replay from zero.
+const MAX_BATCH_CURSOR_ADVANCE_DS: u32 = 180 * 24 * 60 * 60 * 10;
+
+fn plausible_history_timestamp(batch_start: u32, timestamp: u32) -> bool {
+    timestamp <= batch_start.saturating_add(MAX_BATCH_CURSOR_ADVANCE_DS)
+}
 
 /// A feature's reported status (`0x2f` ext `0x21`): mode/status/state/subscription.
 #[derive(Clone, Copy, Debug)]
@@ -492,6 +500,7 @@ impl<T: Transport> OuraClient<T> {
 
             let mut max_ts = start;
             let mut batch_events = 0u32;
+            let mut rejected_events = 0u32;
             let batch = decode_batch(&packets).map_err(|e| {
                 Error::Protocol(format!(
                     "{e} — BLE link lost mid-batch? cursor {start} is checkpointed; \
@@ -499,6 +508,10 @@ impl<T: Transport> OuraClient<T> {
                 ))
             })?;
             for ev in batch.events {
+                if !plausible_history_timestamp(start, ev.timestamp) {
+                    rejected_events += 1;
+                    continue;
+                }
                 if !on_event(&ev) {
                     return Err(Error::Protocol(
                         "event callback failed; not acknowledging batch".into(),
@@ -507,6 +520,13 @@ impl<T: Transport> OuraClient<T> {
                 max_ts = max_ts.max(ev.timestamp);
                 batch_events += 1;
                 total += 1;
+            }
+            if rejected_events > 0 {
+                tracing::warn!(
+                    rejected_events,
+                    cursor = start,
+                    "discarded history events with impossible cursor jumps"
+                );
             }
             let bytes_left = batch.bytes_left;
             // Advance the cursor past the newest event seen.
@@ -913,5 +933,12 @@ mod tests {
         let s = parse_live_hr_frame(&frame).unwrap();
         assert_eq!(s.ibi_ms, 857);
         assert_eq!(s.bpm, 70);
+    }
+
+    #[test]
+    fn rejects_cursor_poison_from_misaligned_extended_envelope() {
+        assert!(plausible_history_timestamp(6_906_561, 6_906_620));
+        assert!(!plausible_history_timestamp(6_906_561, 2_390_248_269));
+        assert!(!plausible_history_timestamp(6_906_561, 3_970_646_538));
     }
 }
