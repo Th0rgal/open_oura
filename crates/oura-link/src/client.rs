@@ -527,7 +527,11 @@ impl<T: Transport> OuraClient<T> {
                     "batch callback failed; not acknowledging batch".into(),
                 ));
             }
-            if progressed {
+            // ExtGetEvent is cursor-driven and implicitly completes its own batch.
+            // Sending the legacy GetEvent ACK here makes Ring 5 stream another batch;
+            // those late frames race with the next flush and get discarded. Only the
+            // legacy API uses the explicit 0x10 acknowledgement.
+            if progressed && !use_extended {
                 let _ = self
                     .request_tag(&protocol::req_get_event_ack(start), 0x11)
                     .await;
@@ -895,6 +899,25 @@ mod tests {
             client.authenticate(&key).await.unwrap(),
             AuthResult::Success
         );
+    }
+
+    #[tokio::test]
+    async fn extended_drain_does_not_send_legacy_ack() {
+        let mock = MockTransport::new();
+        mock.on("280100", &["290100"]);
+        mock.on(
+            "2f0c410000000000000000000010",
+            &["2f09430600aa430364bbcc2f0a42010000000000000000"],
+        );
+        let client = OuraClient::new(mock).with_quiet(Duration::from_millis(20));
+        let outcome = client.drain_events(0, |_| true, |_| true).await.unwrap();
+        assert_eq!(outcome.events_synced, 1);
+        assert_eq!(outcome.next_cursor, 2);
+        assert!(client
+            .transport()
+            .writes()
+            .iter()
+            .all(|request| request.first() != Some(&0x10)));
     }
 
     #[test]

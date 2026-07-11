@@ -85,6 +85,7 @@ pub(crate) mod mock {
     pub struct MockTransport {
         tx: broadcast::Sender<Vec<u8>>,
         responses: Mutex<HashMap<String, Vec<Vec<u8>>>>,
+        writes: Mutex<Vec<Vec<u8>>>,
     }
 
     impl MockTransport {
@@ -93,6 +94,7 @@ pub(crate) mod mock {
             Self {
                 tx,
                 responses: Mutex::new(HashMap::new()),
+                writes: Mutex::new(Vec::new()),
             }
         }
 
@@ -103,11 +105,16 @@ pub(crate) mod mock {
                 responses.iter().map(|h| hex::decode(h).unwrap()).collect(),
             );
         }
+
+        pub fn writes(&self) -> Vec<Vec<u8>> {
+            self.writes.lock().unwrap().clone()
+        }
     }
 
     #[async_trait]
     impl Transport for MockTransport {
         async fn write(&self, data: &[u8]) -> Result<()> {
+            self.writes.lock().unwrap().push(data.to_vec());
             let key = hex::encode(data);
             if let Some(frames) = self.responses.lock().unwrap().get(&key) {
                 for f in frames {

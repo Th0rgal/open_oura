@@ -67,6 +67,7 @@ pub(crate) fn validate_batch(batch: HistoryBatch, batch_start: u32) -> Validated
 
 pub(crate) fn decode_batch(packets: &[Packet]) -> Result<HistoryBatch> {
     let mut bytes_left = None;
+    let mut result_code = None;
     let mut events = Vec::new();
     let mut envelopes = ExtEventEnvelopeParser::default();
 
@@ -74,7 +75,10 @@ pub(crate) fn decode_batch(packets: &[Packet]) -> Result<HistoryBatch> {
         if packet.tag == 0x11 {
             bytes_left = EventBatchSummary::parse(packet).map(|s| s.bytes_left);
         } else if packet.tag == 0x2f && packet.payload.first() == Some(&0x42) {
-            bytes_left = ExtEventBatchSummary::parse(packet).map(|s| s.bytes_left);
+            if let Some(summary) = ExtEventBatchSummary::parse(packet) {
+                bytes_left = Some(summary.bytes_left);
+                result_code = Some(summary.result_code);
+            }
         } else if packet.tag == 0x2f && packet.payload.first() == Some(&0x43) {
             events.extend(
                 envelopes
@@ -94,6 +98,11 @@ pub(crate) fn decode_batch(packets: &[Packet]) -> Result<HistoryBatch> {
             packets.len()
         )));
     };
+    if let Some(code) = result_code.filter(|&code| code != 0) {
+        return Err(Error::Protocol(format!(
+            "extended history request failed with result code 0x{code:02x}"
+        )));
+    }
     Ok(HistoryBatch { events, bytes_left })
 }
 
@@ -131,6 +140,14 @@ mod tests {
     fn rejects_unterminated_batch() {
         let error = decode_batch(&[packet("43086400000074657374")]).unwrap_err();
         assert!(error.to_string().contains("without a summary"));
+    }
+
+    #[test]
+    fn rejects_extended_result_code_from_ios_sync_vector() {
+        // Exact terminal frame from the 2026-07-11 iOS sync. 0xff is a rejected
+        // request, not a successful empty batch, even though bytes_left is zero.
+        let error = decode_batch(&[packet("2f0a420000000000000000ff")]).unwrap_err();
+        assert!(error.to_string().contains("result code 0xff"));
     }
 
     #[test]
