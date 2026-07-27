@@ -77,6 +77,15 @@ impl Store {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
                 .map_err(|e| crate::error::Error::Storage(e.to_string()))?;
         }
+        // The sync writer and the model/summary readers share this file, so every
+        // connection waits out short lock contention instead of failing, and the
+        // writable store runs in WAL mode so readers get a consistent snapshot
+        // while the per-event drain inserts. The iOS app sometimes opens the
+        // read-only seed DB bundled with the app: the WAL switch is a write, so
+        // its failure there is tolerated (a pure reader doesn't need it).
+        conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+        let _ = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get::<_, String>(0));
+        let _ = conn.execute_batch("PRAGMA synchronous=NORMAL;");
         conn.execute_batch(SCHEMA)?;
         Ok(Self { conn })
     }
@@ -288,6 +297,57 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_event() -> RingEvent {
+        RingEvent {
+            tag: 0x43,
+            name: "debug_event",
+            timestamp: 42,
+            body: vec![1, 2, 3],
+            decoded: None,
+        }
+    }
+
+    #[test]
+    fn open_enables_wal_on_writable_file() {
+        let dir = std::env::temp_dir().join(format!("oura-store-wal-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("wal.db");
+        let _ = std::fs::remove_file(&path);
+        let store = Store::open(&path).unwrap();
+        let mode: String = store
+            .conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn reader_survives_open_writer_transaction() {
+        let dir = std::env::temp_dir().join(format!("oura-store-rw-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("shared.db");
+        let _ = std::fs::remove_file(&path);
+        let writer = Store::open(&path).unwrap();
+        writer.insert_event("S1", &sample_event()).unwrap();
+        // Hold an uncommitted write open — under WAL a reader still gets a
+        // consistent snapshot instead of SQLITE_BUSY / a partial read.
+        writer.conn.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        writer
+            .conn
+            .execute(
+                "INSERT INTO readings (serial, kind, value, unit, captured_unix)
+                 VALUES ('S1', 'battery_percent', 50.0, '%', 0)",
+                [],
+            )
+            .unwrap();
+        let reader = Store::open(&path).unwrap();
+        let counts = reader.event_counts("S1").unwrap();
+        assert_eq!(counts, vec![("debug_event".to_string(), 1)]);
+        writer.conn.execute_batch("COMMIT;").unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn events_dedup_and_cursor_roundtrip() {
