@@ -19,6 +19,13 @@ futures = "0.3"
 # can build for iOS, where CoreBluetooth implements the `Transport` trait instead.
 btleplug = { version = "0.11", optional = true }
 
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", optional = true, features = [
+    "Devices_Bluetooth",
+    "Devices_Enumeration",
+    "Foundation",
+] }
+
 [features]
 default = ["ble"]
-ble = ["dep:btleplug"]
+ble = ["dep:btleplug", "dep:windows"]
