@@ -117,6 +117,15 @@ land. Each decoder has a unit test.
 | `sleep_phase_*` | 2-bit codes, 4/byte | hypnogram deep/light/rem/awake (not emitted yet) |
 | `ambient` / `ehr_acm_intensity` | `u16` LE samples | raw values |
 | `time_sync` / `state_change` / `wear_event` / `alert` / debug | u32 / byte+text | as labelled |
+| `ring_start` (`0x41`) | `u32` reason, `u8` unknown, then three `a.b.c` version triplets | boot record: firmware / bootloader / API (verified against the same ring's `DeviceInfo`) |
+| `user_information` (`0x5c`) | four `u8`: age, weight kg, sex, height cm | anthropometric profile — field meanings **inferred**, emits `_status: inferred` |
+
+> The last two rows were **not** recovered from `libringeventparser.so`. `ring_start`
+> was resolved by correlating a captured body against the `DeviceInfo` response of the
+> same ring; `user_information` from the inputs ecore's own metabolic functions take
+> (`vo2max_jackson(age, female, weight_kg)`, `bmr_schofield(age, sex, weight_kg)` —
+> see `oura-analysis::ported::metabolic`) plus the sleep-score limits being initialised
+> "from age byte". Both carry that provenance in their function docs.
 
 **Ring-5 HR/SpO2 sources (empirical):** daytime HR arrives as `green_ibi_quality`
 (`0x80`); overnight HR + amplitude as `ibi_and_amplitude` (`0x60`); SpO2 as the raw

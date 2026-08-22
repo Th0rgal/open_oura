@@ -62,8 +62,14 @@ pub fn decode_event_body(tag: u8, body: &[u8]) -> Option<serde_json::Value> {
 /// the protobuf field shapes; each is covered by a test using captured bytes.
 fn decode_body(tag: u8, body: &[u8]) -> Option<serde_json::Value> {
     match tag {
+        // ring_start: boot record — reason word then the firmware/bootloader/API
+        // version triplets (same values `DeviceInfo` reports).
+        0x41 => decode_ring_start(body),
         // time_sync: u32 LE unix timestamp (plus trailing timezone bytes).
         0x42 => decode_time_sync(body),
+        // user_information: one byte each of the anthropometric profile ecore's
+        // metabolic algorithms consume. Field meanings inferred, see the fn doc.
+        0x5c => decode_user_information(body),
         // debug_event: ASCII strings (e.g. "git;ca22327", "SNH;XXXX").
         0x43 => decode_ascii(body),
         // debug_data: ASCII when printable, else binary DebugData subtypes
@@ -160,12 +166,79 @@ fn decode_ascii(body: &[u8]) -> Option<serde_json::Value> {
     }
 }
 
+/// `ring_start` (tag `0x41`): the boot record the ring emits once on start-up
+/// (observed right after a factory reset).
+///
+/// Layout recovered by correlating a captured body against the `DeviceInfo`
+/// response read from the *same* ring over `0x08`: bytes 5..14 are byte-for-byte
+/// the firmware, bootloader and API version triplets that command reports, in
+/// that order. The leading `u32` and the byte at offset 4 are not identified —
+/// only one sample has been observed, so they are surfaced verbatim rather than
+/// guessed at.
+///
+/// `[u32 LE reason][u8 unknown][fw a.b.c][bootloader a.b.c][api a.b.c]`
+fn decode_ring_start(body: &[u8]) -> Option<serde_json::Value> {
+    if body.len() < 14 {
+        return None;
+    }
+    let v3 = |s: &[u8]| {
+        s.iter()
+            .map(|b| b.to_string())
+            .collect::<Vec<_>>()
+            .join(".")
+    };
+    Some(serde_json::json!({
+        "reason": u32::from_le_bytes([body[0], body[1], body[2], body[3]]),
+        "unknown_byte_4": body[4],
+        "firmware_version": v3(&body[5..8]),
+        "bootloader_version": v3(&body[8..11]),
+        "api_version": v3(&body[11..14]),
+    }))
+}
+
 fn decode_time_sync(body: &[u8]) -> Option<serde_json::Value> {
     if body.len() < 4 {
         return None;
     }
     let unix = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
     Some(serde_json::json!({ "unix_time": unix }))
+}
+
+/// `user_information` (tag `0x5c`): the anthropometric profile the ring keeps for
+/// its on-device metabolic algorithms — one byte per field.
+///
+/// The field meanings are **inferred**, not recovered from a native parser, so the
+/// body is reported with `"_status":"inferred"`. The basis: ecore's
+/// `vo2max_jackson(age, female, weight_kg)` and `bmr_schofield(age, sex, weight_kg)`
+/// (ported in `oura-analysis::ported::metabolic`) take exactly these inputs, and
+/// the sleep-score limits are initialised "from age byte" (`init_limits_v2 @
+/// 0x1f5b20`). On the one captured sample the sex byte is `2` — neither male (0)
+/// nor female (1), but the value `bmr_schofield` documents as "anything else",
+/// the unset path that averages both sexes. That sample came from a ring that had
+/// just been factory reset, so the values read as firmware defaults (40 y, 75 kg,
+/// 176 cm) rather than a real user profile.
+///
+/// `height_cm` is the least certain field: no ported algorithm consumes it
+/// (`steps_to_meters` uses a fixed 0.762 m stride, not a height-derived one).
+///
+/// `[u8 age_years][u8 weight_kg][u8 sex][u8 height_cm]`
+fn decode_user_information(body: &[u8]) -> Option<serde_json::Value> {
+    if body.len() < 4 {
+        return None;
+    }
+    let sex = match body[2] {
+        0 => "male",
+        1 => "female",
+        _ => "unspecified",
+    };
+    Some(serde_json::json!({
+        "age_years": body[0],
+        "weight_kg": body[1],
+        "sex_code": body[2],
+        "sex": sex,
+        "height_cm": body[3],
+        "_status": "inferred",
+    }))
 }
 
 fn decode_state_text(body: &[u8]) -> Option<serde_json::Value> {
@@ -923,6 +996,47 @@ mod tests {
         // Captured time_sync body: u32 LE unix time then timezone bytes.
         let v = decode_time_sync(&hex::decode("4fd2376a0000000000").unwrap()).unwrap();
         assert_eq!(v["unix_time"].as_u64().unwrap(), 1_782_043_215);
+    }
+
+    #[test]
+    fn decodes_ring_start_real_bytes() {
+        // Captured from a Ring 4 (ORE_06) on the boot that followed a factory
+        // reset. The three version triplets match what `oura info` reported for
+        // the same ring: firmware 2.12.3, bootloader 1.0.1, API 2.1.0.
+        let v = decode_ring_start(&hex::decode("0400000032020c03010001020100").unwrap()).unwrap();
+        assert_eq!(v["reason"].as_u64().unwrap(), 4);
+        assert_eq!(v["unknown_byte_4"].as_u64().unwrap(), 0x32);
+        assert_eq!(v["firmware_version"].as_str().unwrap(), "2.12.3");
+        assert_eq!(v["bootloader_version"].as_str().unwrap(), "1.0.1");
+        assert_eq!(v["api_version"].as_str().unwrap(), "2.1.0");
+    }
+
+    #[test]
+    fn rejects_short_ring_start() {
+        // A truncated body stays raw rather than decoding partial versions.
+        assert!(decode_ring_start(&hex::decode("0400000032020c03").unwrap()).is_none());
+    }
+
+    #[test]
+    fn decodes_user_information_defaults() {
+        // Captured from a Ring 4 shortly after a factory reset: the sex byte is 2,
+        // the "anything else" value bmr_schofield averages over, so these read as
+        // firmware defaults rather than a configured profile.
+        let v = decode_user_information(&hex::decode("284b02b0").unwrap()).unwrap();
+        assert_eq!(v["age_years"].as_u64().unwrap(), 40);
+        assert_eq!(v["weight_kg"].as_u64().unwrap(), 75);
+        assert_eq!(v["sex_code"].as_u64().unwrap(), 2);
+        assert_eq!(v["sex"].as_str().unwrap(), "unspecified");
+        assert_eq!(v["height_cm"].as_u64().unwrap(), 176);
+        assert_eq!(v["_status"].as_str().unwrap(), "inferred");
+    }
+
+    #[test]
+    fn maps_user_information_sex_codes() {
+        for (code, want) in [(0u8, "male"), (1, "female"), (2, "unspecified")] {
+            let v = decode_user_information(&[30, 70, code, 170]).unwrap();
+            assert_eq!(v["sex"].as_str().unwrap(), want);
+        }
     }
 
     #[test]
