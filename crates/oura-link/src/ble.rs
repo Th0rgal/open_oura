@@ -47,6 +47,24 @@ async fn first_adapter() -> Result<btleplug::platform::Adapter> {
         .ok_or_else(|| Error::Ble("no Bluetooth adapter found".into()))
 }
 
+/// Whether an advertised local name matches `--name`.
+///
+/// Scan already requires the Oura service UUID, so the name is only a secondary
+/// filter. A bonded ring often stops advertising a local name; treating that as
+/// a miss (`"".contains("oura") == false`) is https://github.com/Th0rgal/open_oura/issues/13.
+/// Empty names therefore pass the default `"Oura"` needle. A more specific needle
+/// still requires a name, so `--name "Ring 5"` does not pick every unnamed device.
+pub fn name_matches(advertised: &str, needle: &str) -> bool {
+    let needle = needle.trim().to_lowercase();
+    if needle.is_empty() {
+        return true;
+    }
+    if advertised.is_empty() {
+        return needle == "oura";
+    }
+    advertised.to_lowercase().contains(&needle)
+}
+
 /// Scan for Oura rings advertising the service, filtered by case-insensitive name
 /// substring. Returns candidates sorted by signal strength (strongest first).
 pub async fn scan(name_contains: &str, timeout: Duration) -> Result<Vec<Discovered>> {
@@ -69,13 +87,17 @@ pub async fn scan(name_contains: &str, timeout: Duration) -> Result<Vec<Discover
                 continue;
             }
             let name = props.local_name.unwrap_or_default();
-            if !name.to_lowercase().contains(&name_contains.to_lowercase()) {
+            if !name_matches(&name, name_contains) {
                 continue;
             }
             let id = p.id().to_string();
             let entry = Discovered {
                 id: id.clone(),
-                name,
+                name: if name.is_empty() {
+                    "(unnamed)".into()
+                } else {
+                    name
+                },
                 rssi: props.rssi.unwrap_or(i16::MIN),
             };
             match found.iter_mut().find(|d| d.id == id) {
@@ -117,7 +139,7 @@ impl BleTransport {
                     continue;
                 }
                 let name = props.local_name.unwrap_or_default();
-                if !name.to_lowercase().contains(&name_contains.to_lowercase()) {
+                if !name_matches(&name, name_contains) {
                     continue;
                 }
                 if let Some(addr) = address {
@@ -209,5 +231,30 @@ impl Transport for BleTransport {
 
     fn subscribe(&self) -> broadcast::Receiver<Vec<u8>> {
         self.tx.subscribe()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::name_matches;
+
+    #[test]
+    fn default_needle_accepts_unnamed_bonded_ring() {
+        assert!(name_matches("", "Oura"));
+        assert!(name_matches("", "oura"));
+        assert!(name_matches("Oura Ring 4", "Oura"));
+    }
+
+    #[test]
+    fn specific_needle_still_requires_a_name() {
+        assert!(!name_matches("", "Ring 5"));
+        assert!(name_matches("Oura Ring 5", "Ring 5"));
+        assert!(!name_matches("Oura Ring 4", "Ring 5"));
+    }
+
+    #[test]
+    fn empty_needle_matches_everything() {
+        assert!(name_matches("", ""));
+        assert!(name_matches("anything", "  "));
     }
 }
