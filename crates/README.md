@@ -122,6 +122,7 @@ land. Each decoder has a unit test.
 | **`ibi_and_amplitude_event` (`0x60`)** | 14-byte bit-packed | 6× IBI ms + PPG amplitude → HR (validated overnight: 18k beats, median 41 bpm) |
 | **`spo2_r_pi_event` (`0x8b`)** | header + 3-byte `(R: u16 BE/16384, PI: u8/255×0.05)` | SpO2 R-ratio + perfusion index (validated overnight: R ~0.72, PI ~4%) |
 | `sleep_acm_period` (`0x72`) | 6 fixed-point floats | accelerometer MAD stats during sleep |
+| `sleep_period_information_2` (`0x6a`) | 10-byte `SleepPeriodInfo` (HR ×0.5, breath ÷8, …) | per-window sleep sample from `parse_api_sleep_period_info` |
 | `activity_information` | state + MET bytes (`<128: ×0.1`, else `12.8+(b-128)×0.2`) | state + MET levels |
 | `motion_event` | orientation `b0>>5`, axes signed `i8×8`, intensity nibbles | orientation + avg x/y/z + intensity (validated worn) |
 | `spo2_event` | header + `u8` per sample | SpO2 % series (decoder ready; not emitted by Ring 5 yet) |

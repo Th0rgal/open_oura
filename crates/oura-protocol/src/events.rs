@@ -103,6 +103,9 @@ fn decode_body(tag: u8, body: &[u8]) -> Option<serde_json::Value> {
         0x76 => decode_bedtime_period(body),
         // sleep_acm_period: 6 accelerometer MAD statistics (fixed-point floats).
         0x72 => decode_sleep_acm_period(body),
+        // sleep_period_information_2: one per-window sleep sample (HR, breathing,
+        // motion, sleep state, …). From the native `parse_api_sleep_period_info`.
+        0x6a => decode_sleep_period_info(body),
         // spo2_r_pi_event (Ring 5 tag 0x8b): SpO2 R-ratio + perfusion index.
         0x8b => decode_spo2_r_pi(body),
         // cva_raw_ppg_data (tag 0x81): raw PPG for cardiovascular age, emitted when
@@ -486,6 +489,52 @@ fn decode_sleep_acm_period(body: &[u8]) -> Option<serde_json::Value> {
         r4(q12(body[10], body[11])),
     ];
     Some(serde_json::json!({ "acm_mad": vals }))
+}
+
+/// `sleep_period_information_2` (tag `0x6a`): one per-window sleep sample. From
+/// the native `EventParser::parse_api_sleep_period_info @ 0x2affd8`, which reads a
+/// fixed 10-byte body into a single `SleepPeriodInfo` entry (offsets, scales, and
+/// range checks are taken byte-for-byte from that function):
+///
+/// | off | type    | field          | scale                         |
+/// |-----|---------|----------------|-------------------------------|
+/// | 0   | u8      | `average_hr`   | `× 0.5` (bpm)                 |
+/// | 1   | i8      | `hr_trend`     | `× 0.0625`                    |
+/// | 2   | u8      | `mzci`         | `× 0.0625`                    |
+/// | 3   | u8      | `dzci`         | `× 0.0625`                    |
+/// | 4   | u8      | `breath`       | `÷ 8` (breaths/min)           |
+/// | 5   | u8      | `breath_v`     | `÷ 8`                         |
+/// | 6   | u8      | `motion_count` | integer, native range `0..119`|
+/// | 7   | i8      | `sleep_state`  | integer, native range `0..2`  |
+/// | 8   | u16 LE  | `cv`           | `÷ 65536`                     |
+///
+/// The native parser throws `RepNumericRangeError` when `motion_count >= 120` or
+/// `sleep_state >= 3`; we mirror that by rejecting the body (returning `None`) so a
+/// corrupt frame is dropped rather than decoded. `mzci`/`dzci`/`cv` are Oura-
+/// internal signal metrics kept under their protobuf names.
+fn decode_sleep_period_info(body: &[u8]) -> Option<serde_json::Value> {
+    if body.len() < 10 {
+        return None;
+    }
+    let motion_count = body[6];
+    let sleep_state = body[7] as i8;
+    // Native range guards (parse_api_sleep_period_info): reject out-of-range frames.
+    if motion_count >= 120 || !(0..3).contains(&(sleep_state as i32)) {
+        return None;
+    }
+    let r4 = |v: f64| (v * 10000.0).round() / 10000.0;
+    let cv = u16::from_le_bytes([body[8], body[9]]);
+    Some(serde_json::json!({
+        "average_hr": r4(body[0] as f64 * 0.5),
+        "hr_trend": r4(body[1] as i8 as f64 * 0.0625),
+        "mzci": r4(body[2] as f64 * 0.0625),
+        "dzci": r4(body[3] as f64 * 0.0625),
+        "breath": r4(body[4] as f64 / 8.0),
+        "breath_v": r4(body[5] as f64 / 8.0),
+        "motion_count": motion_count,
+        "sleep_state": sleep_state,
+        "cv": r4(cv as f64 / 65536.0),
+    }))
 }
 
 /// `motion_event` (tag `0x47`): a compact per-window motion summary. From the
@@ -1301,6 +1350,31 @@ mod tests {
             let v = decode_user_information(&[30, 70, code, 170]).unwrap();
             assert_eq!(v["sex"].as_str().unwrap(), want);
         }
+    }
+
+    #[test]
+    fn decodes_sleep_period_info() {
+        // Synthetic 10-byte body exercising every field + scale from the native
+        // parse_api_sleep_period_info. Replace with a captured 0x6a body once one
+        // is available (see docs/native-decoder.md workflow).
+        //   avg_hr 104*0.5=52 bpm, hr_trend -3*0.0625, mzci 16*0.0625,
+        //   dzci 8*0.0625, breath 112/8=14, breath_v 100/8=12.5,
+        //   motion_count 3, sleep_state 1, cv 0x8000/65536=0.5
+        let body = [104u8, 0xFD, 16, 8, 112, 100, 3, 1, 0x00, 0x80];
+        let v = decode_sleep_period_info(&body).unwrap();
+        assert_eq!(v["average_hr"].as_f64().unwrap(), 52.0);
+        assert_eq!(v["hr_trend"].as_f64().unwrap(), -0.1875);
+        assert_eq!(v["mzci"].as_f64().unwrap(), 1.0);
+        assert_eq!(v["dzci"].as_f64().unwrap(), 0.5);
+        assert_eq!(v["breath"].as_f64().unwrap(), 14.0);
+        assert_eq!(v["breath_v"].as_f64().unwrap(), 12.5);
+        assert_eq!(v["motion_count"].as_u64().unwrap(), 3);
+        assert_eq!(v["sleep_state"].as_i64().unwrap(), 1);
+        assert_eq!(v["cv"].as_f64().unwrap(), 0.5);
+        // Native range guards: motion_count >= 120 and sleep_state >= 3 are rejected.
+        assert!(decode_sleep_period_info(&[104, 0, 0, 0, 0, 0, 120, 1, 0, 0]).is_none());
+        assert!(decode_sleep_period_info(&[104, 0, 0, 0, 0, 0, 3, 3, 0, 0]).is_none());
+        assert!(decode_sleep_period_info(&[0; 9]).is_none());
     }
 
     #[test]
