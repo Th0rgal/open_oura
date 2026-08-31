@@ -1,13 +1,16 @@
 //! `btleplug`-backed [`Transport`] for real rings (feature `ble`).
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use btleplug::api::{
-    Central, CharPropFlags, Characteristic, Manager as _, Peripheral as _, ScanFilter, WriteType,
+    Central, CharPropFlags, Characteristic, Manager as _, Peripheral as _, PeripheralProperties,
+    ScanFilter, WriteType,
 };
 use btleplug::platform::{Manager, Peripheral};
 use futures::StreamExt;
 use tokio::sync::broadcast;
+use uuid::Uuid;
 
 use crate::error::{Error, Result};
 use crate::transport::Transport;
@@ -17,6 +20,9 @@ use oura_protocol::protocol;
 /// imposes no deadline itself, so without this a ring that won't complete the GATT
 /// handshake hangs the caller forever.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Bluetooth SIG company identifier for Oura Health Oy (NRF: `<0x02B2>`).
+const OURA_COMPANY_ID: u16 = 0x02B2;
 
 /// A ring discovered while scanning.
 #[derive(Clone, Debug)]
@@ -47,15 +53,58 @@ async fn first_adapter() -> Result<btleplug::platform::Adapter> {
         .ok_or_else(|| Error::Ble("no Bluetooth adapter found".into()))
 }
 
-/// Scan for Oura rings advertising the service, filtered by case-insensitive name
-/// substring. Returns candidates sorted by signal strength (strongest first).
+/// True if advertisement has Oura-specific evidence (not merely a name substring).
+///
+/// Accepts either:
+/// - Oura GATT service UUID in the adv service list, or
+/// - Oura company id `0x02B2` in manufacturer data
+///
+/// Name alone is intentionally insufficient: on Windows, `connect` may trigger
+/// an auto-accepted OS BLE bond before GATT validation, so a coincidental
+/// `"oura"` substring in an unrelated device name must not select a candidate.
+/// WinRT often omits incomplete 128-bit service lists from `props.services`
+/// even when NRF shows them; manufacturer data is the reliable fallback there.
+fn is_oura_advertisement(
+    services: &[Uuid],
+    manufacturer_data: &HashMap<u16, Vec<u8>>,
+    _local_name: &str,
+) -> bool {
+    services.contains(&protocol::OURA_SERVICE)
+        || manufacturer_data.contains_key(&OURA_COMPANY_ID)
+}
+
+/// Apply the user `--name` substring filter.
+///
+/// Empty needle matches everything. On Windows the local name is often missing
+/// even when the ring advertises one; if the user asked for the default `"Oura"`
+/// (or another `oura…` needle), allow empty-named candidates that already passed
+/// [`is_oura_advertisement`].
+fn name_filter_matches(name_contains: &str, local_name: &str) -> bool {
+    let needle = name_contains.trim().to_lowercase();
+    if needle.is_empty() {
+        return true;
+    }
+    let name = local_name.to_lowercase();
+    if name.contains(&needle) {
+        return true;
+    }
+    name.is_empty() && needle.starts_with("oura")
+}
+
+fn props_match_oura(props: &PeripheralProperties, name_contains: &str) -> bool {
+    let name = props.local_name.as_deref().unwrap_or("");
+    is_oura_advertisement(&props.services, &props.manufacturer_data, name)
+        && name_filter_matches(name_contains, name)
+}
+
+/// Scan for Oura rings. Uses an unfiltered OS scan then classifies advertisements
+/// in-process so platforms that drop incomplete service UUID lists (notably
+/// WinRT) still surface rings. Returns candidates sorted by RSSI (strongest first).
 pub async fn scan(name_contains: &str, timeout: Duration) -> Result<Vec<Discovered>> {
     let adapter = first_adapter().await?;
-    adapter
-        .start_scan(ScanFilter {
-            services: vec![protocol::OURA_SERVICE],
-        })
-        .await?;
+    // Do not pass `services: [OURA_SERVICE]` to the OS watcher: on Windows that
+    // filter can hide ads that only carry an *incomplete* 128-bit UUID list.
+    adapter.start_scan(ScanFilter::default()).await?;
 
     let deadline = Instant::now() + timeout;
     let mut found: Vec<Discovered> = Vec::new();
@@ -65,13 +114,10 @@ pub async fn scan(name_contains: &str, timeout: Duration) -> Result<Vec<Discover
             let Some(props) = p.properties().await? else {
                 continue;
             };
-            if !props.services.contains(&protocol::OURA_SERVICE) {
+            if !props_match_oura(&props, name_contains) {
                 continue;
             }
             let name = props.local_name.unwrap_or_default();
-            if !name.to_lowercase().contains(&name_contains.to_lowercase()) {
-                continue;
-            }
             let id = p.id().to_string();
             let entry = Discovered {
                 id: id.clone(),
@@ -99,11 +145,7 @@ impl BleTransport {
         scan_timeout: Duration,
     ) -> Result<Self> {
         let adapter = first_adapter().await?;
-        adapter
-            .start_scan(ScanFilter {
-                services: vec![protocol::OURA_SERVICE],
-            })
-            .await?;
+        adapter.start_scan(ScanFilter::default()).await?;
 
         let deadline = Instant::now() + scan_timeout;
         let mut chosen: Option<(Peripheral, i16)> = None;
@@ -113,11 +155,7 @@ impl BleTransport {
                 let Some(props) = p.properties().await? else {
                     continue;
                 };
-                if !props.services.contains(&protocol::OURA_SERVICE) {
-                    continue;
-                }
-                let name = props.local_name.unwrap_or_default();
-                if !name.to_lowercase().contains(&name_contains.to_lowercase()) {
+                if !props_match_oura(&props, name_contains) {
                     continue;
                 }
                 if let Some(addr) = address {
@@ -139,6 +177,22 @@ impl BleTransport {
         let _ = adapter.stop_scan().await;
 
         let (peripheral, _) = chosen.ok_or(Error::DeviceNotFound)?;
+
+        // Windows: OS BLE bond/link-encryption is required before encrypted GATT
+        // characteristics can be used. Settings UI pairing often fails; request
+        // the bond via WinRT before btleplug opens the ATT session. Bound so a
+        // stalled OS ceremony cannot hang connect forever (prompts need headroom
+        // beyond the GATT CONNECT_TIMEOUT).
+        #[cfg(windows)]
+        {
+            // Must exceed windows_bond's worst case: optional 15s stale unpair +
+            // 2×45s PairAsync attempts + up to 2×15s weak-bond unpairs + device open.
+            const BOND_TIMEOUT: Duration = Duration::from_secs(180);
+            let id = peripheral.id().to_string();
+            tokio::time::timeout(BOND_TIMEOUT, crate::windows_bond::ensure_ble_bond(&id))
+                .await
+                .map_err(|_| Error::ConnectTimeout)??;
+        }
 
         // CoreBluetooth's connect (and, on some stacks, service discovery) has no
         // deadline of its own: a ring that advertises but won't complete the GATT
@@ -209,5 +263,52 @@ impl Transport for BleTransport {
 
     fn subscribe(&self) -> broadcast::Receiver<Vec<u8>> {
         self.tx.subscribe()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn accepts_service_uuid() {
+        assert!(is_oura_advertisement(
+            &[protocol::OURA_SERVICE],
+            &HashMap::new(),
+            ""
+        ));
+    }
+
+    #[test]
+    fn accepts_oura_company_id_without_service_list() {
+        let mut mfr = HashMap::new();
+        mfr.insert(OURA_COMPANY_ID, vec![0x04, 0x40, 0x5c, 0x06]);
+        assert!(is_oura_advertisement(&[], &mfr, ""));
+    }
+
+    #[test]
+    fn name_alone_is_not_enough() {
+        assert!(!is_oura_advertisement(
+            &[],
+            &HashMap::new(),
+            "Oura Ring Gen3"
+        ));
+        assert!(!is_oura_advertisement(&[], &HashMap::new(), "courageous"));
+    }
+
+    #[test]
+    fn empty_name_needle_matches_everything() {
+        assert!(name_filter_matches("", ""));
+        assert!(name_filter_matches("", "Oura Ring Gen3"));
+        assert!(name_filter_matches("  ", "x"));
+    }
+
+    #[test]
+    fn oura_needle_allows_empty_winrt_name() {
+        assert!(name_filter_matches("Oura", ""));
+        assert!(name_filter_matches("oura", "Oura 2H4C…"));
+        assert!(!name_filter_matches("Gen3", ""));
+        assert!(name_filter_matches("Gen3", "Oura Ring Gen3"));
     }
 }

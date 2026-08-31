@@ -1,7 +1,6 @@
 //! `oura` — a command-line client that reads data directly from an Oura ring over
 //! BLE, with no Oura cloud account. See `--help` for subcommands.
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -167,9 +166,8 @@ fn load_key(path: &Option<PathBuf>) -> Result<Option<[u8; 16]>> {
 
 /// Generate a random 16-byte auth key from the OS CSPRNG.
 fn generate_key() -> Result<[u8; 16]> {
-    let mut file = std::fs::File::open("/dev/urandom").context("opening /dev/urandom")?;
     let mut key = [0u8; 16];
-    file.read_exact(&mut key).context("reading random bytes")?;
+    getrandom::getrandom(&mut key).map_err(|e| anyhow!("reading OS CSPRNG: {e}"))?;
     Ok(key)
 }
 
@@ -192,10 +190,230 @@ fn save_key(path: &Path, key: &[u8; 16]) -> Result<()> {
         // mode() above only applies on create; tighten an already-existing file too.
         f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        std::fs::write(path, contents)
+        save_key_windows(path, contents.as_bytes())
             .with_context(|| format!("writing key file {}", path.display()))?;
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = contents;
+        return Err(anyhow!(
+            "secure key storage is not implemented on this platform"
+        ));
+    }
+    Ok(())
+}
+
+/// Create `path` with a current-user-only DACL *before* writing any key bytes,
+/// then verify the resulting ACL. Never logs key material.
+#[cfg(windows)]
+fn save_key_windows(path: &Path, contents: &[u8]) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, LocalFree, ERROR_SUCCESS, FALSE, HANDLE, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        GetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT,
+    };
+    use windows_sys::Win32::Security::{
+        EqualSid, GetAce, GetTokenInformation, TokenUser, ACCESS_ALLOWED_ACE, ACL,
+        DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY,
+        TOKEN_USER,
+    };
+    // Win32 ACCESS_ALLOWED_ACE_TYPE
+    const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, DeleteFileW, MoveFileExW, WriteFile, CREATE_NEW, FILE_ATTRIBUTE_NORMAL,
+        FILE_GENERIC_WRITE, FILE_SHARE_NONE, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    unsafe fn last_error(context: &str) -> anyhow::Error {
+        anyhow!("{context} (Win32 error {})", GetLastError())
+    }
+
+    unsafe {
+        // Current-user SID -> SDDL: protected DACL, only that user, full access.
+        let mut token: HANDLE = std::ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == FALSE {
+            return Err(last_error("OpenProcessToken"));
+        }
+        let mut needed = 0u32;
+        GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut needed);
+        // TOKEN_USER contains a pointer; allocate with pointer alignment, not u8.
+        let words = (needed as usize).div_ceil(std::mem::size_of::<u64>()).max(1);
+        let mut buf = vec![0u64; words];
+        let buf_bytes = (words * std::mem::size_of::<u64>()) as u32;
+        if GetTokenInformation(
+            token,
+            TokenUser,
+            buf.as_mut_ptr().cast(),
+            buf_bytes,
+            &mut needed,
+        ) == FALSE
+        {
+            CloseHandle(token);
+            return Err(last_error("GetTokenInformation(TokenUser)"));
+        }
+        CloseHandle(token);
+        let token_user = &*(buf.as_ptr() as *const TOKEN_USER);
+        let user_sid: PSID = token_user.User.Sid;
+
+        let mut sid_string: windows_sys::core::PWSTR = std::ptr::null_mut();
+        if ConvertSidToStringSidW(user_sid, &mut sid_string) == FALSE {
+            return Err(last_error("ConvertSidToStringSidW"));
+        }
+        let sid_len = (0..).take_while(|&i| *sid_string.add(i) != 0).count();
+        let sid_rust = String::from_utf16_lossy(std::slice::from_raw_parts(sid_string, sid_len));
+        LocalFree(sid_string.cast());
+
+        // D:P = protect against inherited ACEs; A;;FA = allow file-all to this SID only.
+        let sddl = format!("D:P(A;;FA;;;{sid_rust})");
+        let sddl_wide: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        if ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl_wide.as_ptr(),
+            SDDL_REVISION_1,
+            &mut sd,
+            std::ptr::null_mut(),
+        ) == FALSE
+        {
+            return Err(last_error(
+                "ConvertStringSecurityDescriptorToSecurityDescriptorW",
+            ));
+        }
+
+        let path_w = wide(path);
+        // Write+verify a unique sibling temp file first so an existing key is
+        // never deleted until the replacement is fully validated, and concurrent
+        // pair processes cannot share one deterministic temp path.
+        let tmp_name = format!(
+            "{}.{}-{}.tmp",
+            path.file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("oura.key"),
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let tmp_path = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(tmp_name);
+        let tmp_w = wide(&tmp_path);
+        if tmp_path.exists() {
+            let _ = DeleteFileW(tmp_w.as_ptr());
+        }
+
+        let sa = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: sd,
+            bInheritHandle: FALSE,
+        };
+        let handle = CreateFileW(
+            tmp_w.as_ptr(),
+            FILE_GENERIC_WRITE,
+            FILE_SHARE_NONE,
+            &sa,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL,
+            std::ptr::null_mut(),
+        );
+        LocalFree(sd.cast());
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(last_error("CreateFileW temp key with user-only DACL"));
+        }
+
+        let mut written = 0u32;
+        let write_ok = WriteFile(
+            handle,
+            contents.as_ptr(),
+            contents.len() as u32,
+            &mut written,
+            std::ptr::null_mut(),
+        );
+        CloseHandle(handle);
+        if write_ok == FALSE || written as usize != contents.len() {
+            let _ = DeleteFileW(tmp_w.as_ptr());
+            return Err(last_error("WriteFile temp key bytes"));
+        }
+
+        // Verify: DACL present, exactly one ACCESS_ALLOWED ACE, SID == current user.
+        let mut owner: PSID = std::ptr::null_mut();
+        let mut group: PSID = std::ptr::null_mut();
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let mut sacl: *mut ACL = std::ptr::null_mut();
+        let mut sd_out: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let status = GetNamedSecurityInfoW(
+            tmp_w.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            &mut owner,
+            &mut group,
+            &mut dacl,
+            &mut sacl,
+            &mut sd_out,
+        );
+        if status != ERROR_SUCCESS {
+            let _ = DeleteFileW(tmp_w.as_ptr());
+            return Err(anyhow!(
+                "GetNamedSecurityInfoW failed after temp key write (Win32 error {status})"
+            ));
+        }
+        let verify = (|| -> Result<()> {
+            if dacl.is_null() {
+                return Err(anyhow!("temp key file DACL missing after create"));
+            }
+            let ace_count = (*dacl).AceCount;
+            if ace_count != 1 {
+                return Err(anyhow!(
+                    "temp key file DACL AceCount={ace_count}, expected 1 (current user only)"
+                ));
+            }
+            let mut ace: *mut core::ffi::c_void = std::ptr::null_mut();
+            if GetAce(dacl, 0, &mut ace) == FALSE {
+                return Err(last_error("GetAce"));
+            }
+            let ace_hdr = ace as *const windows_sys::Win32::Security::ACE_HEADER;
+            if (*ace_hdr).AceType != ACCESS_ALLOWED_ACE_TYPE {
+                return Err(anyhow!("temp key file DACL ACE is not ACCESS_ALLOWED"));
+            }
+            let allowed = ace as *const ACCESS_ALLOWED_ACE;
+            let ace_sid = &(*allowed).SidStart as *const u32 as PSID;
+            if EqualSid(ace_sid, user_sid) == FALSE {
+                return Err(anyhow!(
+                    "temp key file DACL ACE SID does not match current user"
+                ));
+            }
+            Ok(())
+        })();
+        LocalFree(sd_out.cast());
+        if let Err(e) = verify {
+            let _ = DeleteFileW(tmp_w.as_ptr());
+            return Err(e);
+        }
+
+        // Atomically replace the destination; on failure the old key (if any) remains.
+        if MoveFileExW(
+            tmp_w.as_ptr(),
+            path_w.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        ) == FALSE
+        {
+            let _ = DeleteFileW(tmp_w.as_ptr());
+            return Err(last_error("MoveFileExW temp key into place"));
+        }
     }
     Ok(())
 }
@@ -493,8 +711,10 @@ async fn cmd_pair(cli: &Cli) -> Result<()> {
         .set_auth_key(&key)
         .await
         .context("set_auth_key failed (is the ring factory-reset / removed from the app?)")?;
+    // Print the key path (needed to use the ring later). Default filenames may
+    // include the serial; that is intentional for discoverability.
     println!(
-        "Installed {} auth key on {serial}; saved to {}",
+        "Installed {} auth key; saved to {}",
         if reused { "existing" } else { "new" },
         out.display()
     );
@@ -1159,4 +1379,129 @@ async fn cmd_events(cli: &Cli) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Independently inspect a key file DACL (used by tests; not the write path's
+/// self-check). Returns Ok(()) only when AceCount==1 ACCESS_ALLOWED for the
+/// current process user.
+#[cfg(all(test, windows))]
+fn assert_key_file_user_only_dacl(path: &Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, LocalFree, ERROR_SUCCESS, FALSE, HANDLE,
+    };
+    use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{
+        EqualSid, GetAce, GetTokenInformation, TokenUser, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
+        DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, TOKEN_QUERY, TOKEN_USER,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+
+    let path_w: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    unsafe {
+        let mut token: HANDLE = std::ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == FALSE {
+            return Err(anyhow!("OpenProcessToken (Win32 {})", GetLastError()));
+        }
+        let mut needed = 0u32;
+        GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut needed);
+        let words = (needed as usize).div_ceil(std::mem::size_of::<u64>()).max(1);
+        let mut buf = vec![0u64; words];
+        let buf_bytes = (words * std::mem::size_of::<u64>()) as u32;
+        if GetTokenInformation(
+            token,
+            TokenUser,
+            buf.as_mut_ptr().cast(),
+            buf_bytes,
+            &mut needed,
+        ) == FALSE
+        {
+            CloseHandle(token);
+            return Err(anyhow!(
+                "GetTokenInformation (Win32 {})",
+                GetLastError()
+            ));
+        }
+        CloseHandle(token);
+        let token_user = &*(buf.as_ptr() as *const TOKEN_USER);
+        let user_sid: PSID = token_user.User.Sid;
+
+        let mut owner: PSID = std::ptr::null_mut();
+        let mut group: PSID = std::ptr::null_mut();
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let mut sacl: *mut ACL = std::ptr::null_mut();
+        let mut sd_out: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let status = GetNamedSecurityInfoW(
+            path_w.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            &mut owner,
+            &mut group,
+            &mut dacl,
+            &mut sacl,
+            &mut sd_out,
+        );
+        if status != ERROR_SUCCESS {
+            return Err(anyhow!("GetNamedSecurityInfoW failed ({status})"));
+        }
+        let result = (|| -> Result<()> {
+            if dacl.is_null() {
+                return Err(anyhow!("DACL missing on key file"));
+            }
+            let ace_count = (*dacl).AceCount;
+            if ace_count != 1 {
+                return Err(anyhow!("AceCount={ace_count}, expected 1"));
+            }
+            let mut ace: *mut core::ffi::c_void = std::ptr::null_mut();
+            if GetAce(dacl, 0, &mut ace) == FALSE {
+                return Err(anyhow!("GetAce failed (Win32 {})", GetLastError()));
+            }
+            let ace_hdr = ace as *const ACE_HEADER;
+            if (*ace_hdr).AceType != ACCESS_ALLOWED_ACE_TYPE {
+                return Err(anyhow!("ACE is not ACCESS_ALLOWED"));
+            }
+            let allowed = ace as *const ACCESS_ALLOWED_ACE;
+            let ace_sid = &(*allowed).SidStart as *const u32 as PSID;
+            if EqualSid(ace_sid, user_sid) == FALSE {
+                return Err(anyhow!("ACE SID does not match current user"));
+            }
+            Ok(())
+        })();
+        LocalFree(sd_out.cast());
+        result
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_key_storage_tests {
+    use super::{assert_key_file_user_only_dacl, save_key};
+
+    #[test]
+    fn save_key_creates_user_only_dacl_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "oura-key-acl-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.key");
+        let key = [7u8; 16];
+        save_key(&path, &key).expect("save_key");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.trim(), hex::encode(key));
+        assert_key_file_user_only_dacl(&path).expect("independent DACL check");
+        save_key(&path, &key).expect("save_key overwrite");
+        assert_key_file_user_only_dacl(&path).expect("independent DACL check after overwrite");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
 }
