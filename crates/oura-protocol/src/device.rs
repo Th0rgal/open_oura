@@ -22,7 +22,12 @@ impl DeviceInfo {
             return None;
         }
         let p = &packet.payload;
-        let v3 = |s: &[u8]| s.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(".");
+        let v3 = |s: &[u8]| {
+            s.iter()
+                .map(|b| b.to_string())
+                .collect::<Vec<_>>()
+                .join(".")
+        };
         Some(DeviceInfo {
             api_version: v3(&p[0..3]),
             firmware_version: v3(&p[3..6]),

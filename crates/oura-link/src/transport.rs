@@ -30,6 +30,26 @@ pub async fn transact<T>(transport: &T, request: &[u8], quiet: Duration) -> Resu
 where
     T: Transport + ?Sized,
 {
+    transact_until(transport, request, quiet, |_| false).await
+}
+
+/// Like [`transact`], but returns as soon as a frame satisfying `is_terminal`
+/// arrives, instead of always waiting out the quiet window after the last frame.
+///
+/// Most ring commands have a well-known response (the official app proceeds the
+/// moment it sees it), so terminating on it saves the full `quiet` window per
+/// request — which dominates the handshake/setup phase otherwise. The quiet
+/// window remains as the fallback for unexpected responses or a dead link.
+pub async fn transact_until<T, F>(
+    transport: &T,
+    request: &[u8],
+    quiet: Duration,
+    mut is_terminal: F,
+) -> Result<Vec<Vec<u8>>>
+where
+    T: Transport + ?Sized,
+    F: FnMut(&[u8]) -> bool,
+{
     let mut rx = transport.subscribe();
     // Drop any backlog so we only observe responses to *this* request.
     while rx.try_recv().is_ok() {}
@@ -39,7 +59,13 @@ where
     let mut frames = Vec::new();
     loop {
         match tokio::time::timeout(quiet, rx.recv()).await {
-            Ok(Ok(frame)) => frames.push(frame),
+            Ok(Ok(frame)) => {
+                let done = is_terminal(&frame);
+                frames.push(frame);
+                if done {
+                    break;
+                }
+            }
             Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
             // Channel closed or quiet window elapsed: we're done collecting.
             _ => break,
@@ -59,6 +85,7 @@ pub(crate) mod mock {
     pub struct MockTransport {
         tx: broadcast::Sender<Vec<u8>>,
         responses: Mutex<HashMap<String, Vec<Vec<u8>>>>,
+        writes: Mutex<Vec<Vec<u8>>>,
     }
 
     impl MockTransport {
@@ -67,6 +94,7 @@ pub(crate) mod mock {
             Self {
                 tx,
                 responses: Mutex::new(HashMap::new()),
+                writes: Mutex::new(Vec::new()),
             }
         }
 
@@ -77,11 +105,16 @@ pub(crate) mod mock {
                 responses.iter().map(|h| hex::decode(h).unwrap()).collect(),
             );
         }
+
+        pub fn writes(&self) -> Vec<Vec<u8>> {
+            self.writes.lock().unwrap().clone()
+        }
     }
 
     #[async_trait]
     impl Transport for MockTransport {
         async fn write(&self, data: &[u8]) -> Result<()> {
+            self.writes.lock().unwrap().push(data.to_vec());
             let key = hex::encode(data);
             if let Some(frames) = self.responses.lock().unwrap().get(&key) {
                 for f in frames {

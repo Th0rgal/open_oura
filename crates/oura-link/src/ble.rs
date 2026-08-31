@@ -10,8 +10,13 @@ use futures::StreamExt;
 use tokio::sync::broadcast;
 
 use crate::error::{Error, Result};
-use oura_protocol::protocol;
 use crate::transport::Transport;
+use oura_protocol::protocol;
+
+/// Upper bound on the BLE connect + service-discovery + subscribe phase. CoreBluetooth
+/// imposes no deadline itself, so without this a ring that won't complete the GATT
+/// handshake hangs the caller forever.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A ring discovered while scanning.
 #[derive(Clone, Debug)]
@@ -134,30 +139,37 @@ impl BleTransport {
         let _ = adapter.stop_scan().await;
 
         let (peripheral, _) = chosen.ok_or(Error::DeviceNotFound)?;
-        if !peripheral.is_connected().await? {
-            peripheral.connect().await?;
-        }
-        peripheral.discover_services().await?;
 
-        let chars = peripheral.characteristics();
-        let write_char = chars
-            .iter()
-            .find(|c| c.uuid == protocol::OURA_WRITE)
-            .cloned()
-            .ok_or_else(|| Error::CharacteristicNotFound(protocol::OURA_WRITE.to_string()))?;
+        // CoreBluetooth's connect (and, on some stacks, service discovery) has no
+        // deadline of its own: a ring that advertises but won't complete the GATT
+        // handshake — e.g. because a phone still holds the single peripheral link —
+        // makes these calls hang forever. Bound the whole setup phase so we fail with
+        // an actionable error instead of blocking indefinitely.
+        let write_char = tokio::time::timeout(CONNECT_TIMEOUT, async {
+            if !peripheral.is_connected().await? {
+                peripheral.connect().await?;
+            }
+            peripheral.discover_services().await?;
 
-        let notify_chars: Vec<Characteristic> = chars
-            .iter()
-            .filter(|c| {
+            let chars = peripheral.characteristics();
+            let write_char = chars
+                .iter()
+                .find(|c| c.uuid == protocol::OURA_WRITE)
+                .cloned()
+                .ok_or_else(|| Error::CharacteristicNotFound(protocol::OURA_WRITE.to_string()))?;
+
+            let notify_chars = chars.iter().filter(|c| {
                 c.service_uuid == protocol::OURA_SERVICE
                     && c.properties
                         .intersects(CharPropFlags::NOTIFY | CharPropFlags::INDICATE)
-            })
-            .cloned()
-            .collect();
-        for c in &notify_chars {
-            peripheral.subscribe(c).await?;
-        }
+            });
+            for c in notify_chars {
+                peripheral.subscribe(c).await?;
+            }
+            Ok::<_, Error>(write_char)
+        })
+        .await
+        .map_err(|_| Error::ConnectTimeout)??;
 
         let (tx, _) = broadcast::channel(256);
         let pump_tx = tx.clone();

@@ -6,9 +6,11 @@ Decodes the `cva_raw_ppg_data` events (BLE tag 0x81) the ring emits when the
 waveform, segments it the way the app does (groups of 1500 samples), and runs
 Oura's decrypted `cva_2_1_0.pt` model.
 
-Decode: each 0x81 body is int8 *deltas*; cumulative-sum reconstructs the PPG ADC
-samples. A measurement = a run of events <2 s apart (~1503 samples ≈ 10 s @ ~140
-Hz on Ring 5). The model wants segments of exactly 1500 samples.
+Decode: each 0x81 body is a stateful delta stream. Byte 0x80 marks the next
+three bytes as a signed 24-bit absolute ADC sample; every other byte is a signed
+int8 delta from the previous sample. A measurement = a run of events <2 s apart
+(~1503 samples ≈ 10 s @ ~140 Hz on Ring 5). The model wants segments of exactly
+1500 samples.
 
 Model I/O (from CardiovascularAgeV2Model in the decompiled app):
   forward(ppg_segments [n,1500] f32, demographics [1,5] f32)
@@ -38,6 +40,28 @@ SEG_LEN = 1500          # samples per segment (hard model constant)
 GAP_DS = 20             # >2 s (deciseconds) splits two PPG measurements
 
 
+def decode_cva_ppg_bodies(bodies):
+    samples = []
+    acc = 0
+    for body in bodies:
+        data = bytes(body)
+        i = 0
+        while i < len(data):
+            b = data[i]
+            if b == 0x80 and i + 3 < len(data):
+                raw = data[i + 1] | (data[i + 2] << 8) | (data[i + 3] << 16)
+                if raw & 0x800000:
+                    raw -= 0x1000000
+                acc = raw
+                samples.append(acc)
+                i += 4
+            else:
+                acc += np.int8(b).item()
+                samples.append(acc)
+                i += 1
+    return np.asarray(samples, dtype=np.float32)
+
+
 def build_segments(db, since_ds):
     con = sqlite3.connect(str(db))
     rows = con.execute(
@@ -49,7 +73,7 @@ def build_segments(db, since_ds):
     if not rows:
         sys.exit("no cva_raw_ppg_data (tag 0x81) events — is cva_ppg enabled? (oura feature-status)")
     ts = np.array([r[0] for r in rows])
-    # split into contiguous measurement runs, cumsum each, chunk into 1500
+    # split into contiguous measurement runs, decode each, chunk into 1500
     runs, cur = [], [0]
     for i in range(1, len(rows)):
         if ts[i] - ts[i - 1] > GAP_DS:
@@ -59,27 +83,46 @@ def build_segments(db, since_ds):
     runs.append(cur)
     segs = []
     for run in runs:
-        deltas = np.concatenate([np.frombuffer(rows[k][1], dtype=np.int8) for k in run]).astype(np.int32)
-        wave = np.cumsum(deltas).astype(np.float32)
+        wave = decode_cva_ppg_bodies([rows[k][1] for k in run])
         for s in range(0, len(wave) - SEG_LEN + 1, SEG_LEN):
             segs.append(wave[s : s + SEG_LEN])
     return segs, len(runs)
 
 
+def load_profile(db):
+    # profile.json (editable, gitignored) sits next to the DB; CLI args override it.
+    import json
+    try:
+        return json.loads((Path(db).parent / "profile.json").read_text())
+    except Exception:
+        return {}
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("db", nargs="?", default=None)
-    p.add_argument("--sex", default="M", choices=["M", "F", "O"])
-    p.add_argument("--age", type=float, default=30.0)
-    p.add_argument("--height", type=float, default=1.78, help="meters")
-    p.add_argument("--weight", type=float, default=75.0, help="kg")
-    p.add_argument("--ring", type=float, default=10.0, help="ring size")
+    # default None → fall back to profile.json, then to a built-in default
+    p.add_argument("--sex", default=None, choices=["M", "F", "O"])
+    p.add_argument("--age", type=float, default=None)
+    p.add_argument("--height", type=float, default=None, help="meters")
+    p.add_argument("--weight", type=float, default=None, help="kg")
+    p.add_argument("--ring", type=float, default=None, help="ring size")
     p.add_argument("--since-cursor", type=int, default=0, help="only events with ring_timestamp > this")
+    p.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     args = p.parse_args()
     if not MODEL.exists():
         sys.exit(f"model not found: {MODEL}")
 
-    segs, n_runs = build_segments(resolve_db(args.db, REPO), args.since_cursor)
+    db = resolve_db(args.db, REPO)
+    prof = load_profile(db)
+    pick = lambda cli, key, dflt: cli if cli is not None else prof.get(key, dflt)
+    args.sex = pick(args.sex, "sex", "M")
+    args.age = float(pick(args.age, "age", 30.0))
+    args.height = float(pick(args.height, "height_m", 1.78))
+    args.weight = float(pick(args.weight, "weight_kg", 75.0))
+    args.ring = float(pick(args.ring, "ring_size", 10.0))
+
+    segs, n_runs = build_segments(db, args.since_cursor)
     if not segs:
         sys.exit(f"no full {SEG_LEN}-sample PPG segment available ({n_runs} measurement runs, all too short)")
     ppg = torch.tensor(np.stack(segs), dtype=torch.float32)
@@ -89,6 +132,16 @@ def main():
     m = torch.jit.load(str(MODEL), map_location="cpu").eval()
     with torch.no_grad():
         cva, quality, raw_quality, pwv, seg_metrics = m(ppg, demo)
+
+    if args.json:
+        import json
+        print(json.dumps({
+            "segments": int(ppg.shape[0]), "measurements": n_runs,
+            "vascular_age": round(cva.item(), 1), "chronological_age": args.age,
+            "pwv_ms": round(pwv.item(), 2),
+            "quality": round(quality.item()), "raw_quality": round(raw_quality.item(), 2),
+        }))
+        return
 
     print(f"CVA (cardiovascular age) — {ppg.shape[0]} PPG segments from {n_runs} measurements")
     print(f"  demographics: sex={args.sex} age={args.age:.0f} height={args.height} weight={args.weight} ring={args.ring}")

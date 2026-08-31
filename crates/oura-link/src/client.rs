@@ -2,15 +2,38 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::error::{Error, Result};
+use crate::history::{decode_batch, validate_batch};
+use crate::transport::{transact_until, Transport};
 use oura_protocol::auth::{encrypt_nonce, AuthResult};
 use oura_protocol::device::{self, Battery, Capability, DeviceInfo};
-use crate::error::{Error, Result};
-use oura_protocol::events::{EventBatchSummary, RingEvent};
+use oura_protocol::events::RingEvent;
 use oura_protocol::protocol::{self, feature, feature_mode, Packet};
-use crate::transport::{transact, Transport};
 
 /// Default quiet window for collecting responses to a request.
 pub const DEFAULT_QUIET: Duration = Duration::from_millis(1500);
+
+/// Human-readable one-line dump of parsed packets, for debug logs + error messages.
+/// Shows each packet's tag, ext-tag and raw payload hex (payloads never carry the key).
+fn dump_packets(packets: &[Packet]) -> String {
+    if packets.is_empty() {
+        return "<no packets — ring sent nothing before the quiet window>".to_string();
+    }
+    packets
+        .iter()
+        .map(|p| {
+            format!(
+                "{{tag=0x{:02x} ext={} payload={}}}",
+                p.tag,
+                p.ext_tag()
+                    .map(|e| format!("0x{e:02x}"))
+                    .unwrap_or_else(|| "-".to_string()),
+                hex::encode(&p.payload)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 /// One live heart-rate sample derived from an IBI subscription notification.
 #[derive(Clone, Copy, Debug)]
@@ -55,6 +78,28 @@ pub struct SyncOutcome {
     pub next_cursor: u32,
 }
 
+/// Progress after each fully-processed event batch: the checkpointed cursor,
+/// the ring's own count of bytes still waiting, and events synced so far.
+#[derive(Clone, Copy, Debug)]
+pub struct BatchProgress {
+    pub next_cursor: u32,
+    pub bytes_left: u32,
+    pub events_synced: u32,
+}
+
+/// Quiet-window fallback for event-batch requests. Batches terminate on the
+/// ring's summary packet, so this only fires when the link died — but a ring can
+/// legitimately pause mid-batch (bundling/flash reads), so it is deliberately
+/// more patient than the per-command window to avoid false "link lost" errors.
+const DRAIN_QUIET: Duration = Duration::from_secs(6);
+
+/// Events requested per extended-drain batch. The official app asks for 65535
+/// (everything) in one batch, but the cursor can only be checkpointed at batch
+/// boundaries — one giant batch means a dropped link forfeits ALL progress and
+/// gives no progress reporting. A few thousand events (~1 min of transfer) keeps
+/// the per-batch round-trip overhead negligible while bounding what a drop can
+/// lose and yielding regular `bytes_left` progress updates.
+const EXT_BATCH_MAX_EVENTS: u16 = 4096;
 /// A feature's reported status (`0x2f` ext `0x21`): mode/status/state/subscription.
 #[derive(Clone, Copy, Debug)]
 pub struct FeatureStatus {
@@ -107,8 +152,59 @@ impl<T: Transport> OuraClient<T> {
     }
 
     async fn request(&self, bytes: &[u8]) -> Result<Vec<Packet>> {
-        let frames = transact(&self.transport, bytes, self.quiet).await?;
-        Ok(frames.iter().filter_map(|f| Packet::parse(f)).collect())
+        self.request_until(bytes, |_| false).await
+    }
+
+    /// Request whose response ends with a known packet: returns as soon as a
+    /// packet matching `terminal` arrives instead of waiting out the quiet
+    /// window (the quiet window remains as fallback for errors / dead links).
+    async fn request_until(
+        &self,
+        bytes: &[u8],
+        terminal: impl Fn(&Packet) -> bool,
+    ) -> Result<Vec<Packet>> {
+        tracing::debug!(tx = %hex::encode(bytes), tx_len = bytes.len(), "→ request");
+        let frames = transact_until(&self.transport, bytes, self.quiet, |frame| {
+            Packet::parse_many(frame).iter().any(&terminal)
+        })
+        .await?;
+        for f in &frames {
+            tracing::debug!(rx = %hex::encode(f), rx_len = f.len(), "← frame");
+        }
+        let packets: Vec<Packet> = frames.iter().flat_map(|f| Packet::parse_many(f)).collect();
+        tracing::debug!(packets = %dump_packets(&packets), "  parsed");
+        Ok(packets)
+    }
+
+    /// Request that completes when a packet with `tag` arrives.
+    async fn request_tag(&self, bytes: &[u8], tag: u8) -> Result<Vec<Packet>> {
+        self.request_until(bytes, |p| p.tag == tag).await
+    }
+
+    /// Request that completes when an extended (`0x2f`) packet with `ext` arrives.
+    async fn request_ext(&self, bytes: &[u8], ext: u8) -> Result<Vec<Packet>> {
+        self.request_until(bytes, |p| p.ext_tag() == Some(ext))
+            .await
+    }
+
+    /// Event-batch request: terminates on `terminal` like [`Self::request_until`],
+    /// but with the more patient [`DRAIN_QUIET`] fallback (see its doc).
+    async fn request_batch(
+        &self,
+        bytes: &[u8],
+        terminal: impl Fn(&Packet) -> bool,
+    ) -> Result<Vec<Packet>> {
+        // 4× the configured window, capped at DRAIN_QUIET — so tests with a tiny
+        // quiet stay fast while the default gets the patient 6 s fallback.
+        let quiet = (self.quiet * 4).min(DRAIN_QUIET).max(self.quiet);
+        tracing::debug!(tx = %hex::encode(bytes), tx_len = bytes.len(), "→ batch request");
+        let frames = transact_until(&self.transport, bytes, quiet, |frame| {
+            Packet::parse_many(frame).iter().any(&terminal)
+        })
+        .await?;
+        let packets: Vec<Packet> = frames.iter().flat_map(|f| Packet::parse_many(f)).collect();
+        tracing::debug!(packets = %dump_packets(&packets), "  parsed");
+        Ok(packets)
     }
 
     fn find(packets: &[Packet], tag: u8) -> Option<&Packet> {
@@ -119,7 +215,7 @@ impl<T: Transport> OuraClient<T> {
 
     /// Read firmware/version metadata (no auth required).
     pub async fn firmware(&self) -> Result<DeviceInfo> {
-        let packets = self.request(&protocol::req_firmware()).await?;
+        let packets = self.request_tag(&protocol::req_firmware(), 0x09).await?;
         Self::find(&packets, 0x09)
             .and_then(DeviceInfo::parse)
             .ok_or_else(|| Error::Protocol("no firmware response".into()))
@@ -127,7 +223,7 @@ impl<T: Transport> OuraClient<T> {
 
     /// Read battery state (requires app-auth on rings with a key installed).
     pub async fn battery(&self) -> Result<Battery> {
-        let packets = self.request(&protocol::req_battery()).await?;
+        let packets = self.request_tag(&protocol::req_battery(), 0x0d).await?;
         Self::find(&packets, 0x0d)
             .and_then(Battery::parse)
             .ok_or_else(|| Error::Protocol("no battery response (auth required?)".into()))
@@ -135,7 +231,7 @@ impl<T: Transport> OuraClient<T> {
 
     /// Read the ring serial number.
     pub async fn serial(&self) -> Result<String> {
-        let packets = self.request(&protocol::product::SERIAL).await?;
+        let packets = self.request_tag(&protocol::product::SERIAL, 0x19).await?;
         Self::find(&packets, 0x19)
             .and_then(device::parse_product_ascii)
             .ok_or_else(|| Error::Protocol("no serial response".into()))
@@ -143,7 +239,7 @@ impl<T: Transport> OuraClient<T> {
 
     /// Read the hardware id (e.g. `BLB_03`).
     pub async fn hardware_id(&self) -> Result<String> {
-        let packets = self.request(&protocol::product::HARDWARE).await?;
+        let packets = self.request_tag(&protocol::product::HARDWARE, 0x19).await?;
         Self::find(&packets, 0x19)
             .and_then(device::parse_product_ascii)
             .ok_or_else(|| Error::Protocol("no hardware response".into()))
@@ -153,7 +249,9 @@ impl<T: Transport> OuraClient<T> {
     pub async fn capabilities(&self) -> Result<Vec<Capability>> {
         let mut caps = Vec::new();
         for page in 0u8..2 {
-            let packets = self.request(&protocol::req_capabilities(page)).await?;
+            let packets = self
+                .request_ext(&protocol::req_capabilities(page), 0x02)
+                .await?;
             if let Some(p) = packets.iter().find(|p| p.ext_tag() == Some(0x02)) {
                 caps.extend(device::parse_capabilities(p));
             }
@@ -166,26 +264,77 @@ impl<T: Transport> OuraClient<T> {
     /// Run the app-auth challenge with a 16-byte key. Must be repeated per
     /// connection on rings that have a key installed.
     pub async fn authenticate(&self, key: &[u8; 16]) -> Result<AuthResult> {
-        let packets = self.request(&protocol::req_auth_nonce()).await?;
-        let nonce = packets
-            .iter()
-            .find(|p| p.ext_tag() == Some(0x2c))
-            .map(|p| p.payload[1..].to_vec())
-            .ok_or_else(|| Error::Auth("no nonce response".into()))?;
+        // Never log key bytes (not even a slice — that leaks key material). Only the
+        // length; "is it the right key" is answered by the Swift-side hashed fingerprint
+        // and whether auth ultimately succeeds.
+        tracing::debug!(
+            key_len = key.len(),
+            "auth: step 1 — requesting nonce (0x2b → expect 0x2c)"
+        );
+        let packets = self.request_ext(&protocol::req_auth_nonce(), 0x2c).await?;
+        let nonce = match packets.iter().find(|p| p.ext_tag() == Some(0x2c)) {
+            Some(p) if p.payload.len() > 1 => p.payload[1..].to_vec(),
+            _ => {
+                return Err(Error::Auth(format!(
+                    "no nonce response (expected ext 0x2c). ring sent {} packet(s): [{}]",
+                    packets.len(),
+                    dump_packets(&packets)
+                )));
+            }
+        };
+        tracing::debug!(nonce = %hex::encode(&nonce), nonce_len = nonce.len(), "auth: step 2 — got nonce");
 
+        // The encrypted block is deterministic from key+nonce via the shared Rust AES,
+        // so it can't differ between clients and isn't logged (it's key-derived material).
         let encrypted = encrypt_nonce(key, &nonce);
-        let packets = self.request(&protocol::req_authenticate(&encrypted)).await?;
-        let state = packets
+        tracing::debug!("auth: step 3 — sending AES-128/ECB/PKCS7(nonce) (0x2d → expect 0x2e)");
+        let packets = self
+            .request_ext(&protocol::req_authenticate(&encrypted), 0x2e)
+            .await?;
+        let state = match packets
             .iter()
             .find(|p| p.ext_tag() == Some(0x2e))
             .and_then(|p| p.payload.get(1).copied())
-            .ok_or_else(|| Error::Auth("no authenticate response".into()))?;
+        {
+            Some(s) => s,
+            None => {
+                return Err(Error::Auth(format!(
+                    "no authenticate response (expected ext 0x2e). ring sent {} packet(s): [{}]. \
+                     nonce was {} ({}B)",
+                    packets.len(),
+                    dump_packets(&packets),
+                    hex::encode(&nonce),
+                    nonce.len()
+                )));
+            }
+        };
 
         let result = AuthResult::from(state);
+        tracing::debug!(state = %format!("0x{state:02x}"), ?result, "auth: step 4 — ring verdict");
         if result.is_success() {
             Ok(result)
         } else {
-            Err(Error::Auth(format!("{result:?}")))
+            // Rich, actionable failure: the exact state byte + what it means, plus the
+            // bytes exchanged (never the key), so a report pins down key-vs-transport.
+            let hint = match result {
+                AuthResult::AuthenticationError => {
+                    "the ring rejected the key — it does not match THIS ring's installed key \
+                     (re-export the key from the phone that onboarded this exact ring)"
+                }
+                AuthResult::InFactoryReset => {
+                    "the ring is factory-reset (no key installed yet) — pair/onboard it first"
+                }
+                AuthResult::NotOriginalOnboardedDevice => {
+                    "the ring is bonded to a different onboarding — its key is not the one in use"
+                }
+                _ => "unexpected auth state",
+            };
+            Err(Error::Auth(format!(
+                "ring rejected auth: state=0x{state:02x} ({result:?}) — {hint}. \
+                 nonce={} ({}B)",
+                hex::encode(&nonce),
+                nonce.len()
+            )))
         }
     }
 
@@ -209,9 +358,65 @@ impl<T: Transport> OuraClient<T> {
         Ok(())
     }
 
+    /// Align the ring clock using the official-app `12 09` counter form observed
+    /// on Ring 4/5. Prefer this for app-parity setup; `sync_time` keeps the older
+    /// `u64 unix + timezone` shape used by earlier probes.
+    pub async fn sync_time_app(&self) -> Result<()> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let token = (now as u8).wrapping_mul(37).wrapping_add(0xa5);
+        self.request(&protocol::req_sync_time_counter(now, token))
+            .await?;
+        Ok(())
+    }
+
     /// Enable the async notification flags so the ring pushes events.
     pub async fn set_notification(&self, flags: u8) -> Result<()> {
         self.request(&protocol::req_set_notification(flags)).await?;
+        Ok(())
+    }
+
+    /// Run the app-observed stream registration/capability-read sequence. Ring 5
+    /// accepts these commands; they make the session closer to the official app
+    /// before event fetches or live feature work.
+    pub async fn setup_app_stream(&self) -> Result<()> {
+        let hw = self.hardware_id().await.unwrap_or_default();
+        let is_ring5 = hw.rsplit('_').next() == Some("05");
+        if !is_ring5 {
+            tracing::debug!("skipping Ring 5 app-stream setup for hardware_id={hw:?}");
+            return Ok(());
+        }
+        self.request_tag(&protocol::req_stream_subscribe(0x02), 0x17)
+            .await?;
+        // Official app category masks observed by open_ring. These are
+        // registrations, not feature-mode changes.
+        for (category, flags) in [
+            (0x14, 0x1000),
+            (0x18, 0x1000),
+            (0x28, 0x0900),
+            (0x34, 0x0400),
+            (0x04, 0x1000),
+            (0x08, 0x1000),
+        ] {
+            self.request_tag(&protocol::req_event_subscribe(category, flags), 0x19)
+                .await?;
+        }
+        // Parameter reads answer with ext 0x21; the `2f 02 03 01` state poll with
+        // ext 0x04 (both confirmed in on-device captures).
+        for (req, ext) in [
+            (protocol::req_param_read(0x02), 0x21),
+            (protocol::req_param_read(0x04), 0x21),
+            (vec![0x2f, 0x02, 0x03, 0x01], 0x04),
+            (protocol::req_param_read(0x0b), 0x21),
+            (protocol::req_param_read(0x0d), 0x21),
+            (protocol::req_param_read(0x03), 0x21),
+            (protocol::req_param_read(0x0b), 0x21),
+            (protocol::req_param_read(0x10), 0x21),
+        ] {
+            self.request_ext(&req, ext).await?;
+        }
         Ok(())
     }
 
@@ -221,11 +426,15 @@ impl<T: Transport> OuraClient<T> {
     /// `on_event` for each. Loops until the ring reports no bytes left. Returns
     /// the count synced and the next cursor to persist for incremental sync.
     ///
-    /// `on_batch` is called with the advanced cursor after every fully-processed
-    /// batch, so callers can persist it incrementally — otherwise an interrupted
-    /// sync (timeout / BLE drop) inserts events but loses the cursor advance,
-    /// forcing the next sync to re-pull from the old cursor (and never reach new
-    /// events if a batch cap is hit first).
+    /// `on_batch` is called after every fully-processed batch with the advanced
+    /// cursor + the ring's remaining-bytes count, so callers can persist the
+    /// cursor incrementally (an interrupted sync then resumes instead of
+    /// re-pulling) and surface progress to the user.
+    ///
+    /// A batch that ends without the ring's summary packet is a hard error, not
+    /// a completed sync: the summary is the ring's explicit terminator, so its
+    /// absence means the link died mid-batch. Callers should reconnect and call
+    /// again — the persisted cursor makes that resume, not restart.
     pub async fn drain_events<F, G>(
         &self,
         cursor: u32,
@@ -233,43 +442,108 @@ impl<T: Transport> OuraClient<T> {
         mut on_batch: G,
     ) -> Result<SyncOutcome>
     where
-        F: FnMut(&RingEvent),
-        G: FnMut(u32),
+        F: FnMut(&RingEvent) -> bool,
+        G: FnMut(&BatchProgress) -> bool,
     {
         let mut start = cursor;
         let mut total = 0u32;
+        // Prefer Ring 5's Android-style extended event drain. It falls back to
+        // legacy GetEvent if the ring explicitly reports the extended API as
+        // unsupported.
+        let mut use_extended = true;
+        // A batch is over when the ring's summary packet arrives (0x11 legacy /
+        // ext 0x42) — the same terminator the official app waits for. An ext
+        // status packet (payload[0]=0x00, "unsupported") also ends the request.
+        let batch_terminal = |p: &Packet| {
+            p.tag == 0x11 || (p.tag == 0x2f && matches!(p.payload.first(), Some(0x42) | Some(0x00)))
+        };
         // Safety bound against a misbehaving ring that never reports drained.
         for _ in 0..100_000 {
-            let packets = self
-                .request(&protocol::req_get_event(start, 255, -1))
-                .await?;
-
-            let mut summary: Option<EventBatchSummary> = None;
-            let mut max_ts = start;
-            let mut batch_events = 0u32;
-            for p in &packets {
-                if p.tag == 0x11 {
-                    summary = EventBatchSummary::parse(p);
-                } else if p.tag >= protocol::HISTORY_EVENT_PREFIX {
-                    let ev = RingEvent::from_packet(p);
-                    max_ts = max_ts.max(ev.timestamp);
-                    batch_events += 1;
-                    total += 1;
-                    on_event(&ev);
+            let mut packets = self.request_tag(&protocol::req_data_flush(), 0x29).await?;
+            if use_extended {
+                let ext = self
+                    .request_batch(
+                        &protocol::req_ext_get_event((start as u64) * 100, EXT_BATCH_MAX_EVENTS, 0),
+                        batch_terminal,
+                    )
+                    .await?;
+                let unsupported = ext
+                    .iter()
+                    .any(|p| p.tag == 0x2f && p.payload.first().copied() == Some(0x00));
+                if unsupported {
+                    use_extended = false;
+                    packets.extend(
+                        self.request_batch(
+                            &protocol::req_get_event(start, 255, -1),
+                            batch_terminal,
+                        )
+                        .await?,
+                    );
+                } else {
+                    packets.extend(ext);
                 }
+            } else {
+                packets.extend(
+                    self.request_batch(&protocol::req_get_event(start, 255, -1), batch_terminal)
+                        .await?,
+                );
             }
 
-            let bytes_left = summary.map(|s| s.bytes_left).unwrap_or(0);
-            // Advance the cursor past the newest event seen.
-            let next = max_ts.saturating_add(1);
-            let progressed = batch_events > 0 && next > start;
-            if progressed {
-                start = next;
-                on_batch(start); // persist incrementally (this batch is fully drained)
+            let batch = decode_batch(&packets).map_err(|e| {
+                Error::Protocol(format!(
+                    "{e} — BLE link lost mid-batch? cursor {start} is checkpointed; \
+                     reconnect and sync again to resume"
+                ))
+            })?;
+            let batch = validate_batch(batch, start);
+            for ev in &batch.events {
+                if !on_event(ev) {
+                    return Err(Error::Protocol(
+                        "event callback failed; not acknowledging batch".into(),
+                    ));
+                }
+                total += 1;
             }
-            // Stop when drained, or when we can make no further progress.
-            if bytes_left == 0 || !progressed {
-                break;
+            if batch.rejected_events > 0 {
+                tracing::warn!(
+                    rejected_events = batch.rejected_events,
+                    cursor = start,
+                    "discarded history events with impossible cursor jumps"
+                );
+            }
+            let bytes_left = batch.bytes_left;
+            let progressed = batch.progressed(start);
+            if progressed {
+                start = batch.next_cursor;
+            }
+            // Report every batch (even an empty terminal one) so callers can
+            // persist the cursor and show progress.
+            if !on_batch(&BatchProgress {
+                next_cursor: start,
+                bytes_left,
+                events_synced: total,
+            }) {
+                return Err(Error::Protocol(
+                    "batch callback failed; not acknowledging batch".into(),
+                ));
+            }
+            // ExtGetEvent is cursor-driven and implicitly completes its own batch.
+            // Sending the legacy GetEvent ACK here makes Ring 5 stream another batch;
+            // those late frames race with the next flush and get discarded. Only the
+            // legacy API uses the explicit 0x10 acknowledgement.
+            if progressed && !use_extended {
+                let _ = self
+                    .request_tag(&protocol::req_get_event_ack(start), 0x11)
+                    .await;
+            }
+            if bytes_left == 0 {
+                break; // drained
+            }
+            if !progressed {
+                return Err(Error::Protocol(format!(
+                    "ring reports {bytes_left} bytes of events left but the batch \
+                     contained none — stopping instead of looping (cursor {start})"
+                )));
             }
         }
         Ok(SyncOutcome {
@@ -283,7 +557,9 @@ impl<T: Transport> OuraClient<T> {
     /// Read a feature's latest cached values (HR / SpO2). Reflects the last
     /// automatic measurement; meaningful only when the ring is worn.
     pub async fn feature_latest(&self, feature_id: u8) -> Result<LatestValues> {
-        let packets = self.request(&protocol::req_feature_latest(feature_id)).await?;
+        let packets = self
+            .request_ext(&protocol::req_feature_latest(feature_id), 0x25)
+            .await?;
         let p = packets
             .iter()
             .find(|p| p.ext_tag() == Some(0x25))
@@ -338,7 +614,9 @@ impl<T: Transport> OuraClient<T> {
 
     /// Read a feature's status (mode/state/subscription).
     pub async fn feature_status(&self, feature_id: u8) -> Result<FeatureStatus> {
-        let packets = self.request(&protocol::req_feature_status(feature_id)).await?;
+        let packets = self
+            .request(&protocol::req_feature_status(feature_id))
+            .await?;
         packets
             .iter()
             .find_map(FeatureStatus::parse)
@@ -356,7 +634,9 @@ impl<T: Transport> OuraClient<T> {
             .and_then(|p| p.payload.get(2).copied())
         {
             Some(0x00) => Ok(()),
-            Some(other) => Err(Error::Protocol(format!("set_feature_mode result {other:#04x}"))),
+            Some(other) => Err(Error::Protocol(format!(
+                "set_feature_mode result {other:#04x}"
+            ))),
             None => Err(Error::Protocol("no set_feature_mode response".into())),
         }
     }
@@ -388,14 +668,18 @@ impl<T: Transport> OuraClient<T> {
     /// Returns the response status byte (255 if absent).
     pub async fn rdata_stop(&self) -> Result<u8> {
         let packets = self.request(&protocol::req_rdata_stop()).await?;
-        Ok(Self::find(&packets, 0x03).and_then(|p| p.payload.get(1).copied()).unwrap_or(255))
+        Ok(Self::find(&packets, 0x03)
+            .and_then(|p| p.payload.get(1).copied())
+            .unwrap_or(255))
     }
 
     /// Clear the RData session/data from the ring's flash (part of teardown).
     /// Returns the response status byte (255 if absent).
     pub async fn rdata_clear(&self) -> Result<u8> {
         let packets = self.request(&protocol::req_rdata_clear()).await?;
-        Ok(Self::find(&packets, 0x03).and_then(|p| p.payload.get(1).copied()).unwrap_or(255))
+        Ok(Self::find(&packets, 0x03)
+            .and_then(|p| p.payload.get(1).copied())
+            .unwrap_or(255))
     }
 
     /// Configure/arm an RData session for one or more signal types. **This starts
@@ -408,7 +692,11 @@ impl<T: Transport> OuraClient<T> {
         current_unix: u32,
     ) -> Result<(u8, u8)> {
         let packets = self
-            .request(&protocol::req_rdata_configure(types, start_unix, current_unix))
+            .request(&protocol::req_rdata_configure(
+                types,
+                start_unix,
+                current_unix,
+            ))
             .await?;
         Self::find(&packets, 0x03)
             .and_then(|p| Some((*p.payload.first()?, *p.payload.get(1)?)))
@@ -590,10 +878,7 @@ mod tests {
     #[tokio::test]
     async fn reads_firmware_over_mock() {
         let mock = MockTransport::new();
-        mock.on(
-            "0803000000",
-            &["091202000003040301000105000cffeeddccbbaa"],
-        );
+        mock.on("0803000000", &["091202000003040301000105000cffeeddccbbaa"]);
         let client = OuraClient::new(mock).with_quiet(Duration::from_millis(20));
         let info = client.firmware().await.unwrap();
         assert_eq!(info.firmware_version, "3.4.3");
@@ -604,24 +889,41 @@ mod tests {
         let mock = MockTransport::new();
         mock.on("2f012b", &["2f102c0e2d6a0a08c99b4365f458e6e97382"]);
         // The encrypted authenticate request for this key+nonce, then success.
-        mock.on(
-            "2f112da38a8772d3acb6db5c2b516dd56987c8",
-            &["2f022e00"],
-        );
+        mock.on("2f112da38a8772d3acb6db5c2b516dd56987c8", &["2f022e00"]);
         let client = OuraClient::new(mock).with_quiet(Duration::from_millis(20));
         let key: [u8; 16] = hex::decode("4431967d8bacc2659743142b68391d9a")
             .unwrap()
             .try_into()
             .unwrap();
-        assert_eq!(client.authenticate(&key).await.unwrap(), AuthResult::Success);
+        assert_eq!(
+            client.authenticate(&key).await.unwrap(),
+            AuthResult::Success
+        );
+    }
+
+    #[tokio::test]
+    async fn extended_drain_does_not_send_legacy_ack() {
+        let mock = MockTransport::new();
+        mock.on("280100", &["290100"]);
+        mock.on(
+            "2f0c410000000000000000000010",
+            &["2f09430600aa430364bbcc2f0a42010000000000000000"],
+        );
+        let client = OuraClient::new(mock).with_quiet(Duration::from_millis(20));
+        let outcome = client.drain_events(0, |_| true, |_| true).await.unwrap();
+        assert_eq!(outcome.events_synced, 1);
+        assert_eq!(outcome.next_cursor, 2);
+        assert!(client
+            .transport()
+            .writes()
+            .iter()
+            .all(|request| request.first() != Some(&0x10)));
     }
 
     #[test]
     fn acm_frame_decodes_two_samples() {
         // 33 0c 32 01 | 0100 0200 0300 | 0400 0500 0600
-        let frame = [
-            0x33, 0x0c, 0x32, 0x01, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0,
-        ];
+        let frame = [0x33, 0x0c, 0x32, 0x01, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0];
         let s = parse_acm_frame(&frame);
         assert_eq!(s.len(), 2);
         assert_eq!((s[0].x, s[0].y, s[0].z), (1, 2, 3));

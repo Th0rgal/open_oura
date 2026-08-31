@@ -9,14 +9,8 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 
 use oura_link::ble::{self, BleTransport};
-use oura_store::storage::Store;
 use oura_link::OuraClient;
-
-#[cfg(feature = "torch")]
-mod activity_model;
-mod game;
-mod motion_server;
-mod viz;
+use oura_store::storage::Store;
 
 /// Read sleep/HR/activity signals straight from an Oura ring (Ring 3/4/5).
 #[derive(Parser, Debug)]
@@ -98,24 +92,6 @@ enum Command {
         #[arg(long, default_value_t = 15)]
         seconds: u64,
     },
-    /// Real-time 3D motion visualizer (web UI with start/stop + sensitivity).
-    Viz {
-        /// Local HTTP port to serve the visualizer on.
-        #[arg(long, default_value_t = 8088)]
-        port: u16,
-        /// Minutes the ring streams per "Start" (it auto-stops after this).
-        #[arg(long, default_value_t = 5)]
-        minutes: u16,
-    },
-    /// Tilt-controlled asteroid game (web UI) — steer a ship by tilting the ring.
-    Game {
-        /// Local HTTP port to serve the game on.
-        #[arg(long, default_value_t = 8089)]
-        port: u16,
-        /// Minutes the ring streams per "Start" (it auto-stops after this).
-        #[arg(long, default_value_t = 10)]
-        minutes: u16,
-    },
     /// Ask the ring to run sleep analysis (so it emits hypnogram/summary events).
     SleepAnalyze {
         #[arg(long)]
@@ -129,20 +105,6 @@ enum Command {
         /// Enable SpO2 measurement (mode automatic).
         #[arg(long)]
         enable_spo2: bool,
-    },
-    /// Detect & label activity sessions from stored events using Oura's OWN
-    /// `automatic_activity_detection` model (runs via tools/run_activity_model.py;
-    /// needs the Python venv with torch). Not a heuristic.
-    Sessions {
-        /// Timezone offset (hours from UTC) for displayed times.
-        #[arg(long, default_value_t = 0)]
-        tz_offset: i64,
-        /// is_workout probability at/above which a segment is marked a workout.
-        #[arg(long, default_value_t = 0.5)]
-        threshold: f64,
-        /// Emit machine-readable JSON instead of a table.
-        #[arg(long)]
-        json: bool,
     },
     /// Subscribe a feature capability (real_steps | atlas | ambient | raw_data |
     /// research_data) via SetFeatureSubscription, to make the ring emit its events.
@@ -238,6 +200,21 @@ fn save_key(path: &Path, key: &[u8; 16]) -> Result<()> {
     Ok(())
 }
 
+/// Open the readings store for best-effort live persistence, warning (rather than
+/// failing the command) if it can't be opened — but not pretending it succeeded.
+fn open_store_or_warn(db: &Path) -> Option<Store> {
+    match Store::open(db) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            eprintln!(
+                "warning: live readings won't be saved — can't open {}: {e}",
+                db.display()
+            );
+            None
+        }
+    }
+}
+
 async fn connect(cli: &Cli) -> Result<OuraClient<BleTransport>> {
     let transport = BleTransport::connect(
         &cli.name,
@@ -283,16 +260,6 @@ async fn main() -> Result<()> {
         Command::LiveHr { seconds, raw } => cmd_live_hr(&cli, &key, *seconds, *raw).await,
         Command::Accel { seconds } => cmd_accel(&cli, &key, *seconds).await,
         Command::SleepAnalyze { force } => cmd_sleep_analyze(&cli, &key, *force).await,
-        Command::Viz { port, minutes } => {
-            let client = connect(&cli).await?;
-            maybe_auth(&client, &key).await?;
-            viz::run(client, *port, *minutes).await
-        }
-        Command::Game { port, minutes } => {
-            let client = connect(&cli).await?;
-            maybe_auth(&client, &key).await?;
-            game::run(client, *port, *minutes).await
-        }
         Command::Rdata { action } => cmd_rdata(&cli, &key, action).await,
         Command::Events => cmd_events(&cli).await,
         Command::Redecode => {
@@ -305,9 +272,6 @@ async fn main() -> Result<()> {
             enable_hr,
             enable_spo2,
         } => cmd_features(&cli, &key, *enable_hr, *enable_spo2).await,
-        Command::Sessions { tz_offset, threshold, json } => {
-            cmd_sessions(&cli, *tz_offset, *threshold, *json)
-        }
         Command::Subscribe { feature, mode } => cmd_subscribe(&cli, &key, feature, mode).await,
         Command::FeatureMode { feature, mode } => cmd_feature_mode(&cli, &key, feature, mode).await,
         Command::FeatureStatus => cmd_feature_status(&cli, &key).await,
@@ -315,12 +279,7 @@ async fn main() -> Result<()> {
 }
 
 /// Subscribe a feature capability via SetFeatureSubscription (needs auth).
-async fn cmd_subscribe(
-    cli: &Cli,
-    key: &Option<[u8; 16]>,
-    feature: &str,
-    mode: &str,
-) -> Result<()> {
+async fn cmd_subscribe(cli: &Cli, key: &Option<[u8; 16]>, feature: &str, mode: &str) -> Result<()> {
     use oura_protocol::protocol::{capability, subscription_mode};
     let cap = match feature {
         "real_steps" => capability::REAL_STEPS,
@@ -366,7 +325,12 @@ async fn cmd_subscribe(
 /// Set a feature's operating mode (SetFeatureMode). The consumer-feature enable
 /// path — e.g. `feature-mode real_steps` turns on the on-ring step/gait DSP whose
 /// `real_steps_features` events (0x7e/0x7f) feed the steps_motion_decoder.
-async fn cmd_feature_mode(cli: &Cli, key: &Option<[u8; 16]>, feature: &str, mode: &str) -> Result<()> {
+async fn cmd_feature_mode(
+    cli: &Cli,
+    key: &Option<[u8; 16]>,
+    feature: &str,
+    mode: &str,
+) -> Result<()> {
     use oura_protocol::protocol::feature_mode;
     let id: u8 = match feature {
         "real_steps" => 0x0b,
@@ -391,7 +355,9 @@ async fn cmd_feature_mode(cli: &Cli, key: &Option<[u8; 16]>, feature: &str, mode
     };
     let client = connect(cli).await?;
     if !maybe_auth(&client, key).await? {
-        return Err(anyhow!("set-feature-mode requires --key-file (authentication)"));
+        return Err(anyhow!(
+            "set-feature-mode requires --key-file (authentication)"
+        ));
     }
     match client.set_feature_mode(id, m).await {
         Ok(()) => {
@@ -407,7 +373,9 @@ async fn cmd_feature_mode(cli: &Cli, key: &Option<[u8; 16]>, feature: &str, mode
 async fn cmd_feature_status(cli: &Cli, key: &Option<[u8; 16]>) -> Result<()> {
     let client = connect(cli).await?;
     if !maybe_auth(&client, key).await? {
-        return Err(anyhow!("feature-status requires --key-file (authentication)"));
+        return Err(anyhow!(
+            "feature-status requires --key-file (authentication)"
+        ));
     }
     let mode_name = |m: u8| match m {
         0 => "OFF",
@@ -417,96 +385,31 @@ async fn cmd_feature_status(cli: &Cli, key: &Option<[u8; 16]>) -> Result<()> {
         _ => "?",
     };
     let feats = [
-        (0x02u8, "daytime_hr"), (0x03, "exercise_hr"), (0x04, "spo2"),
-        (0x08, "resting_hr"), (0x0b, "real_steps"), (0x0c, "experimental"),
+        (0x02u8, "daytime_hr"),
+        (0x03, "exercise_hr"),
+        (0x04, "spo2"),
+        (0x08, "resting_hr"),
+        (0x0b, "real_steps"),
+        (0x0c, "experimental"),
         (0x0d, "cva_ppg"),
     ];
-    println!("  {:<14} {:>3}  {:<14} status state sub", "feature", "id", "mode");
+    println!(
+        "  {:<14} {:>3}  {:<14} status state sub",
+        "feature", "id", "mode"
+    );
     for (id, name) in feats {
         match client.feature_status(id).await {
             Ok(s) => println!(
                 "  {name:<14} {id:>3}  {:<14} {:>6} {:>5} {:>3}",
-                mode_name(s.mode), s.status, s.state, s.subscription
+                mode_name(s.mode),
+                s.status,
+                s.state,
+                s.subscription
             ),
             Err(e) => println!("  {name:<14} {id:>3}  <read failed: {e}>"),
         }
     }
     Ok(())
-}
-
-/// Label activity sessions by running Oura's own `automatic_activity_detection`
-/// TorchScript model over the stored events. Built with `--features torch` it
-/// runs the model in-process via LibTorch; otherwise it shells out to the
-/// equivalent `tools/run_activity_model.py`. Either way the model — not a
-/// heuristic — produces the labels.
-fn cmd_sessions(cli: &Cli, tz_offset: i64, threshold: f64, json: bool) -> Result<()> {
-    // Locate the repo root by a stable marker present for both backends. Try the
-    // current dir first, then the compiled-in manifest dir, so the binary keeps
-    // working when invoked from elsewhere in the checkout.
-    let marker = Path::new("notes/models/automatic_activity_detection_3_1_11.pt");
-    let find_root = |start: &Path| -> Option<PathBuf> {
-        start.ancestors().find(|d| d.join(marker).is_file()).map(Path::to_path_buf)
-    };
-    let root = std::env::current_dir()
-        .ok()
-        .and_then(|d| find_root(&d))
-        .or_else(|| find_root(Path::new(env!("CARGO_MANIFEST_DIR"))))
-        .ok_or_else(|| {
-            anyhow!(
-                "could not locate the model under notes/models — run `oura sessions` \
-                 from inside the open_oura checkout"
-            )
-        })?;
-
-    // Absolute DB path (the Python child runs with cwd = repo root).
-    let db = cli
-        .db
-        .canonicalize()
-        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(&cli.db));
-
-    // Fail clearly on a missing DB instead of letting the LibTorch path's
-    // Store::open create an empty one (matches the Python runner's resolve_db).
-    if !db.exists() {
-        return Err(anyhow!(
-            "database not found: {} (run `oura sync` first)",
-            db.display()
-        ));
-    }
-
-    #[cfg(feature = "torch")]
-    {
-        return activity_model::run(&db, &root, tz_offset, threshold, json);
-    }
-
-    #[cfg(not(feature = "torch"))]
-    {
-        use std::process::Command as Proc;
-        let script_rel = Path::new("tools/run_activity_model.py");
-        // Prefer the repo's venv python (has torch); fall back to python3 on PATH.
-        let venv_py = root.join(".venv/bin/python");
-        let python = if venv_py.is_file() { venv_py } else { PathBuf::from("python3") };
-        let mut cmd = Proc::new(&python);
-        cmd.current_dir(&root)
-            .arg(root.join(script_rel))
-            .arg(&db)
-            .arg("--tz")
-            .arg(tz_offset.to_string())
-            .arg("--threshold")
-            .arg(threshold.to_string());
-        if json {
-            cmd.arg("--json");
-        }
-        let status = cmd.status().with_context(|| {
-            format!(
-                "running the activity model via {} (is the Python venv with torch set up?)",
-                python.display()
-            )
-        })?;
-        if !status.success() {
-            return Err(anyhow!("activity model exited with {status}"));
-        }
-        Ok(())
-    }
 }
 
 async fn cmd_features(
@@ -574,10 +477,7 @@ async fn cmd_pair(cli: &Cli) -> Result<()> {
 
     // Reuse an existing key file if present; otherwise mint a fresh key.
     let (key, reused) = match &cli.key_file {
-        Some(p) if p.exists() => (
-            load_key(&cli.key_file)?.expect("key file exists"),
-            true,
-        ),
+        Some(p) if p.exists() => (load_key(&cli.key_file)?.expect("key file exists"), true),
         _ => (generate_key()?, false),
     };
     let out = cli
@@ -606,7 +506,10 @@ async fn cmd_pair(cli: &Cli) -> Result<()> {
         Err(e) => println!("Battery: <{e}>"),
     }
 
-    println!("\nPaired. Use it with:  oura --key-file {} info", out.display());
+    println!(
+        "\nPaired. Use it with:  oura --key-file {} info",
+        out.display()
+    );
     let _ = client.transport().disconnect().await;
     Ok(())
 }
@@ -698,9 +601,13 @@ async fn cmd_sync(cli: &Cli, key: &Option<[u8; 16]>, sync_time: bool) -> Result<
 
     let client = connect(cli).await?;
     client.authenticate(key).await.context("authenticating")?;
+    client
+        .setup_app_stream()
+        .await
+        .context("running app-style stream setup")?;
 
     if sync_time {
-        client.sync_time().await.context("syncing time")?;
+        client.sync_time_app().await.context("syncing time")?;
     }
 
     let serial = client.serial().await.unwrap_or_else(|_| "unknown".into());
@@ -725,28 +632,41 @@ async fn cmd_sync(cli: &Cli, key: &Option<[u8; 16]>, sync_time: bool) -> Result<
             cursor,
             |ev| {
                 if db_err.borrow().is_some() {
-                    return;
+                    return false;
                 }
                 match store.insert_event(&serial, ev) {
                     Ok(true) => inserted += 1,
                     Ok(false) => {}
-                    Err(e) => *db_err.borrow_mut() = Some(e),
+                    Err(e) => {
+                        *db_err.borrow_mut() = Some(e);
+                        return false;
+                    }
                 }
+                true
             },
             // Persist the cursor after each fully-drained batch (so an interrupted
             // sync still makes progress) — but not once a DB write has failed. A
             // failed cursor write is itself recorded so it can't be silently lost.
-            |c| {
+            |p| {
                 if db_err.borrow().is_some() {
-                    return;
+                    return false;
                 }
-                match store.set_cursor(&serial, c) {
+                match store.set_cursor(&serial, p.next_cursor) {
                     Ok(()) => cursor_advanced.set(true),
-                    Err(e) => *db_err.borrow_mut() = Some(e),
+                    Err(e) => {
+                        *db_err.borrow_mut() = Some(e);
+                        return false;
+                    }
                 }
+                println!(
+                    "  … {} events so far, ~{:.1} KB left on ring",
+                    p.events_synced,
+                    p.bytes_left as f64 / 1024.0
+                );
+                true
             },
         )
-        .await?;
+        .await;
     if let Some(e) = db_err.into_inner() {
         let ctx = if cursor_advanced.get() {
             "storing event during sync (cursor advanced through earlier batches)"
@@ -755,6 +675,7 @@ async fn cmd_sync(cli: &Cli, key: &Option<[u8; 16]>, sync_time: bool) -> Result<
         };
         return Err(e).context(ctx);
     }
+    let outcome = outcome?;
 
     store.set_cursor(&serial, outcome.next_cursor)?;
     println!(
@@ -770,7 +691,7 @@ async fn cmd_latest(cli: &Cli, key: &Option<[u8; 16]>) -> Result<()> {
     let client = connect(cli).await?;
     maybe_auth(&client, key).await?;
     let serial = client.serial().await.unwrap_or_else(|_| "unknown".into());
-    let store = Store::open(&cli.db).ok();
+    let store = open_store_or_warn(&cli.db);
 
     use oura_protocol::protocol::feature;
     for (label, id) in [
@@ -812,7 +733,7 @@ async fn cmd_live_hr(cli: &Cli, key: &Option<[u8; 16]>, seconds: u64, raw: bool)
     let client = connect(cli).await?;
     maybe_auth(&client, key).await?;
     let serial = client.serial().await.unwrap_or_else(|_| "unknown".into());
-    let store = Store::open(&cli.db).ok();
+    let store = open_store_or_warn(&cli.db);
 
     println!("Streaming live heart rate for {seconds}s (Ctrl-C to stop early)...");
     let mut count = 0u32;
@@ -871,7 +792,11 @@ async fn cmd_accel(cli: &Cli, key: &Option<[u8; 16]>, seconds: u64) -> Result<()
         let moved = (max - min) > 2000.0;
         println!(
             "{count} samples; |a| range {min:.0}..{max:.0} — {}",
-            if moved { "motion detected ✋" } else { "mostly still" }
+            if moved {
+                "motion detected ✋"
+            } else {
+                "mostly still"
+            }
         );
     }
     let _ = client.transport().disconnect().await;
@@ -927,13 +852,18 @@ async fn rdata_probe(client: &OuraClient<BleTransport>, secs: u64) -> Result<()>
     client.sync_time().await?;
     let (sub0, st0) = client.rdata_state().await?;
     let batt0 = client.battery().await?;
-    println!("After sync_time: RData state subtag={sub0} status={st0}; battery {}%", batt0.percent);
+    println!(
+        "After sync_time: RData state subtag={sub0} status={st0}; battery {}%",
+        batt0.percent
+    );
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as u32)
         .unwrap_or(0);
 
-    let (csub, cst) = client.rdata_configure(&[DataType::Acm2g50Hz], now, now).await?;
+    let (csub, cst) = client
+        .rdata_configure(&[DataType::Acm2g50Hz], now, now)
+        .await?;
     println!("Armed ACM 2g @ 50 Hz: configure subtag={csub} status={cst}");
 
     // From here on, tear down NO MATTER WHAT.
@@ -990,12 +920,21 @@ async fn rdata_probe(client: &OuraClient<BleTransport>, secs: u64) -> Result<()>
     }
     let rate = total_bytes as f64 / secs as f64;
     let batt_delta = batt0.percent as i16 - batt1 as i16;
-    println!("\n--- RData rate probe (ACM 2g @ 50 Hz, {secs}s / {:.1} min) ---", secs as f64 / 60.0);
+    println!(
+        "\n--- RData rate probe (ACM 2g @ 50 Hz, {secs}s / {:.1} min) ---",
+        secs as f64 / 60.0
+    );
     println!("pages drained  : {pages}");
     println!("max page size  : {page_len} bytes (payload after subtag+status header)");
     println!("total bytes    : {total_bytes}");
-    println!("byte rate      : {rate:.0} B/s  (~{:.1} KB/min)", rate * 60.0 / 1024.0);
-    println!("battery        : {}% -> {batt1}% (Δ {batt_delta} pts)", batt0.percent);
+    println!(
+        "byte rate      : {rate:.0} B/s  (~{:.1} KB/min)",
+        rate * 60.0 / 1024.0
+    );
+    println!(
+        "battery        : {}% -> {batt1}% (Δ {batt_delta} pts)",
+        batt0.percent
+    );
     if batt_delta > 0 {
         let pct_per_hr = batt_delta as f64 * 3600.0 / secs as f64;
         println!("battery rate   : ~{pct_per_hr:.1} %/hr while sampling");
@@ -1034,14 +973,21 @@ async fn rdata_recipe(client: &OuraClient<BleTransport>) -> Result<()> {
 
     client.sync_time().await?;
     let clear = client.rdata_clear().await?;
-    println!("RDataClear  -> status {clear} ({})", rdata_status_name(clear));
+    println!(
+        "RDataClear  -> status {clear} ({})",
+        rdata_status_name(clear)
+    );
     let (ssub, sbyte) = client.rdata_state().await?;
-    println!("RDataState  -> subtag {ssub}, state byte {sbyte} (0 IDLE,1 SCHED,2 REC,3 STOP,4 BUSY)");
+    println!(
+        "RDataState  -> subtag {ssub}, state byte {sbyte} (0 IDLE,1 SCHED,2 REC,3 STOP,4 BUSY)"
+    );
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as u32)
         .unwrap_or(0);
-    let (csub, cst) = client.rdata_configure(&[DataType::Acm2g50Hz], 0, now).await?;
+    let (csub, cst) = client
+        .rdata_configure(&[DataType::Acm2g50Hz], 0, now)
+        .await?;
     println!(
         "RDataConfigure(start=0) -> subtag {csub}, status {cst} ({})",
         rdata_status_name(cst)
@@ -1049,7 +995,10 @@ async fn rdata_recipe(client: &OuraClient<BleTransport>) -> Result<()> {
     if cst == 0 {
         println!(">>> START ACCEPTED — capability is enabled after all!");
     } else {
-        println!(">>> still {} — capability gate confirmed.", rdata_status_name(cst));
+        println!(
+            ">>> still {} — capability gate confirmed.",
+            rdata_status_name(cst)
+        );
     }
     // Teardown regardless.
     let _ = client.rdata_stop().await;
@@ -1076,23 +1025,40 @@ async fn rdata_unlock(client: &OuraClient<BleTransport>) -> Result<()> {
     );
 
     // Try both enable paths (best-effort; report outcomes).
-    match client.set_feature_subscription(capability::RAW_DATA_SAMPLER, subscription_mode::FEATURE_DATA).await {
+    match client
+        .set_feature_subscription(
+            capability::RAW_DATA_SAMPLER,
+            subscription_mode::FEATURE_DATA,
+        )
+        .await
+    {
         Ok(r) => println!("subscribe RAW_DATA_SAMPLER(data) -> result {r}"),
         Err(e) => println!("subscribe RAW_DATA_SAMPLER failed: {e}"),
     }
-    match client.set_feature_mode(capability::RAW_DATA_SAMPLER, feature_mode::REQUESTED).await {
+    match client
+        .set_feature_mode(capability::RAW_DATA_SAMPLER, feature_mode::REQUESTED)
+        .await
+    {
         Ok(()) => println!("set_feature_mode RAW_DATA_SAMPLER(REQUESTED) -> SUCCESS"),
         Err(e) => println!("set_feature_mode RAW_DATA_SAMPLER -> {e}"),
     }
 
     let clear = client.rdata_clear().await?;
-    println!("RDataClear -> status {clear} ({})", rdata_status_name(clear));
+    println!(
+        "RDataClear -> status {clear} ({})",
+        rdata_status_name(clear)
+    );
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as u32)
         .unwrap_or(0);
-    let (_, cst) = client.rdata_configure(&[DataType::Acm2g50Hz], 0, now).await?;
-    println!("RDataConfigure(start=0) -> status {cst} ({})", rdata_status_name(cst));
+    let (_, cst) = client
+        .rdata_configure(&[DataType::Acm2g50Hz], 0, now)
+        .await?;
+    println!(
+        "RDataConfigure(start=0) -> status {cst} ({})",
+        rdata_status_name(cst)
+    );
 
     let mut captured = (0u32, 0usize);
     if cst == 0 {
@@ -1108,7 +1074,10 @@ async fn rdata_unlock(client: &OuraClient<BleTransport>) -> Result<()> {
         }
         println!(">>> drained {} pages, {} bytes", captured.0, captured.1);
     } else {
-        println!(">>> still {} — enabling did not unlock CONFIGURE.", rdata_status_name(cst));
+        println!(
+            ">>> still {} — enabling did not unlock CONFIGURE.",
+            rdata_status_name(cst)
+        );
     }
 
     // Teardown.
@@ -1135,11 +1104,21 @@ async fn rdata_sweep(client: &OuraClient<BleTransport>) -> Result<()> {
 
     // (label, types, start, current)
     let variants: &[(&str, &[DataType], u32, u32)] = &[
-        ("ACM, start=now",          &[DataType::Acm2g50Hz], now, now),
-        ("ACM, start=0",            &[DataType::Acm2g50Hz], 0, now),
-        ("Metadata+ACM, start=now", &[DataType::Metadata, DataType::Acm2g50Hz], now, now),
-        ("Metadata+ACM, start=0",   &[DataType::Metadata, DataType::Acm2g50Hz], 0, now),
-        ("ACM 8g, start=now",       &[DataType::Acm8g50Hz], now, now),
+        ("ACM, start=now", &[DataType::Acm2g50Hz], now, now),
+        ("ACM, start=0", &[DataType::Acm2g50Hz], 0, now),
+        (
+            "Metadata+ACM, start=now",
+            &[DataType::Metadata, DataType::Acm2g50Hz],
+            now,
+            now,
+        ),
+        (
+            "Metadata+ACM, start=0",
+            &[DataType::Metadata, DataType::Acm2g50Hz],
+            0,
+            now,
+        ),
+        ("ACM 8g, start=now", &[DataType::Acm8g50Hz], now, now),
     ];
 
     let (_, idle) = client.rdata_state().await?;
@@ -1151,7 +1130,11 @@ async fn rdata_sweep(client: &OuraClient<BleTransport>) -> Result<()> {
         let engaged = sst != idle;
         println!(
             "{label:<26} configure(sub={csub},st={cst}) -> state(sub={ssub},st={sst}) {}",
-            if engaged { "<<< STATE CHANGED" } else { "(still idle)" }
+            if engaged {
+                "<<< STATE CHANGED"
+            } else {
+                "(still idle)"
+            }
         );
         // tear down before the next attempt
         let _ = client.rdata_stop().await;

@@ -9,8 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use oura_protocol::device::{Battery, DeviceInfo};
 use crate::error::Result;
+use oura_protocol::device::{Battery, DeviceInfo};
 use oura_protocol::events::RingEvent;
 
 const SCHEMA: &str = r#"
@@ -77,6 +77,15 @@ impl Store {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
                 .map_err(|e| crate::error::Error::Storage(e.to_string()))?;
         }
+        // The sync writer and the model/summary readers share this file, so every
+        // connection waits out short lock contention instead of failing, and the
+        // writable store runs in WAL mode so readers get a consistent snapshot
+        // while the per-event drain inserts. The iOS app sometimes opens the
+        // read-only seed DB bundled with the app: the WAL switch is a write, so
+        // its failure there is tolerated (a pure reader doesn't need it).
+        conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+        let _ = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get::<_, String>(0));
+        let _ = conn.execute_batch("PRAGMA synchronous=NORMAL;");
         conn.execute_batch(SCHEMA)?;
         Ok(Self { conn })
     }
@@ -114,6 +123,39 @@ impl Store {
             ],
         )?;
         Ok(())
+    }
+
+    /// Device identity + last-sync for display: the most-recently-updated device
+    /// row joined with its sync state.
+    /// Returns `(serial, hardware_id, firmware, api_version, mac, updated_unix, last_sync_unix, next_cursor)`.
+    #[allow(clippy::type_complexity)]
+    pub fn device_info(
+        &self,
+    ) -> Result<Option<(String, String, String, String, String, i64, i64, i64)>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT d.serial, COALESCE(d.hardware_id,''), COALESCE(d.firmware,''),
+                        COALESCE(d.api_version,''), COALESCE(d.mac,''), COALESCE(d.updated_unix,0),
+                        COALESCE(s.last_sync_unix,0), COALESCE(s.next_cursor,0)
+                 FROM device d LEFT JOIN sync_state s ON s.serial = d.serial
+                 ORDER BY d.updated_unix DESC LIMIT 1",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
+                        r.get::<_, i64>(5)?,
+                        r.get::<_, i64>(6)?,
+                        r.get::<_, i64>(7)?,
+                    ))
+                },
+            )
+            .optional()?;
+        Ok(row)
     }
 
     /// The persisted incremental-sync cursor (deciseconds), or 0 if none.
@@ -214,7 +256,7 @@ impl Store {
     pub fn decoded_events(&self) -> Result<Vec<(i64, u8, String, i64)>> {
         let mut stmt = self.conn.prepare(
             "SELECT ring_timestamp, tag, decoded_json, captured_unix FROM events \
-             WHERE decoded_json IS NOT NULL ORDER BY ring_timestamp",
+             WHERE decoded_json IS NOT NULL ORDER BY captured_unix, id",
         )?;
         let rows = stmt
             .query_map([], |r| {
@@ -256,6 +298,57 @@ impl Store {
 mod tests {
     use super::*;
 
+    fn sample_event() -> RingEvent {
+        RingEvent {
+            tag: 0x43,
+            name: "debug_event",
+            timestamp: 42,
+            body: vec![1, 2, 3],
+            decoded: None,
+        }
+    }
+
+    #[test]
+    fn open_enables_wal_on_writable_file() {
+        let dir = std::env::temp_dir().join(format!("oura-store-wal-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("wal.db");
+        let _ = std::fs::remove_file(&path);
+        let store = Store::open(&path).unwrap();
+        let mode: String = store
+            .conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn reader_survives_open_writer_transaction() {
+        let dir = std::env::temp_dir().join(format!("oura-store-rw-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("shared.db");
+        let _ = std::fs::remove_file(&path);
+        let writer = Store::open(&path).unwrap();
+        writer.insert_event("S1", &sample_event()).unwrap();
+        // Hold an uncommitted write open — under WAL a reader still gets a
+        // consistent snapshot instead of SQLITE_BUSY / a partial read.
+        writer.conn.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        writer
+            .conn
+            .execute(
+                "INSERT INTO readings (serial, kind, value, unit, captured_unix)
+                 VALUES ('S1', 'battery_percent', 50.0, '%', 0)",
+                [],
+            )
+            .unwrap();
+        let reader = Store::open(&path).unwrap();
+        let counts = reader.event_counts("S1").unwrap();
+        assert_eq!(counts, vec![("debug_event".to_string(), 1)]);
+        writer.conn.execute_batch("COMMIT;").unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn events_dedup_and_cursor_roundtrip() {
         let store = Store::open_in_memory().unwrap();
@@ -274,5 +367,27 @@ mod tests {
 
         let counts = store.event_counts("S1").unwrap();
         assert_eq!(counts, vec![("debug_event".to_string(), 1)]);
+    }
+
+    #[test]
+    fn decoded_events_preserve_capture_order_across_clock_reset() {
+        let store = Store::open_in_memory().unwrap();
+        for timestamp in [5_000_000, 10] {
+            let event = RingEvent {
+                tag: 0x42,
+                name: "time_sync",
+                timestamp,
+                body: vec![0, 0, 0, 0],
+                decoded: Some(serde_json::json!({"unix_time": 1_700_000_000})),
+            };
+            assert!(store.insert_event("S1", &event).unwrap());
+        }
+        let timestamps: Vec<i64> = store
+            .decoded_events()
+            .unwrap()
+            .into_iter()
+            .map(|row| row.0)
+            .collect();
+        assert_eq!(timestamps, [5_000_000, 10]);
     }
 }
