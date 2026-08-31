@@ -56,6 +56,14 @@ enum Command {
     Pair,
     /// Connect and print device info (firmware, serial, battery, capabilities).
     Info,
+    /// DESTRUCTIVE: wipe the ring back to factory state (tag `0x1a`). Erases the
+    /// installed auth key, every BLE bond and the on-ring event buffer. Sync
+    /// first. Requires `--yes`.
+    FactoryReset {
+        /// Required. Without it the command refuses to run.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Drain history events into the database (incremental).
     Sync {
         /// Also align the ring clock to host UTC before syncing.
@@ -269,6 +277,7 @@ async fn main() -> Result<()> {
         Command::Scan => cmd_scan(&cli).await,
         Command::Pair => cmd_pair(&cli).await,
         Command::Info => cmd_info(&cli, &key).await,
+        Command::FactoryReset { yes } => cmd_factory_reset(&cli, &key, *yes).await,
         Command::Sync { sync_time } => cmd_sync(&cli, &key, *sync_time).await,
         Command::Latest => cmd_latest(&cli, &key).await,
         Command::LiveHr { seconds, raw } => cmd_live_hr(&cli, &key, *seconds, *raw).await,
@@ -637,6 +646,48 @@ async fn cmd_info(cli: &Cli, key: &Option<[u8; 16]>) -> Result<()> {
     }
 
     let _ = client.transport().disconnect().await;
+    Ok(())
+}
+
+/// Wipe the ring to factory state (`0x1a`). See `docs/factory-reset.md`.
+///
+/// The request bytes are built here rather than in `oura-protocol` on purpose:
+/// that crate is meant to be linkable into embedded firmware, which should have
+/// no way to emit a destructive command.
+async fn cmd_factory_reset(cli: &Cli, key: &Option<[u8; 16]>, yes: bool) -> Result<()> {
+    if !yes {
+        return Err(anyhow!(
+            "refusing to factory-reset without --yes (this erases the auth key, \
+             every BLE bond and the on-ring event buffer)"
+        ));
+    }
+    let client = connect(cli).await?;
+    let serial = client.serial().await.unwrap_or_else(|_| "unknown".into());
+    if let Some(k) = key {
+        client.authenticate(k).await.context("authenticating")?;
+    }
+    println!("Factory-resetting ring {serial} ...");
+    let frames = oura_link::transport::transact(
+        client.transport(),
+        &[0x1a, 0x00],
+        Duration::from_secs(3),
+    )
+    .await
+    .context("sending factory reset")?;
+    for f in &frames {
+        println!("  <- {}", hex::encode(f));
+    }
+    if frames.is_empty() {
+        // Expected in practice: the ring resets and drops the link before it
+        // answers. `tools/oura_protocol.py` documents a tag 0x1B status reply,
+        // but none was observed on a Ring 4.
+        println!("  (no response; the ring may have reset and dropped the link)");
+    }
+    let _ = client.transport().disconnect().await;
+    println!(
+        "Done. Forget the ring in the host's Bluetooth settings, then re-pair with \
+         `oura --key-file <file> --name \"\" pair` and reset the sync cursor to 0."
+    );
     Ok(())
 }
 
