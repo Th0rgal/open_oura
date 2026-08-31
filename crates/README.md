@@ -54,6 +54,9 @@ oura --key-file key.hex info
 # Pair with a factory-reset ring: install + save a new auth key
 oura --name "Oura Ring 5" --key-file key.hex pair
 
+# Wipe the ring (DESTRUCTIVE; requires --yes). See docs/factory-reset.md.
+oura --key-file key.hex factory-reset --yes
+
 # Show / enable measurement features (HR, SpO2 are off after a key-only pairing)
 oura --key-file key.hex features --enable-hr --enable-spo2
 
@@ -127,6 +130,15 @@ land. Each decoder has a unit test.
 | `time_sync` / `state_change` / `wear_event` / `alert` / debug | u32 / byte+text | as labelled |
 | `rtc_beacon` (`0x85`) | `u32 unix_s`, reserved bytes, trailer | precise 1-second wall-clock anchor |
 | `cva_raw_ppg_data` (`0x81`) | `0x80 + i24 absolute`, otherwise signed i8 deltas | raw CVA PPG samples (stateless per event) |
+| `ring_start` (`0x41`) | `u32` reason, `u8` unknown, then three `a.b.c` version triplets | boot record: firmware / bootloader / API (verified against the same ring's `DeviceInfo`) |
+| `user_information` (`0x5c`) | four `u8`: age, weight kg, sex, height cm | anthropometric profile — field meanings **inferred**, emits `_status: inferred` |
+
+> `ring_start` and `user_information` were **not** recovered from `libringeventparser.so`.
+> `ring_start` was resolved by correlating a captured body against the `DeviceInfo`
+> response of the same ring; `user_information` from the inputs ecore's own metabolic
+> functions take (`vo2max_jackson(age, female, weight_kg)`, `bmr_schofield(age, sex, weight_kg)` —
+> see `oura-analysis::ported::metabolic`) plus the sleep-score limits being initialised
+> "from age byte". Both carry that provenance in their function docs.
 
 **Ring-5 HR/SpO2 sources (empirical):** daytime HR arrives as `green_ibi_quality`
 (`0x80`); overnight HR + amplitude as `ibi_and_amplitude` (`0x60`); SpO2 as the raw

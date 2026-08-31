@@ -59,9 +59,10 @@ cargo build --release
 ```
 
 See [`crates/README.md`](crates/README.md) for all commands (`scan`, `pair`,
-`info`, `sync`, `latest`, `live-hr`, `accel`, `features`, `rdata`, `events`,
-`redecode`, `sleep-analyze`, `subscribe`, `feature-mode`, and `feature-status`)
-and the auth-key details.
+`factory-reset`, `info`, `sync`, `latest`, `live-hr`, `accel`, `features`,
+`rdata`, `events`, `redecode`, `sleep-analyze`, `subscribe`, `feature-mode`,
+and `feature-status`) and the auth-key details. Destructive commands (`factory-reset`)
+require `--yes`.
 
 ## Research bench (Python)
 
@@ -102,6 +103,10 @@ State-changing and destructive commands are hidden behind `--include-state` and
   layering and where to add things.
 - [`docs/algorithms/README.md`](docs/algorithms/README.md): the on-device ecore
   metric algorithms (scores, sleep, baselines) and their porting status.
+- [`docs/factory-reset.md`](docs/factory-reset.md): the two verified ways to reset a
+  ring — the `1a00` command and a button-free hardware procedure on the Gen3/Ring 4
+  dock — plus what a reset erases and how to re-pair without handing the ring back
+  to the Oura app.
 - [`docs/native-decoder.md`](docs/native-decoder.md): porting event-body decoders
   from the native `libringeventparser.so` (how the byte layouts were recovered with
   Ghidra).
