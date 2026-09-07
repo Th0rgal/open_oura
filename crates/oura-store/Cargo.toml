@@ -8,6 +8,9 @@ repository.workspace = true
 
 [dependencies]
 oura-protocol = { path = "../oura-protocol" }
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.31" }
 serde_json = "1"
 thiserror = "1"
+
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+rusqlite = { version = "0.31", features = ["bundled"] }

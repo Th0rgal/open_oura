@@ -41,6 +41,8 @@ CREATE TABLE IF NOT EXISTS events (
     UNIQUE(serial, tag, ring_timestamp, body)
 );
 CREATE INDEX IF NOT EXISTS idx_events_serial_tag ON events(serial, tag);
+CREATE INDEX IF NOT EXISTS idx_events_capture ON events(captured_unix, id);
+CREATE INDEX IF NOT EXISTS idx_events_tag_time ON events(tag, ring_timestamp);
 
 CREATE TABLE IF NOT EXISTS readings (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -77,17 +79,41 @@ impl Store {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
                 .map_err(|e| crate::error::Error::Storage(e.to_string()))?;
         }
-        // The sync writer and the model/summary readers share this file, so every
-        // connection waits out short lock contention instead of failing, and the
-        // writable store runs in WAL mode so readers get a consistent snapshot
-        // while the per-event drain inserts. The iOS app sometimes opens the
-        // read-only seed DB bundled with the app: the WAL switch is a write, so
-        // its failure there is tolerated (a pure reader doesn't need it).
         conn.busy_timeout(std::time::Duration::from_millis(5000))?;
-        let _ = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get::<_, String>(0));
-        let _ = conn.execute_batch("PRAGMA synchronous=NORMAL;");
+        let mode: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))?;
+        if mode != "wal" {
+            return Err(crate::error::Error::Storage(format!(
+                "WAL unavailable: {mode}"
+            )));
+        }
+        conn.execute_batch("PRAGMA synchronous=FULL;")?;
         conn.execute_batch(SCHEMA)?;
         Ok(Self { conn })
+    }
+
+    /// Read without changing schema, permissions, or journal mode (including bundled seeds).
+    pub fn open_read_only<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+        Ok(Self { conn })
+    }
+
+    /// Commit a complete protocol batch and its cursor together, before ACK/progress.
+    pub fn commit_batch(&self, serial: &str, events: &[RingEvent], cursor: u32) -> Result<u32> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut inserted = 0;
+        for event in events {
+            inserted += u32::from(self.insert_event(serial, event)?);
+        }
+        self.set_cursor(serial, cursor)?;
+        tx.commit()?;
+        Ok(inserted)
+    }
+
+    pub fn integrity_check(&self) -> Result<String> {
+        Ok(self
+            .conn
+            .query_row("PRAGMA quick_check", [], |r| r.get(0))?)
     }
 
     /// Open an in-memory database (useful for tests).
@@ -309,6 +335,80 @@ mod tests {
     }
 
     #[test]
+    fn full_database_keeps_the_previous_checkpoint() {
+        let store = Store::open_in_memory().unwrap();
+        store.set_cursor("S1", 7).unwrap();
+        let pages: u32 = store
+            .conn
+            .query_row("PRAGMA page_count", [], |r| r.get(0))
+            .unwrap();
+        store
+            .conn
+            .execute_batch(&format!("PRAGMA max_page_count={pages};"))
+            .unwrap();
+        let mut event = sample_event();
+        event.body = vec![42; 1024 * 1024];
+        let error = store.commit_batch("S1", &[event], 43).unwrap_err();
+        assert!(matches!(
+            error,
+            crate::error::Error::Sqlite { code: 13, .. }
+        ));
+        assert_eq!(store.cursor("S1").unwrap(), 7);
+        assert!(store.event_counts("S1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn failed_cursor_commit_rolls_back_entire_batch() {
+        let store = Store::open_in_memory().unwrap();
+        store.set_cursor("S1", 7).unwrap();
+        store.conn.execute_batch("CREATE TRIGGER fail_cursor BEFORE UPDATE ON sync_state BEGIN SELECT RAISE(ABORT, 'injected cursor failure'); END;").unwrap();
+        let error = store.commit_batch("S1", &[sample_event()], 43).unwrap_err();
+        assert!(matches!(
+            error,
+            crate::error::Error::Sqlite { code: 19, .. }
+        ));
+        assert_eq!(store.cursor("S1").unwrap(), 7);
+        assert!(store.event_counts("S1").unwrap().is_empty());
+        store
+            .conn
+            .execute_batch("DROP TRIGGER fail_cursor;")
+            .unwrap();
+        assert_eq!(store.commit_batch("S1", &[sample_event()], 43).unwrap(), 1);
+        assert_eq!(store.commit_batch("S1", &[sample_event()], 43).unwrap(), 0);
+        assert_eq!(store.cursor("S1").unwrap(), 43);
+    }
+
+    #[test]
+    fn failed_insert_rolls_back_earlier_rows_and_cursor() {
+        let store = Store::open_in_memory().unwrap();
+        store.conn.execute_batch("CREATE TRIGGER fail_row BEFORE INSERT ON events WHEN NEW.ring_timestamp=99 BEGIN SELECT RAISE(ABORT, 'injected insert failure'); END;").unwrap();
+        let mut bad = sample_event();
+        bad.timestamp = 99;
+        assert!(store
+            .commit_batch("S1", &[sample_event(), bad], 100)
+            .is_err());
+        assert!(store.event_counts("S1").unwrap().is_empty());
+        assert_eq!(store.cursor("S1").unwrap(), 0);
+    }
+
+    #[test]
+    fn read_only_open_does_not_initialize_schema_or_create_file() {
+        let path = std::env::temp_dir().join(format!("oura-missing-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        assert!(Store::open_read_only(&path).is_err());
+        assert!(!path.exists());
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("CREATE TABLE sentinel(value);").unwrap();
+        }
+        let reader = Store::open_read_only(&path).unwrap();
+        assert!(reader.event_counts("S1").is_err());
+        assert_eq!(reader.integrity_check().unwrap(), "ok");
+        drop(reader);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn open_enables_wal_on_writable_file() {
         let dir = std::env::temp_dir().join(format!("oura-store-wal-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -342,7 +442,7 @@ mod tests {
                 [],
             )
             .unwrap();
-        let reader = Store::open(&path).unwrap();
+        let reader = Store::open_read_only(&path).unwrap();
         let counts = reader.event_counts("S1").unwrap();
         assert_eq!(counts, vec![("debug_event".to_string(), 1)]);
         writer.conn.execute_batch("COMMIT;").unwrap();
