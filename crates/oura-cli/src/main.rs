@@ -619,54 +619,59 @@ async fn cmd_sync(cli: &Cli, key: &Option<[u8; 16]>, sync_time: bool) -> Result<
     let cursor = store.cursor(&serial)?;
     println!("Syncing events for {serial} from cursor {cursor} ...");
 
-    let mut inserted = 0u32;
-    // Capture any DB error (insert or cursor write) so a failure surfaces loudly
-    // instead of being swallowed — and so the cursor is never advanced past events
-    // we failed to store (which would drop them permanently on the next sync).
+    let inserted = std::cell::Cell::new(0u32);
+    // Capture any DB error so a failure surfaces loudly instead of being
+    // swallowed — and so the cursor is never advanced past events we failed to
+    // store (which would drop them permanently on the next sync).
     let db_err = std::cell::RefCell::new(None);
     // Track whether any batch cursor was actually persisted, so the error message
     // below is accurate even when earlier batches already advanced the cursor.
     let cursor_advanced = std::cell::Cell::new(false);
+    // Events are buffered per batch and committed with the cursor in ONE
+    // transaction. Inserting row-by-row in autocommit under WAL +
+    // synchronous=FULL costs an fsync per event; on slow storage (SD card,
+    // network or encrypted home) that is hundreds of ms each, which turned a
+    // 255-event legacy batch into minutes.
+    let pending = std::cell::RefCell::new(Vec::new());
+    let batch_started = std::cell::Cell::new(std::time::Instant::now());
     let outcome = client
         .drain_events(
             cursor,
             |ev| {
-                if db_err.borrow().is_some() {
-                    return false;
-                }
-                match store.insert_event(&serial, ev) {
-                    Ok(true) => inserted += 1,
-                    Ok(false) => {}
-                    Err(e) => {
-                        *db_err.borrow_mut() = Some(e);
-                        return false;
-                    }
-                }
+                pending.borrow_mut().push(ev.clone());
                 true
             },
-            // Persist the cursor after each fully-drained batch (so an interrupted
-            // sync still makes progress) — but not once a DB write has failed. A
-            // failed cursor write is itself recorded so it can't be silently lost.
             |p| {
-                if db_err.borrow().is_some() {
-                    return false;
-                }
-                match store.set_cursor(&serial, p.next_cursor) {
-                    Ok(()) => cursor_advanced.set(true),
+                let link = batch_started.get().elapsed();
+                let db_started = std::time::Instant::now();
+                let events = std::mem::take(&mut *pending.borrow_mut());
+                match store.commit_batch(&serial, &events, p.next_cursor) {
+                    Ok(n) => {
+                        inserted.set(inserted.get() + n);
+                        cursor_advanced.set(true);
+                    }
                     Err(e) => {
                         *db_err.borrow_mut() = Some(e);
                         return false;
                     }
                 }
+                let db = db_started.elapsed();
+                // Per-batch timing split: tells a slow BLE link apart from slow
+                // storage at a glance when someone reports a slow sync.
                 println!(
-                    "  … {} events so far, ~{:.1} KB left on ring",
+                    "  … {} events so far, ~{:.1} KB left on ring ({} in batch: link {:.1}s, db {:.2}s)",
                     p.events_synced,
-                    p.bytes_left as f64 / 1024.0
+                    p.bytes_left as f64 / 1024.0,
+                    events.len(),
+                    link.as_secs_f64(),
+                    db.as_secs_f64(),
                 );
+                batch_started.set(std::time::Instant::now());
                 true
             },
         )
         .await;
+    let inserted = inserted.get();
     if let Some(e) = db_err.into_inner() {
         let ctx = if cursor_advanced.get() {
             "storing event during sync (cursor advanced through earlier batches)"
