@@ -22,3 +22,9 @@ btleplug = { version = "0.11", optional = true }
 [features]
 default = ["ble"]
 ble = ["dep:btleplug"]
+
+# The scan example needs the BLE backend; without this it breaks `cargo test`
+# for consumers that pull the crate in with default features disabled.
+[[example]]
+name = "rawscan"
+required-features = ["ble"]

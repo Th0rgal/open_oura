@@ -22,11 +22,23 @@ pub(crate) struct ValidatedHistoryBatch {
     pub bytes_left: u32,
     pub next_cursor: u32,
     pub rejected_events: u32,
+    /// Events at or after the cursor the batch was requested with — the only
+    /// ones that represent forward progress through the ring's history.
+    pub fresh_events: u32,
 }
 
 impl ValidatedHistoryBatch {
+    /// Whether the drain may continue from [`Self::next_cursor`].
+    ///
+    /// A batch containing only events OLDER than the cursor is the ring ignoring
+    /// the cursor and replaying from its buffer head. That case still leaves
+    /// `next_cursor` one decisecond past `previous_cursor`, because the cursor is
+    /// seeded from the batch start, so treating "cursor moved" as progress made
+    /// the drain crawl forward 0.1s per round trip while re-serving the same
+    /// history — unbounded event counts, hours of transfer, and a database that
+    /// deduplicates all of it away. Real progress requires a fresh event.
     pub fn progressed(&self, previous_cursor: u32) -> bool {
-        !self.events.is_empty() && self.next_cursor > previous_cursor
+        self.fresh_events > 0 && self.next_cursor > previous_cursor
     }
 }
 
@@ -43,11 +55,15 @@ pub(crate) fn validate_batch(batch: HistoryBatch, batch_start: u32) -> Validated
     let bytes_left = batch.bytes_left;
     let mut max_timestamp = batch_start;
     let mut rejected_events = 0;
+    let mut fresh_events = 0;
     let events = batch
         .events
         .into_iter()
         .filter(|event| {
             if plausible_timestamp(batch_start, event.timestamp) {
+                if event.timestamp >= batch_start {
+                    fresh_events += 1;
+                }
                 max_timestamp = max_timestamp.max(event.timestamp);
                 true
             } else {
@@ -62,6 +78,7 @@ pub(crate) fn validate_batch(batch: HistoryBatch, batch_start: u32) -> Validated
         bytes_left,
         next_cursor: max_timestamp.saturating_add(1),
         rejected_events,
+        fresh_events,
     }
 }
 
@@ -148,6 +165,46 @@ mod tests {
         // request, not a successful empty batch, even though bytes_left is zero.
         let error = decode_batch(&[packet("2f0a420000000000000000ff")]).unwrap_err();
         assert!(error.to_string().contains("result code 0xff"));
+    }
+
+    #[test]
+    fn a_batch_of_only_older_events_is_not_progress() {
+        // The 2026-09-21 failure: every event in the batch predates the cursor, so
+        // max_timestamp stays at batch_start and next_cursor lands exactly one
+        // decisecond ahead. That looked like progress and made the drain crawl,
+        // re-serving the same history until the event count ran past 300k.
+        let batch_start = 1_000_000;
+        let batch = HistoryBatch {
+            events: vec![
+                RingEvent { tag: 0x7e, name: "x".into(), timestamp: 900_000, body: vec![1], decoded: None },
+                RingEvent { tag: 0x7e, name: "x".into(), timestamp: 950_000, body: vec![2], decoded: None },
+            ],
+            bytes_left: 4096,
+        };
+        let validated = validate_batch(batch, batch_start);
+
+        assert_eq!(validated.fresh_events, 0);
+        assert_eq!(validated.next_cursor, batch_start + 1, "cursor still nudges forward");
+        assert!(
+            !validated.progressed(batch_start),
+            "a nudged cursor with no fresh event must not count as progress"
+        );
+    }
+
+    #[test]
+    fn an_event_at_the_cursor_is_progress() {
+        let batch_start = 1_000_000;
+        let batch = HistoryBatch {
+            events: vec![
+                RingEvent { tag: 0x7e, name: "x".into(), timestamp: 900_000, body: vec![1], decoded: None },
+                RingEvent { tag: 0x7e, name: "x".into(), timestamp: 1_000_000, body: vec![2], decoded: None },
+            ],
+            bytes_left: 4096,
+        };
+        let validated = validate_batch(batch, batch_start);
+
+        assert_eq!(validated.fresh_events, 1);
+        assert!(validated.progressed(batch_start));
     }
 
     #[test]
