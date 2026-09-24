@@ -511,6 +511,13 @@ impl<T: Transport> OuraClient<T> {
                     "discarded history events with impossible cursor jumps"
                 );
             }
+            if batch.replayed_events > 0 {
+                tracing::debug!(
+                    replayed_events = batch.replayed_events,
+                    cursor = start,
+                    "ignored events older than the cursor (ring replayed its tail)"
+                );
+            }
             let bytes_left = batch.bytes_left;
             let progressed = batch.progressed(start);
             if progressed {
@@ -966,6 +973,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_drain_stops_when_the_ring_replays_its_tail() {
+        // Horizon 3.4.3 (Maxime, 2026-09-24): past the newest event the ring
+        // re-sends its last events instead of an empty batch. That pass must end
+        // the drain, not advance the cursor by 1 ds and loop forever.
+        let mock = MockTransport::new();
+        mock.on("280100", &["290100"]);
+        mock.on("2f0c410000000000000000000010", &["2f020041"]);
+        // cursor 0 → one event at t=1 ds, bytes_left=0
+        mock.on(
+            "100900000000ffffffffff",
+            &["430801000000746573741106000000000000"],
+        );
+        // cursor 2 → the same event at t=1 ds again
+        mock.on(
+            "100902000000ffffffffff",
+            &["430801000000746573741106000000000000"],
+        );
+        let client = OuraClient::new(mock).with_quiet(Duration::from_millis(20));
+        let outcome = client.drain_events(0, |_| true, |_| true).await.unwrap();
+        assert_eq!(outcome.events_synced, 1);
+        assert_eq!(outcome.next_cursor, 2);
+        let fetches = client
+            .transport()
+            .writes()
+            .iter()
+            .filter(|request| request.first() == Some(&0x10))
+            .count();
+        assert_eq!(fetches, 2, "expected GetEvent at cursor 0 then cursor 2");
+    }
+
+    #[tokio::test]
     async fn drain_continues_past_a_zero_bytes_left_batch_that_carried_events() {
         // Gen 3 Horizon fw 3.4.3: the first batch says bytes_left=0 yet the ring
         // still serves events on the next cursor. Only an empty pass ends the drain.
@@ -982,7 +1020,10 @@ mod tests {
             &["2f0a430700aa4304c801bbcc2f0a42010000000000000000"],
         );
         // cursor 3 (300 ms) → nothing: drained for real
-        mock.on("2f0c41002c010000000000000010", &["2f0a42000000000000000000"]);
+        mock.on(
+            "2f0c41002c010000000000000010",
+            &["2f0a42000000000000000000"],
+        );
         let client = OuraClient::new(mock).with_quiet(Duration::from_millis(20));
         let outcome = client.drain_events(0, |_| true, |_| true).await.unwrap();
         assert_eq!(outcome.events_synced, 2);

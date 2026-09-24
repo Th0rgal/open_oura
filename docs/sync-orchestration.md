@@ -86,7 +86,7 @@ bundled events on extended sync. The parser must walk the whole notification or
 bundle. The persisted cursor (`nextEventToSync`) makes sync incremental.
 `sleepAnalysisProgress` is surfaced as progress only, not a block.
 
-Three places where `oura-link` deliberately deviates from the app's literal
+Four places where `oura-link` deliberately deviates from the app's literal
 behavior:
 
 - **No ack-fetch.** The app's `GetEvent(cursor, max_events=0)` after a
@@ -101,6 +101,10 @@ behavior:
   window after the last frame. The quiet window (1.5 s) remains only as the
   fallback for errors/dead links. A batch that ends *without* a summary is a
   hard error (link lost mid-batch), never treated as "drained".
+- **Replayed tail.** Horizon 3.4.3 answers a cursor past its newest event with
+  its last few events again instead of an empty batch. Events older than the
+  requested cursor are dropped as replays and do not advance it, so that pass
+  counts as empty and ends the drain (it used to loop forever, 2026-09-24).
 - **Batch size.** The app requests `max_events = 65535` — effectively the whole
   backlog as one batch. Since the cursor can only be checkpointed at batch
   boundaries, one giant batch means a dropped link forfeits all progress and

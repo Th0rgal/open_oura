@@ -22,6 +22,8 @@ pub(crate) struct ValidatedHistoryBatch {
     pub bytes_left: u32,
     pub next_cursor: u32,
     pub rejected_events: u32,
+    /// Events older than the requested cursor: already stored by an earlier pass.
+    pub replayed_events: u32,
 }
 
 impl ValidatedHistoryBatch {
@@ -43,11 +45,18 @@ pub(crate) fn validate_batch(batch: HistoryBatch, batch_start: u32) -> Validated
     let bytes_left = batch.bytes_left;
     let mut max_timestamp = batch_start;
     let mut rejected_events = 0;
+    let mut replayed_events = 0;
     let events = batch
         .events
         .into_iter()
         .filter(|event| {
-            if plausible_timestamp(batch_start, event.timestamp) {
+            // Gen 3 Horizon fw 3.4.3 answers a cursor past its newest event with
+            // its last few events again instead of an empty batch. Treating them
+            // as progress bumped the cursor by 1 ds per pass and never drained.
+            if event.timestamp < batch_start {
+                replayed_events += 1;
+                false
+            } else if plausible_timestamp(batch_start, event.timestamp) {
                 max_timestamp = max_timestamp.max(event.timestamp);
                 true
             } else {
@@ -57,11 +66,17 @@ pub(crate) fn validate_batch(batch: HistoryBatch, batch_start: u32) -> Validated
         })
         .collect::<Vec<_>>();
 
+    let next_cursor = if events.is_empty() {
+        batch_start
+    } else {
+        max_timestamp.saturating_add(1)
+    };
     ValidatedHistoryBatch {
         events,
         bytes_left,
-        next_cursor: max_timestamp.saturating_add(1),
+        next_cursor,
         rejected_events,
+        replayed_events,
     }
 }
 
@@ -186,5 +201,48 @@ mod tests {
         assert_eq!(validated.next_cursor, 6_906_621);
         assert_eq!(validated.rejected_events, 6);
         assert!(validated.progressed(batch_start));
+    }
+
+    fn debug_event(timestamp: u32) -> RingEvent {
+        RingEvent {
+            tag: 0x43,
+            name: oura_protocol::events::event_name(0x43),
+            timestamp,
+            body: Vec::new(),
+            decoded: None,
+        }
+    }
+
+    #[test]
+    fn replayed_tail_is_not_progress() {
+        // Horizon 3.4.3 (Maxime, 2026-09-24): cursor 7_756_757 is past the newest
+        // event, yet the ring re-sends its last 7 events (7_756_750..=7_756_756).
+        let batch_start = 7_756_757;
+        let batch = HistoryBatch {
+            events: (7_756_750..batch_start).map(debug_event).collect(),
+            bytes_left: 0,
+        };
+
+        let validated = validate_batch(batch, batch_start);
+
+        assert!(validated.events.is_empty());
+        assert_eq!(validated.replayed_events, 7);
+        assert_eq!(validated.next_cursor, batch_start);
+        assert!(!validated.progressed(batch_start));
+    }
+
+    #[test]
+    fn keeps_new_events_mixed_with_a_replayed_tail() {
+        let batch = HistoryBatch {
+            events: vec![debug_event(99), debug_event(100), debug_event(105)],
+            bytes_left: 0,
+        };
+
+        let validated = validate_batch(batch, 100);
+
+        assert_eq!(validated.events.len(), 2);
+        assert_eq!(validated.replayed_events, 1);
+        assert_eq!(validated.next_cursor, 106);
+        assert!(validated.progressed(100));
     }
 }
