@@ -68,8 +68,11 @@ loop:
     decode + persist every event frame from every notification
     if any event was observed:
         cursor = max(event.timestamp) + 1
-        send GetEvent(cursor, max_events = 0, flags = -1)  # ack-fetch
         store.set_next_event_to_sync(cursor)    # incremental-sync bookmark
+        # The official app then sends GetEvent(cursor, max_events=0) ("ack-fetch").
+        # oura-link does not: GetEvent is already cursor-addressed, and on
+        # Horizon 3.4.3 that ack-fetch holds the next 255 events for ~2 minutes
+        # (then we used to throw the stream away and fetch it again).
     if summary.bytes_left > 0:                   # ring has more data
         repeat
     else:
@@ -83,8 +86,14 @@ bundled events on extended sync. The parser must walk the whole notification or
 bundle. The persisted cursor (`nextEventToSync`) makes sync incremental.
 `sleepAnalysisProgress` is surfaced as progress only, not a block.
 
-Two places where `oura-link` deliberately deviates from the app's literal
-behavior (2026-07-04):
+Three places where `oura-link` deliberately deviates from the app's literal
+behavior:
+
+- **No ack-fetch.** The app's `GetEvent(cursor, max_events=0)` after a
+  successful batch is skipped. Horizon 3.4.3 (and Ring 5) treat it as another
+  fetch; waiting for its `0x11` stalled a Windows sync at ~2 minutes per 255
+  events (2026-09-18). The next loop's `DataFlush` + cursor-addressed `GetEvent`
+  is enough.
 
 - **Batch termination.** The summary packet is the ring's explicit batch
   terminator, so the client returns from a request the moment it (or a

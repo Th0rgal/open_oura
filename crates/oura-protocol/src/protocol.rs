@@ -217,6 +217,10 @@ pub fn req_get_event(start_deciseconds: u32, max_events: u8, flags: i32) -> Vec<
 
 /// Acknowledge history events through `cursor` without asking for more records.
 /// The official app sends this after a fetch burst using `max_events = 0`.
+///
+/// Not used by `OuraClient::drain_events`: on Horizon 3.4.3 / Ring 5 the ring
+/// treats this as another fetch and can stall for minutes before 0x11. The
+/// drain loop continues with a cursor-addressed GetEvent instead.
 pub fn req_get_event_ack(cursor: u32) -> Vec<u8> {
     req_get_event(cursor, 0, -1)
 }

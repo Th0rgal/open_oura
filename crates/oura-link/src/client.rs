@@ -527,15 +527,14 @@ impl<T: Transport> OuraClient<T> {
                     "batch callback failed; not acknowledging batch".into(),
                 ));
             }
-            // ExtGetEvent is cursor-driven and implicitly completes its own batch.
-            // Sending the legacy GetEvent ACK here makes Ring 5 stream another batch;
-            // those late frames race with the next flush and get discarded. Only the
-            // legacy API uses the explicit 0x10 acknowledgement.
-            if progressed && !use_extended {
-                let _ = self
-                    .request_tag(&protocol::req_get_event_ack(start), 0x11)
-                    .await;
-            }
+            // Do not send the official app's GetEvent ack-fetch (max_events=0).
+            // GetEvent is cursor-addressed: the next loop's DataFlush + GetEvent(start)
+            // already continues from the checkpoint. On Horizon 3.4.3 (BLB_*) the
+            // ack-fetch is not a cheap 0x11 — the ring holds the next 255 events for
+            // ~2 minutes, we discarded that stream, then fetched the same batch again
+            // in ~1s. That turned a 0.7s link batch into a 2-minute "link" stall on
+            // Windows (Maxime, 2026-09-18). Ring 5 has the same failure mode: the
+            // ack-fetch starts another batch that races the next flush.
             if !progressed {
                 if bytes_left == 0 {
                     break; // drained: a pass returned nothing and the ring agrees
@@ -906,6 +905,42 @@ mod tests {
         assert_eq!(
             client.authenticate(&key).await.unwrap(),
             AuthResult::Success
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_drain_does_not_ack_fetch_after_a_batch() {
+        // Horizon 3.4.3 rejects ExtGetEvent (0x2f/0x00 "unsupported") and falls
+        // back to GetEvent. The next write after a successful batch must be the
+        // following DataFlush, not GetEvent(max_events=0) — that ack-fetch is
+        // what stalled Maxime's Windows sync for ~2 minutes per 255 events.
+        let mock = MockTransport::new();
+        mock.on("280100", &["290100"]);
+        mock.on("2f0c410000000000000000000010", &["2f020041"]);
+        mock.on(
+            "100900000000ffffffffff",
+            &["430801000000746573741106010004000000"],
+        );
+        mock.on("2f0c4100c8000000000000000010", &["2f020041"]);
+        mock.on("100902000000ffffffffff", &["1106000000000000"]);
+        let client = OuraClient::new(mock).with_quiet(Duration::from_millis(20));
+        let outcome = client.drain_events(0, |_| true, |_| true).await.unwrap();
+        assert_eq!(outcome.events_synced, 1);
+        assert_eq!(outcome.next_cursor, 2);
+        let writes = client.transport().writes();
+        assert!(
+            writes.iter().all(|request| {
+                !(request.first() == Some(&0x10) && request.get(6) == Some(&0x00))
+            }),
+            "legacy drain sent a max_events=0 ack-fetch: {writes:?}"
+        );
+        assert_eq!(
+            writes
+                .iter()
+                .filter(|request| request.first() == Some(&0x10))
+                .count(),
+            2,
+            "expected GetEvent at cursor 0 then cursor 2, got {writes:?}"
         );
     }
 
