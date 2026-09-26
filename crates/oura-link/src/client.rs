@@ -731,9 +731,15 @@ impl<T: Transport> OuraClient<T> {
             .ok_or_else(|| Error::Protocol("no RData page response".into()))
     }
 
-    /// Enable live heart rate (daytime HR, `CONNECTED_LIVE`) and invoke `on_sample`
-    /// for each valid beat for up to `duration`. Restores `AUTOMATIC` mode on exit.
-    /// The ring must be worn for samples to appear.
+    /// Stream live heart rate, invoking `on_sample` for each valid beat for up to
+    /// `duration`. The ring must be worn for samples to appear. Restores
+    /// `AUTOMATIC` mode and clears the live subscription on exit.
+    ///
+    /// Follows the official app's HR burst (open_ring §6.7): stream registration
+    /// (`16 01 02`, `1c 01 bf`), then daytime HR `CONNECTED_LIVE` plus subscription
+    /// sub-mode 2, re-sent every [`LIVE_HR_BURST_EVERY`] because the ring reverts
+    /// after ~20 s. A Ring 4 (fw 2.12.5) sent nothing for the mode write alone;
+    /// with this sequence it sends one `2f 0f 28 02 …` IBI frame per beat.
     pub async fn live_heart_rate<F>(
         &self,
         duration: Duration,
@@ -748,19 +754,25 @@ impl<T: Transport> OuraClient<T> {
         while rx.try_recv().is_ok() {}
 
         self.transport
-            .write(&protocol::req_set_feature_mode(
-                feature::DAYTIME_HR,
-                feature_mode::CONNECTED_LIVE,
-            ))
+            .write(&protocol::req_stream_subscribe(0x02))
             .await?;
+        self.transport
+            .write(&protocol::req_set_notification(0xbf))
+            .await?;
+        self.send_live_hr_burst().await?;
 
         let deadline = tokio::time::Instant::now() + duration;
+        let mut next_burst = tokio::time::Instant::now() + LIVE_HR_BURST_EVERY;
         loop {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
                 break;
             }
-            match tokio::time::timeout(remaining, rx.recv()).await {
+            if now >= next_burst {
+                self.send_live_hr_burst().await?;
+                next_burst = now + LIVE_HR_BURST_EVERY;
+            }
+            match tokio::time::timeout(deadline.min(next_burst) - now, rx.recv()).await {
                 Ok(Ok(frame)) => {
                     if debug {
                         eprintln!("raw notify: {}", hex::encode(&frame));
@@ -770,11 +782,13 @@ impl<T: Transport> OuraClient<T> {
                     }
                 }
                 Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
-                _ => break,
+                Ok(Err(_)) => break,
+                // Quiet until the next burst or the deadline.
+                Err(_) => continue,
             }
         }
 
-        // Best-effort restore to automatic mode.
+        // Best-effort restore: automatic measuring, no live subscription.
         let _ = self
             .transport
             .write(&protocol::req_set_feature_mode(
@@ -782,7 +796,31 @@ impl<T: Transport> OuraClient<T> {
                 feature_mode::AUTOMATIC,
             ))
             .await;
+        let _ = self
+            .transport
+            .write(&protocol::req_set_feature_subscription(
+                feature::DAYTIME_HR,
+                protocol::subscription_mode::OFF,
+            ))
+            .await;
         Ok(())
+    }
+
+    /// One round of the live-HR request: daytime HR to `CONNECTED_LIVE`, then the
+    /// subscription sub-mode Ring 4 needs before it streams beats.
+    async fn send_live_hr_burst(&self) -> Result<()> {
+        self.transport
+            .write(&protocol::req_set_feature_mode(
+                feature::DAYTIME_HR,
+                feature_mode::CONNECTED_LIVE,
+            ))
+            .await?;
+        self.transport
+            .write(&protocol::req_set_feature_subscription(
+                feature::DAYTIME_HR,
+                protocol::subscription_mode::LATEST,
+            ))
+            .await
     }
 
     /// Stream live accelerometer samples (the "wave to test motion" path): enable
@@ -862,6 +900,9 @@ fn bpm_from_ibi(ibi_ms: u16) -> Option<u16> {
     }
 }
 
+/// How often to re-send the live-HR burst; Ring 4 reverts after ~20 s (open_ring §6.7).
+pub const LIVE_HR_BURST_EVERY: Duration = Duration::from_secs(15);
+
 /// Parse a daytime-HR live subscription notification (tag `0x2f`, sub-tag `0x28`).
 ///
 /// Frame layout: `[0]=0x2f [1]=len [2]=0x28(IND1) [3]=cap [4]=status [5]=state
@@ -912,6 +953,39 @@ mod tests {
         assert_eq!(
             client.authenticate(&key).await.unwrap(),
             AuthResult::Success
+        );
+    }
+
+    #[tokio::test]
+    async fn live_heart_rate_runs_the_ring4_burst() {
+        // Frames captured from a Ring 4 (fw 2.12.5) after the burst: a valid 733 ms
+        // beat (-> 81 bpm), then one the ring flags with validity 2, which is dropped.
+        let mock = MockTransport::new();
+        mock.on("2f03220203", &["2f03230200"]);
+        mock.on(
+            "2f03260202",
+            &[
+                "2f03270200",
+                "2f0f280201020000dd1200000000420c7f",
+                "2f0f280201020000b62300000000420c7f",
+            ],
+        );
+        let client = OuraClient::new(mock).with_quiet(Duration::from_millis(20));
+        let mut bpm = Vec::new();
+        client
+            .live_heart_rate(Duration::from_millis(100), false, |s| bpm.push(s.bpm))
+            .await
+            .unwrap();
+        assert_eq!(bpm, vec![81]);
+        let writes: Vec<String> = client
+            .transport()
+            .writes()
+            .iter()
+            .map(hex::encode)
+            .collect();
+        assert_eq!(
+            writes,
+            ["160102", "1c01bf", "2f03220203", "2f03260202", "2f03220201", "2f03260200"]
         );
     }
 
