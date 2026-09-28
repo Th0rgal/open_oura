@@ -100,7 +100,7 @@ def main():
     # Anchor ring deciseconds to wall-clock per boot epoch (the ring's ds counter
     # resets on reboot; a single global anchor mis-dates older epochs — see epoch_time).
     from epoch_time import build_epochs, make_unix_s
-    epochs = build_epochs([(r[0], r[3]) for r in rows])
+    epochs = build_epochs([(r[0], r[3]) for r in rows], markers=rows)
     _unix_s = make_unix_s(epochs)
     anchor_unix = max(e[2] for e in epochs)  # newest epoch's capture time ≈ "now"
 

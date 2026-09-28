@@ -43,7 +43,7 @@ rows = con.execute("SELECT ring_timestamp, tag, decoded_json, captured_unix FROM
 # Anchor ring deciseconds to wall-clock per boot epoch (ds resets on reboot; a single
 # global anchor mis-dates older epochs — see epoch_time / crates/oura-summary).
 from epoch_time import build_epochs, make_unix_s
-_epochs = build_epochs([(r[0], r[3]) for r in rows])
+_epochs = build_epochs([(r[0], r[3]) for r in rows], markers=rows)
 _unix_s = make_unix_s(_epochs)
 def ms(ds):  # device deciseconds -> absolute epoch ms (int64), consistent across signals
     return int(_unix_s(ds) * 1000)
