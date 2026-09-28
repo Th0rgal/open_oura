@@ -29,11 +29,11 @@ struct Cli {
     scan_timeout: u64,
 
     /// SQLite database path.
-    #[arg(long, global = true, default_value = "oura.db")]
+    #[arg(long, global = true, env = "OURA_DB_FILE", default_value = "oura.db")]
     db: PathBuf,
 
     /// 16-byte app-auth key as hex (file contents). Required for auth-gated ops.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, env = "OURA_KEY_FILE")]
     key_file: Option<PathBuf>,
 
     #[command(subcommand)]
@@ -247,7 +247,13 @@ async fn main() -> Result<()> {
         .with_target(false)
         .init();
 
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    if cli.key_file.is_none() {
+        let candidate = cli.db.with_file_name("oura.key");
+        if candidate.exists() {
+            cli.key_file = Some(candidate);
+        }
+    }
     let key = load_key(&cli.key_file)?;
 
     match &cli.command {
