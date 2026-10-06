@@ -798,6 +798,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "windows",
 ]
 
 [[package]]

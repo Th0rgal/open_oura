@@ -23,6 +23,12 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// manufacturer-specific advertising data.
 const OURA_COMPANY_ID: u16 = 0x02B2;
 
+/// Upper bound on the Windows bond step: opening the device, removing a bond
+/// without encryption, every pairing attempt, and cancellation cleanup. Pairing
+/// can wait on an OS prompt, so this is longer than [`CONNECT_TIMEOUT`].
+#[cfg(windows)]
+const WINDOWS_BOND_TIMEOUT: Duration = Duration::from_secs(180);
+
 /// A ring discovered while scanning.
 #[derive(Clone, Debug)]
 pub struct Discovered {
@@ -178,6 +184,22 @@ impl BleTransport {
         let _ = adapter.stop_scan().await;
 
         let (peripheral, _) = chosen.ok_or(Error::DeviceNotFound)?;
+
+        // A factory-reset ring rejects GATT access until the link is encrypted, and
+        // Windows does not bond on its own. Bond first, within a deadline, so a
+        // stalled OS ceremony cannot hang the connect.
+        #[cfg(windows)]
+        tokio::time::timeout(
+            WINDOWS_BOND_TIMEOUT,
+            crate::windows_bond::ensure_bond(&peripheral.id().to_string()),
+        )
+        .await
+        .map_err(|_| {
+            Error::Ble(format!(
+                "windows bond: no encrypted bond within {WINDOWS_BOND_TIMEOUT:?}; approve any \
+                 Windows pairing prompt and check that no phone is connected to the ring"
+            ))
+        })??;
 
         // CoreBluetooth's connect (and, on some stacks, service discovery) has no
         // deadline of its own: a ring that advertises but won't complete the GATT
