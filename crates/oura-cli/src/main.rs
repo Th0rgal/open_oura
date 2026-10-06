@@ -1,7 +1,6 @@
 //! `oura` — a command-line client that reads data directly from an Oura ring over
 //! BLE, with no Oura cloud account. See `--help` for subcommands.
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -172,9 +171,9 @@ fn load_key(path: &Option<PathBuf>) -> Result<Option<[u8; 16]>> {
 
 /// Generate a random 16-byte auth key from the OS CSPRNG.
 fn generate_key() -> Result<[u8; 16]> {
-    let mut file = std::fs::File::open("/dev/urandom").context("opening /dev/urandom")?;
     let mut key = [0u8; 16];
-    file.read_exact(&mut key).context("reading random bytes")?;
+    getrandom::fill(&mut key)
+        .map_err(|e| anyhow!("generating random auth key: {e}"))?;
     Ok(key)
 }
 
@@ -1182,4 +1181,17 @@ async fn cmd_events(cli: &Cli) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generate_key_uses_os_csprng() {
+        let k1 = generate_key().unwrap();
+        let k2 = generate_key().unwrap();
+        assert_ne!(k1, [0u8; 16]);
+        assert_ne!(k1, k2);
+    }
 }
