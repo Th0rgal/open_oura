@@ -38,12 +38,15 @@ if len(rest) > 1:
 DB = resolve_db(db_arg, REPO)
 
 con = sqlite3.connect(str(DB))
-rows = con.execute("SELECT ring_timestamp, tag, decoded_json, captured_unix FROM events "
-                   "WHERE decoded_json IS NOT NULL ORDER BY ring_timestamp").fetchall()
+rows = con.execute(
+    "SELECT ring_timestamp, tag, COALESCE(decoded_json, '{}'), captured_unix FROM events "
+    "WHERE decoded_json IS NOT NULL OR (tag = 65 AND LENGTH(body) >= 14) "
+    "ORDER BY captured_unix, id"
+).fetchall()
 # Anchor ring deciseconds to wall-clock per boot epoch (ds resets on reboot; a single
 # global anchor mis-dates older epochs — see epoch_time / crates/oura-summary).
 from epoch_time import build_epochs, make_unix_s
-_epochs = build_epochs([(r[0], r[3]) for r in rows])
+_epochs = build_epochs(rows)
 _unix_s = make_unix_s(_epochs)
 def ms(ds):  # device deciseconds -> absolute epoch ms (int64), consistent across signals
     return int(_unix_s(ds) * 1000)

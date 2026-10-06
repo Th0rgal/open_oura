@@ -209,7 +209,11 @@ fn decode_time_sync(body: &[u8]) -> Option<serde_json::Value> {
         return None;
     }
     let unix = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
-    Some(serde_json::json!({ "unix_time": unix }))
+    if body.get(4..) == Some(b"phone") {
+        Some(serde_json::json!({ "unix_time": unix, "source": "phone" }))
+    } else {
+        Some(serde_json::json!({ "unix_time": unix }))
+    }
 }
 
 /// `user_information` (tag `0x5c`): the anthropometric profile the ring keeps for
@@ -1315,6 +1319,16 @@ mod tests {
         // Captured time_sync body: u32 LE unix time then timezone bytes.
         let v = decode_time_sync(&hex::decode("4fd2376a0000000000").unwrap()).unwrap();
         assert_eq!(v["unix_time"].as_u64().unwrap(), 1_782_043_215);
+        assert!(v.get("source").is_none());
+    }
+
+    #[test]
+    fn decodes_synthetic_phone_time_sync_preserving_source() {
+        let mut body = 1_787_733_221u32.to_le_bytes().to_vec();
+        body.extend_from_slice(b"phone");
+        let v = decode_time_sync(&body).unwrap();
+        assert_eq!(v["unix_time"].as_u64().unwrap(), 1_787_733_221);
+        assert_eq!(v["source"].as_str(), Some("phone"));
     }
 
     #[test]
@@ -1328,6 +1342,27 @@ mod tests {
         assert_eq!(v["firmware_version"].as_str().unwrap(), "2.12.3");
         assert_eq!(v["bootloader_version"].as_str().unwrap(), "1.0.1");
         assert_eq!(v["api_version"].as_str().unwrap(), "2.1.0");
+    }
+
+    #[test]
+    fn decodes_historical_audit_ring_start_bodies() {
+        let samples = [
+            (20715u32, "040000003A020103010001020100", 4u64, "2.1.3"),
+            (7307868, "0400000038020103010001020100", 4, "2.1.3"),
+            (21989329, "0400000038020103010001020100", 4, "2.1.3"),
+            (30662842, "0400000038020103010001020100", 4, "2.1.3"),
+            (34445201, "0400000038020114010001020100", 4, "2.1.20"),
+            (40127511, "0130000038020114010001020100", 0x3001, "2.1.20"),
+            (49912254, "0400000038020114010001020100", 4, "2.1.20"),
+        ];
+        for (_ts, hex_body, reason, fw) in samples {
+            let body = hex::decode(hex_body).unwrap();
+            let v = decode_event_body(0x41, &body).unwrap();
+            assert_eq!(v["reason"].as_u64().unwrap(), reason);
+            assert_eq!(v["firmware_version"].as_str().unwrap(), fw);
+            assert_eq!(v["bootloader_version"].as_str().unwrap(), "1.0.1");
+            assert_eq!(v["api_version"].as_str().unwrap(), "2.1.0");
+        }
     }
 
     #[test]
