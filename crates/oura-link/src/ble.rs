@@ -37,6 +37,16 @@ pub struct BleTransport {
     _pump: tokio::task::JoinHandle<()>,
 }
 
+/// Start an unfiltered scan; callers check `OURA_SERVICE` on each peripheral.
+///
+/// With a BlueZ discovery filter on the service UUID (`ScanFilter { services }`),
+/// a factory-reset Ring 3 that advertised the UUID was never reported; an
+/// unfiltered scan on the same adapter reported it.
+async fn start_unfiltered_scan(adapter: &btleplug::platform::Adapter) -> Result<()> {
+    adapter.start_scan(ScanFilter::default()).await?;
+    Ok(())
+}
+
 async fn first_adapter() -> Result<btleplug::platform::Adapter> {
     let manager = Manager::new().await?;
     manager
@@ -69,11 +79,7 @@ pub fn name_matches(advertised: &str, needle: &str) -> bool {
 /// substring. Returns candidates sorted by signal strength (strongest first).
 pub async fn scan(name_contains: &str, timeout: Duration) -> Result<Vec<Discovered>> {
     let adapter = first_adapter().await?;
-    adapter
-        .start_scan(ScanFilter {
-            services: vec![protocol::OURA_SERVICE],
-        })
-        .await?;
+    start_unfiltered_scan(&adapter).await?;
 
     let deadline = Instant::now() + timeout;
     let mut found: Vec<Discovered> = Vec::new();
@@ -121,11 +127,7 @@ impl BleTransport {
         scan_timeout: Duration,
     ) -> Result<Self> {
         let adapter = first_adapter().await?;
-        adapter
-            .start_scan(ScanFilter {
-                services: vec![protocol::OURA_SERVICE],
-            })
-            .await?;
+        start_unfiltered_scan(&adapter).await?;
 
         let deadline = Instant::now() + scan_timeout;
         let mut chosen: Option<(Peripheral, i16)> = None;
