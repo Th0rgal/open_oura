@@ -160,9 +160,11 @@ impl BleTransport {
                 break;
             }
         }
-        let _ = adapter.stop_scan().await;
 
-        let (peripheral, _) = chosen.ok_or(Error::DeviceNotFound)?;
+        let Some((peripheral, _)) = chosen else {
+            let _ = adapter.stop_scan().await;
+            return Err(Error::DeviceNotFound);
+        };
 
         // CoreBluetooth's connect (and, on some stacks, service discovery) has no
         // deadline of its own: a ring that advertises but won't complete the GATT
@@ -192,8 +194,14 @@ impl BleTransport {
             }
             Ok::<_, Error>(write_char)
         })
-        .await
-        .map_err(|_| Error::ConnectTimeout)??;
+        .await;
+        // Keep discovery running until the link is up. On Linux, connecting to a
+        // bonded ring (which advertises a resolvable private address) with
+        // discovery stopped hands RPA resolution to the controller; an Intel
+        // controller was observed never to match the ring, so the connect timed
+        // out. With active discovery running, the kernel resolves the RPA itself.
+        let _ = adapter.stop_scan().await;
+        let write_char = write_char.map_err(|_| Error::ConnectTimeout)??;
 
         let (tx, _) = broadcast::channel(256);
         let pump_tx = tx.clone();
