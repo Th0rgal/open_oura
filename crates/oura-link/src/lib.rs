@@ -9,6 +9,8 @@ pub mod client;
 pub mod error;
 mod history;
 pub mod transport;
+#[cfg(all(windows, feature = "ble"))]
+mod windows_bond;
 
 pub use client::OuraClient;
 pub use error::{Error, Result};

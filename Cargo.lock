@@ -783,6 +783,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "windows-sys",
 ]
 
 [[package]]
@@ -798,6 +799,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "windows",
 ]
 
 [[package]]

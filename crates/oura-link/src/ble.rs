@@ -3,7 +3,8 @@
 use std::time::{Duration, Instant};
 
 use btleplug::api::{
-    Central, CharPropFlags, Characteristic, Manager as _, Peripheral as _, ScanFilter, WriteType,
+    Central, CharPropFlags, Characteristic, Manager as _, Peripheral as _, PeripheralProperties,
+    ScanFilter, WriteType,
 };
 use btleplug::platform::{Manager, Peripheral};
 use futures::StreamExt;
@@ -17,6 +18,16 @@ use oura_protocol::protocol;
 /// imposes no deadline itself, so without this a ring that won't complete the GATT
 /// handshake hangs the caller forever.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Bluetooth SIG company identifier of Oura Health Oy, carried in the ring's
+/// manufacturer-specific advertising data.
+const OURA_COMPANY_ID: u16 = 0x02B2;
+
+/// Upper bound on the Windows bond step: opening the device, removing a bond
+/// without encryption, every pairing attempt, and cancellation cleanup. Pairing
+/// can wait on an OS prompt, so this is longer than [`CONNECT_TIMEOUT`].
+#[cfg(windows)]
+const WINDOWS_BOND_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// A ring discovered while scanning.
 #[derive(Clone, Debug)]
@@ -47,11 +58,38 @@ async fn first_adapter() -> Result<btleplug::platform::Adapter> {
         .ok_or_else(|| Error::Ble("no Bluetooth adapter found".into()))
 }
 
+/// The OS scan filter. Rings can list the Oura service as an incomplete 128-bit
+/// UUID list, and a WinRT service filter can hide those advertisements, so Windows
+/// scans unfiltered and relies on [`is_oura_ring`] instead.
+fn scan_filter() -> ScanFilter {
+    if cfg!(windows) {
+        ScanFilter::default()
+    } else {
+        ScanFilter {
+            services: vec![protocol::OURA_SERVICE],
+        }
+    }
+}
+
+/// Whether an advertisement comes from an Oura ring whose name matches `--name`.
+///
+/// The advertisement must carry the Oura service UUID or Oura's company ID in
+/// its manufacturer data. WinRT often drops the service UUID, so the company ID
+/// is what identifies the ring there. A name is never enough on its own: on
+/// Windows, connecting starts an OS bond before GATT can confirm the device, so
+/// an unrelated device named "...oura..." must not be selected.
+fn is_oura_ring(props: &PeripheralProperties, name_contains: &str) -> bool {
+    let oura = props.services.contains(&protocol::OURA_SERVICE)
+        || props.manufacturer_data.contains_key(&OURA_COMPANY_ID);
+    oura && name_matches(props.local_name.as_deref().unwrap_or(""), name_contains)
+}
+
 /// Whether an advertised local name matches `--name`.
 ///
-/// Scan already requires the Oura service UUID, so the name is only a secondary
-/// filter. A bonded ring often stops advertising a local name; treating that as
-/// a miss (`"".contains("oura") == false`) is https://github.com/Th0rgal/open_oura/issues/13.
+/// Scan already requires Oura evidence (see [`is_oura_ring`]), so the name is
+/// only a secondary filter. A bonded ring often stops advertising a local name;
+/// treating that as a miss (`"".contains("oura") == false`) is
+/// https://github.com/Th0rgal/open_oura/issues/13.
 /// Empty names therefore pass the default `"Oura"` needle. A more specific needle
 /// still requires a name, so `--name "Ring 5"` does not pick every unnamed device.
 pub fn name_matches(advertised: &str, needle: &str) -> bool {
@@ -65,15 +103,11 @@ pub fn name_matches(advertised: &str, needle: &str) -> bool {
     advertised.to_lowercase().contains(&needle)
 }
 
-/// Scan for Oura rings advertising the service, filtered by case-insensitive name
+/// Scan for Oura rings (see [`is_oura_ring`]), filtered by case-insensitive name
 /// substring. Returns candidates sorted by signal strength (strongest first).
 pub async fn scan(name_contains: &str, timeout: Duration) -> Result<Vec<Discovered>> {
     let adapter = first_adapter().await?;
-    adapter
-        .start_scan(ScanFilter {
-            services: vec![protocol::OURA_SERVICE],
-        })
-        .await?;
+    adapter.start_scan(scan_filter()).await?;
 
     let deadline = Instant::now() + timeout;
     let mut found: Vec<Discovered> = Vec::new();
@@ -83,13 +117,10 @@ pub async fn scan(name_contains: &str, timeout: Duration) -> Result<Vec<Discover
             let Some(props) = p.properties().await? else {
                 continue;
             };
-            if !props.services.contains(&protocol::OURA_SERVICE) {
+            if !is_oura_ring(&props, name_contains) {
                 continue;
             }
             let name = props.local_name.unwrap_or_default();
-            if !name_matches(&name, name_contains) {
-                continue;
-            }
             let id = p.id().to_string();
             let entry = Discovered {
                 id: id.clone(),
@@ -121,11 +152,7 @@ impl BleTransport {
         scan_timeout: Duration,
     ) -> Result<Self> {
         let adapter = first_adapter().await?;
-        adapter
-            .start_scan(ScanFilter {
-                services: vec![protocol::OURA_SERVICE],
-            })
-            .await?;
+        adapter.start_scan(scan_filter()).await?;
 
         let deadline = Instant::now() + scan_timeout;
         let mut chosen: Option<(Peripheral, i16)> = None;
@@ -135,11 +162,7 @@ impl BleTransport {
                 let Some(props) = p.properties().await? else {
                     continue;
                 };
-                if !props.services.contains(&protocol::OURA_SERVICE) {
-                    continue;
-                }
-                let name = props.local_name.unwrap_or_default();
-                if !name_matches(&name, name_contains) {
+                if !is_oura_ring(&props, name_contains) {
                     continue;
                 }
                 if let Some(addr) = address {
@@ -161,6 +184,22 @@ impl BleTransport {
         let _ = adapter.stop_scan().await;
 
         let (peripheral, _) = chosen.ok_or(Error::DeviceNotFound)?;
+
+        // A factory-reset ring rejects GATT access until the link is encrypted, and
+        // Windows does not bond on its own. Bond first, within a deadline, so a
+        // stalled OS ceremony cannot hang the connect.
+        #[cfg(windows)]
+        tokio::time::timeout(
+            WINDOWS_BOND_TIMEOUT,
+            crate::windows_bond::ensure_bond(&peripheral.id().to_string()),
+        )
+        .await
+        .map_err(|_| {
+            Error::Ble(format!(
+                "windows bond: no encrypted bond within {WINDOWS_BOND_TIMEOUT:?}; approve any \
+                 Windows pairing prompt and check that no phone is connected to the ring"
+            ))
+        })??;
 
         // CoreBluetooth's connect (and, on some stacks, service discovery) has no
         // deadline of its own: a ring that advertises but won't complete the GATT
@@ -236,7 +275,50 @@ impl Transport for BleTransport {
 
 #[cfg(test)]
 mod tests {
-    use super::name_matches;
+    use super::*;
+
+    fn advertisement(
+        name: Option<&str>,
+        service: bool,
+        company_id: Option<u16>,
+    ) -> PeripheralProperties {
+        let mut props = PeripheralProperties {
+            local_name: name.map(str::to_owned),
+            ..PeripheralProperties::default()
+        };
+        if service {
+            props.services.push(protocol::OURA_SERVICE);
+        }
+        if let Some(id) = company_id {
+            props.manufacturer_data.insert(id, vec![0x04, 0x40]);
+        }
+        props
+    }
+
+    #[test]
+    fn service_uuid_or_company_id_identifies_a_ring() {
+        let by_service = advertisement(Some("Oura Ring 4"), true, None);
+        let by_company = advertisement(None, false, Some(OURA_COMPANY_ID));
+        assert!(is_oura_ring(&by_service, "Oura"));
+        assert!(is_oura_ring(&by_company, "Oura"));
+        assert!(is_oura_ring(&by_company, ""));
+    }
+
+    #[test]
+    fn name_alone_never_identifies_a_ring() {
+        let named = advertisement(Some("Oura Ring Gen3"), false, None);
+        let other_company = advertisement(Some("Oura Ring Gen3"), false, Some(0x004C));
+        assert!(!is_oura_ring(&named, "Oura"));
+        assert!(!is_oura_ring(&other_company, ""));
+    }
+
+    #[test]
+    fn specific_needle_rejects_an_unnamed_ring() {
+        let by_service = advertisement(None, true, None);
+        let by_company = advertisement(None, false, Some(OURA_COMPANY_ID));
+        assert!(!is_oura_ring(&by_service, "Ring 4"));
+        assert!(!is_oura_ring(&by_company, "Ring 5"));
+    }
 
     #[test]
     fn default_needle_accepts_unnamed_bonded_ring() {

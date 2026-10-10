@@ -11,6 +11,9 @@ use oura_link::ble::{self, BleTransport};
 use oura_link::OuraClient;
 use oura_store::storage::Store;
 
+#[cfg(windows)]
+mod windows_key_file;
+
 /// Read sleep/HR/activity signals straight from an Oura ring (Ring 3/4/5).
 #[derive(Parser, Debug)]
 #[command(name = "oura", version, about)]
@@ -196,7 +199,12 @@ fn save_key(path: &Path, key: &[u8; 16]) -> Result<()> {
         // mode() above only applies on create; tighten an already-existing file too.
         f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        windows_key_file::write_user_only(path, contents.as_bytes())
+            .with_context(|| format!("writing key file {}", path.display()))?;
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         std::fs::write(path, contents)
             .with_context(|| format!("writing key file {}", path.display()))?;
