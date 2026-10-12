@@ -570,7 +570,9 @@ impl<T: Transport> OuraClient<T> {
                 }
                 return Err(Error::Protocol(format!(
                     "ring reports {bytes_left} bytes of events left but the batch \
-                     contained none — stopping instead of looping (cursor {start})"
+                     contained none (rejected={}, replayed={}) — stopping instead \
+                     of looping (cursor {start})",
+                    batch.rejected_events, batch.replayed_events
                 )));
             }
             // `bytes_left == 0` alone is not proof the ring is drained: a Gen 3
