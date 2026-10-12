@@ -37,15 +37,12 @@ impl ValidatedHistoryBatch {
 // with a near-u32::MAX timestamp and force every later sync to replay from zero.
 const MAX_CURSOR_ADVANCE_DS: u32 = 180 * 24 * 60 * 60 * 10;
 
-fn plausible_timestamp(batch_start: u32, timestamp: u32) -> bool {
-    timestamp <= batch_start.saturating_add(MAX_CURSOR_ADVANCE_DS)
-}
-
 pub(crate) fn validate_batch(batch: HistoryBatch, batch_start: u32) -> ValidatedHistoryBatch {
     let bytes_left = batch.bytes_left;
     let mut max_timestamp = batch_start;
     let mut rejected_events = 0;
     let mut replayed_events = 0;
+    let mut anchor: Option<u32> = (batch_start != 0).then_some(batch_start);
     let events = batch
         .events
         .into_iter()
@@ -55,13 +52,18 @@ pub(crate) fn validate_batch(batch: HistoryBatch, batch_start: u32) -> Validated
             // as progress bumped the cursor by 1 ds per pass and never drained.
             if event.timestamp < batch_start {
                 replayed_events += 1;
-                false
-            } else if plausible_timestamp(batch_start, event.timestamp) {
-                max_timestamp = max_timestamp.max(event.timestamp);
-                true
-            } else {
-                rejected_events += 1;
-                false
+                return false;
+            }
+            match anchor {
+                Some(a) if event.timestamp > a.saturating_add(MAX_CURSOR_ADVANCE_DS) => {
+                    rejected_events += 1;
+                    false
+                }
+                _ => {
+                    anchor = Some(anchor.map_or(event.timestamp, |a| a.max(event.timestamp)));
+                    max_timestamp = max_timestamp.max(event.timestamp);
+                    true
+                }
             }
         })
         .collect::<Vec<_>>();
