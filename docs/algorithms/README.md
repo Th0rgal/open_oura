@@ -25,7 +25,7 @@ each is ported; this index is the status table.
 | --- | --- | --- | --- |
 | HRV (RMSSD) | `hrv @ 0x1e7984` (`sqrt(mean(diff(ibi)^2))`) | `oura-analysis::hrv` | ✅ ported + tested; validated on overnight IBI (RMSSD ~101 ms) |
 | SpO2 (simple) | `spo2_simple_calculate @ 0x22ad50` (`a+b·R+c·R²`, clamp 0–120) | `oura-analysis::spo2` | ✅ ported + tested; needs per-device {a,b,c} |
-| Personal baseline | `baseline_update_lt_mean_and_dev @ 0x1dad04` (asymmetric EMA, anneals by age; int16 ×8) | `oura-analysis::baseline` | ✅ ported + tested (EMA; per-metric clamp tables unresolved) |
+| Personal baseline | `baseline_update_lt_mean_and_dev @ 0xe1aa8` (Android 7.26.0; int16 ×8, outlier policy, configured per-metric limits) | `oura-analysis::baseline` | ✅ current configured update + original unclamped EMA; [scope and generated references](baselines.md) |
 | Nightly temperature + baseline | `nightly_temperature_calculate @ 0x203520`, `baseline_calculate_temperature_baseline @ 0x1db4d0` (7-sample median → 30-min window) | `oura-analysis::temperature` | ✅ ported + tested |
 | Breathing rate | `breathing_rate_calculate_averages @ 0x27342c` (IBI→RR @4 Hz→12-tap IIR) | - | ◐ IIR coefficients recovered; 4 Hz resample kernel unresolved - deferred |
 | Sleep durations / efficiency / latency | `calculate_sleep_score_numerical @ 0x1f4444` (decodes 30 s nibble stages) | `oura-analysis::sleep` | ✅ decode+summary ported (aggregation reconstructed) |
