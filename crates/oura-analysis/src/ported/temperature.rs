@@ -1,8 +1,8 @@
 //! Nightly skin temperature + deviation. Ported from
-//! `nightly_temperature_calculate @ 0x203520`: a 7-sample sliding median, then
-//! 30-sample windows; each window contributes its max when its range < 2.50 °C,
-//! and the nightly value is the **minimum of those window maxima** (needs >= 4
-//! valid windows). Units: ring temperature is i16 centi-°C (value/100 = °C).
+//! `nightly_temperature_calculate @ 0x10c9e4` (Android 7.26.0): a 7-sample sliding
+//! median, then 30-sample windows; each window contributes its max when its
+//! range < 2.50 °C. The nightly value is the **second-highest window maximum,
+//! counting ties** (needs >= 4 valid windows). Units: i16 centi-°C (value/100 = °C).
 //! See `docs/algorithms/temperature.md`.
 
 const WINDOW: usize = 30; // samples (0x1e)
@@ -42,7 +42,18 @@ pub fn nightly_temperature(samples: &[u16]) -> Option<i16> {
     if maxima.len() < MIN_WINDOWS {
         return None;
     }
-    maxima.into_iter().min().map(|v| v as i16)
+    // Equal maxima occupy separate ranks: [3500, 3520, 3540, 3540] -> 3540.
+    let mut highest = 0;
+    let mut second_highest = 0;
+    for value in maxima {
+        if value >= highest {
+            second_highest = highest;
+            highest = value;
+        } else if value > second_highest {
+            second_highest = value;
+        }
+    }
+    Some(second_highest as i16)
 }
 
 /// Temperature deviation (centi-°C) = nightly temperature − personal baseline mean.
