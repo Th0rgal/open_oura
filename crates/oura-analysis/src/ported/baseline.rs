@@ -10,6 +10,39 @@
 /// i16 "no data" sentinel used throughout ecore baselines.
 pub const INVALID: i32 = 0x7eb6;
 
+/// Saved-record selection before a long-term baseline update.
+pub mod history;
+
+/// Initial sleep-duration mean, in minutes multiplied by eight.
+///
+/// Android 7.26.0 (260930084), `baseline_get_sleep_time_lt_mean_times_8 @ 0xe2340`.
+/// Feature 27 selects the newer age curve; the caller supplies the actual
+/// feature setting. The native operation rounds minutes *before* scaling.
+/// This does not initialize the other eight baseline items or a recovery state.
+pub fn sleep_time_initial_mean_x8(age: u32, feature_27: bool) -> i32 {
+    let minutes = if feature_27 {
+        (age as f64).mul_add(-0.87, 468.0)
+    } else {
+        (age as f64).mul_add(-1.77, 486.0) + 20.0
+    };
+    (minutes.round() as i32).wrapping_shl(3)
+}
+
+/// Sleep-balance mean's lower limit, in minutes multiplied by eight.
+///
+/// Android 7.26.0, `baseline_get_sleep_time_acceptable_min_times_8 @ 0xe23b0`.
+/// Unlike the initial mean, this truncates *after* scaling. The native setter
+/// stores the result as an `i16`; narrow explicitly when constructing that
+/// table. This is the sleep-balance item (index 1), not the previous-night item.
+pub fn sleep_time_acceptable_min_x8(age: u32, feature_27: bool) -> i32 {
+    let minutes = if feature_27 {
+        (age as f64).mul_add(-0.87, 408.0)
+    } else {
+        (age as f64).mul_add(-1.77, 486.0)
+    };
+    (minutes * 8.0) as i32
+}
+
 /// A rolling personal baseline: `mean` and abs-`deviation`, both ×8 fixed-point.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Baseline {
@@ -104,5 +137,28 @@ mod tests {
         }
         // settles within the fixed-point deadband (~2 units) of the target
         assert!((b.mean() - 100.0).abs() < 2.5, "{}", b.mean());
+    }
+
+    #[test]
+    fn current_android_age_curves_round_at_different_steps() {
+        // Generated controls recorded from Android 7.26.0, both feature states.
+        // Columns: age, feature 27, initial mean x8, acceptable minimum x8.
+        for (age, feature, mean, minimum) in [
+            (0, false, 4048, 3888),
+            (18, false, 3792, 3633),
+            (30, false, 3624, 3463),
+            (65, false, 3128, 2967),
+            (255, false, 440, 277),
+            (0, true, 3744, 3264),
+            (18, true, 3616, 3138),
+            (30, true, 3536, 3055),
+            (65, true, 3288, 2811),
+            (255, true, 1968, 1489),
+            (1_206_797_259, false, 91_624_048, i32::MIN),
+            (1_499_916_368, true, -1_849_479_584, i32::MIN),
+        ] {
+            assert_eq!(sleep_time_initial_mean_x8(age, feature), mean);
+            assert_eq!(sleep_time_acceptable_min_x8(age, feature), minimum);
+        }
     }
 }

@@ -58,6 +58,10 @@ bit-for-bit.
 
 ## Persisted state an independent client must carry across days
 
+[Baseline inputs](baseline-inputs.md) documents the current Android age/feature
+initialization helpers and saved-history selector. These prepare the limits and
+records for an update; they do not replace the numeric update or saved state.
+
 ecore is stateless-per-call; the host re-injects state each night via typed
 objects: recovery state (+prev), temperature baseline, previous sleep periods,
 cycle-tracking state, and the SpO2 main storage (the only native binary serializer,
