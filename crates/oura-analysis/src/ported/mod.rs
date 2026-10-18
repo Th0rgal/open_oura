@@ -10,6 +10,7 @@
 pub mod baseline;
 pub mod hrv;
 pub mod metabolic;
+pub mod readiness_history;
 pub mod sleep;
 pub mod sleep_debt;
 pub mod spo2;

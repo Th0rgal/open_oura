@@ -63,6 +63,10 @@ objects: recovery state (+prev), temperature baseline, previous sleep periods,
 cycle-tracking state, and the SpO2 main storage (the only native binary serializer,
 versioned TLV). Mirror these in `oura-store` so baselines accumulate.
 
+[Readiness history inputs](readiness-history-inputs.md) describes the recovered
+90-sleep/15-activity source-list conversion into temperature, sleep, HRV, distance
+and wear arrays. It consumes complete materialized caller-order history.
+
 ## Score combiners: structure recovered, exact tables blocked → use calibration
 
 The three 0–100 scores were chased to the combiner level: the sleep mapper
