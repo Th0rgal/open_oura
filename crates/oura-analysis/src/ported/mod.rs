@@ -8,9 +8,12 @@
 //! is flagged in the module docs and in `docs/algorithms/`.
 
 pub mod baseline;
+pub mod ibi_correction;
 pub mod hrv;
 pub mod metabolic;
 pub mod sleep;
+pub mod sleep_classifier;
 pub mod sleep_debt;
+pub mod sleepstaging;
 pub mod spo2;
 pub mod temperature;
