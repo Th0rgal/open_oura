@@ -61,6 +61,27 @@ CREATE INDEX IF NOT EXISTS idx_events_tag_time ON events(tag, ring_timestamp);
 -- which otherwise scans every row of the table on each analysis pass.
 CREATE INDEX IF NOT EXISTS idx_events_decoded_tag ON events(tag) WHERE decoded_json IS NOT NULL;
 
+-- Wall-clock points taken by the phone at the end of a sync (newest drained ring
+-- timestamp paired with the host clock). Not ring data, so not in `events`.
+CREATE TABLE IF NOT EXISTS phone_anchors (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    serial         TEXT NOT NULL,
+    ring_timestamp INTEGER NOT NULL,
+    unix_time      INTEGER NOT NULL,
+    captured_unix  INTEGER NOT NULL,
+    UNIQUE(serial, ring_timestamp, unix_time)
+);
+-- The clock stream: ring events plus the phone anchors as `time_sync` rows with
+-- `"source":"phone"`. Readers that date events (`RingClock`) read this relation;
+-- anchor ids sort after every event id, so at equal `captured_unix` an anchor comes
+-- after the batch it closes.
+CREATE VIEW IF NOT EXISTS events_with_anchors AS
+SELECT id, serial, tag, name, ring_timestamp, body, decoded_json, captured_unix FROM events
+UNION ALL
+SELECT 4503599627370496 + id, serial, 66, 'time_sync', ring_timestamp, X'',
+       '{"unix_time":' || unix_time || ',"source":"phone"}', captured_unix
+FROM phone_anchors;
+
 CREATE TABLE IF NOT EXISTS readings (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     serial        TEXT NOT NULL,
@@ -112,6 +133,27 @@ pub fn decode_stored_event(
         return existing_decoded_json.map(ToOwned::to_owned);
     }
     None
+}
+
+/// The relation that holds the clock stream: `events_with_anchors` once the
+/// schema has the phone-anchor table, else `events` (databases never opened for
+/// writing by a current build, including read-only seeds).
+pub fn clock_events_relation(conn: &Connection) -> &'static str {
+    let has_view = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='view' AND name='events_with_anchors'",
+            [],
+            |_| Ok(true),
+        )
+        .optional()
+        .ok()
+        .flatten()
+        .unwrap_or(false);
+    if has_view {
+        "events_with_anchors"
+    } else {
+        "events"
+    }
 }
 
 /// A SQLite-backed store for ring data.
@@ -420,7 +462,9 @@ impl Store {
     }
 
     fn needs_decoder_migration(&self) -> Result<bool> {
-        if self.get_meta("redecode_cursor_id")?.is_some() {
+        if self.get_meta("redecode_cursor_id")?.is_some()
+            || self.get_meta("phone_anchors_migrated")?.is_none()
+        {
             return Ok(true);
         }
         Ok(self.decoder_version()? < DECODER_VERSION)
@@ -430,8 +474,55 @@ impl Store {
         if !self.needs_decoder_migration()? {
             return Ok(());
         }
-        self.redecode_batched(REDECODE_BATCH_SIZE)?;
+        self.migrate_phone_anchors()?;
+        if self.get_meta("redecode_cursor_id")?.is_some()
+            || self.decoder_version()? < DECODER_VERSION
+        {
+            self.redecode_batched(REDECODE_BATCH_SIZE)?;
+        }
         Ok(())
+    }
+
+    /// Record a phone-clock anchor: the newest drained ring timestamp (deciseconds)
+    /// paired with the host's unix time. Returns true if a row was added.
+    pub fn insert_phone_anchor(&self, serial: &str, ring_timestamp: u32, unix_time: u32) -> Result<bool> {
+        let changed = self.conn.execute(
+            "INSERT OR IGNORE INTO phone_anchors (serial, ring_timestamp, unix_time, captured_unix)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![serial, ring_timestamp as i64, unix_time as i64, now_unix()],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// One-time move of the synthetic phone anchors that earlier builds wrote into
+    /// `events` (tag `0x42`, body `<u32 LE unix>phone`) to `phone_anchors`. The ring
+    /// never sent them, so they must not be replayed or exported as ring events.
+    /// Runs in one transaction, is idempotent, and returns the number of rows moved.
+    pub fn migrate_phone_anchors(&self) -> Result<usize> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute_batch(SCHEMA)?;
+        let rows: Vec<(i64, String, i64, Vec<u8>, i64)> = {
+            let mut stmt = tx.prepare(
+                "SELECT id, serial, ring_timestamp, body, captured_unix FROM events
+                 WHERE tag = 66 AND LENGTH(body) = 9 AND SUBSTR(body, 5) = X'70686F6E65'",
+            )?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        };
+        for (id, serial, ring_timestamp, body, captured_unix) in &rows {
+            let unix = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
+            tx.execute(
+                "INSERT OR IGNORE INTO phone_anchors (serial, ring_timestamp, unix_time, captured_unix)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![serial, ring_timestamp, unix as i64, captured_unix],
+            )?;
+            tx.execute("DELETE FROM events WHERE id = ?1", params![id])?;
+        }
+        Self::set_meta(&tx, "phone_anchors_migrated", "1")?;
+        tx.commit()?;
+        Ok(rows.len())
     }
 
     /// Re-decode every stored event body with the current decoders in bounded
@@ -527,17 +618,19 @@ impl Store {
     }
 
     /// All decoded events as `(ring_timestamp_deciseconds, tag, decoded_json,
-    /// captured_unix)`, ordered by capture order. Also surfaces valid raw
+    /// captured_unix)`, ordered by capture order, with the phone anchors merged in as
+    /// `time_sync` rows (`"source":"phone"`). Also surfaces valid raw
     /// `ring_start` (`0x41`) reboot records even when `decoded_json` is NULL on an
     /// unmigrated read-only database so reboot boundaries are never hidden.
     pub fn decoded_events(&self) -> Result<Vec<(i64, u8, String, i64)>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT ring_timestamp, tag, decoded_json, captured_unix, \
                     CASE WHEN decoded_json IS NULL THEN body ELSE NULL END \
-             FROM events \
+             FROM {} \
              WHERE decoded_json IS NOT NULL OR (tag = 65 AND LENGTH(body) >= 14) \
              ORDER BY captured_unix, id",
-        )?;
+            clock_events_relation(&self.conn)
+        ))?;
         let rows = stmt
             .query_map([], |r| {
                 let ts = r.get::<_, i64>(0)?;
@@ -981,6 +1074,57 @@ mod tests {
             .unwrap();
         assert_eq!(row3_json, "{\"preserved\":true}");
         assert_eq!(store.event_totals().unwrap(), (5, 4));
+    }
+
+    #[test]
+    fn phone_anchors_stay_out_of_events_but_join_the_clock_stream() {
+        let store = Store::open_in_memory().unwrap();
+        let mut sync = sample_event();
+        sync.tag = 0x42;
+        sync.name = "time_sync";
+        sync.timestamp = 100;
+        sync.body = vec![1, 2, 3, 4, 0, 0, 0, 0, 0xf6];
+        sync.decoded = Some(serde_json::json!({ "unix_time": 0x04030201 }));
+        store.insert_event("S1", &sync).unwrap();
+        assert!(store.insert_phone_anchor("S1", 200, 1_789_056_420).unwrap());
+        assert!(!store.insert_phone_anchor("S1", 200, 1_789_056_420).unwrap());
+
+        assert_eq!(store.event_totals().unwrap(), (1, 1));
+        assert_eq!(store.event_counts("S1").unwrap(), vec![("time_sync".to_string(), 1)]);
+        let stream = store.decoded_events().unwrap();
+        assert_eq!(stream.len(), 2);
+        assert_eq!((stream[1].0, stream[1].1), (200, 0x42));
+        let anchor: serde_json::Value = serde_json::from_str(&stream[1].2).unwrap();
+        assert_eq!(anchor["unix_time"], 1_789_056_420);
+        assert_eq!(anchor["source"], "phone");
+        assert_eq!(clock_events_relation(&store.conn), "events_with_anchors");
+    }
+
+    #[test]
+    fn legacy_phone_rows_move_to_phone_anchors_once() {
+        let store = Store::open_in_memory().unwrap();
+        let mut phone_body = 1_789_056_420u32.to_le_bytes().to_vec();
+        phone_body.extend_from_slice(b"phone");
+        let ring_body = vec![9, 8, 7, 6, 0, 0, 0, 0, 0xf6];
+        for (ts, body, json) in [
+            (100, &ring_body, r#"{"unix_time":101058057}"#),
+            (200, &phone_body, r#"{"unix_time":1789056420,"source":"phone"}"#),
+        ] {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO events (serial, tag, name, ring_timestamp, body, decoded_json, captured_unix)
+                     VALUES ('S1', 66, 'time_sync', ?1, ?2, ?3, 1789056420)",
+                    params![ts, body, json],
+                )
+                .unwrap();
+        }
+        assert_eq!(store.migrate_phone_anchors().unwrap(), 1);
+        assert_eq!(store.migrate_phone_anchors().unwrap(), 0);
+        assert_eq!(store.event_totals().unwrap(), (1, 1));
+        let stream = store.decoded_events().unwrap();
+        assert_eq!(stream.iter().map(|e| e.0).collect::<Vec<_>>(), vec![100, 200]);
+        assert!(stream[1].2.contains("\"source\":\"phone\""));
     }
 
     fn hex_bytes(s: &str) -> Vec<u8> {

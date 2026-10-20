@@ -89,8 +89,11 @@ fn decode_body(tag: u8, body: &[u8]) -> Option<serde_json::Value> {
         0x80 => decode_green_ibi_quality(body),
         // ambient_event / eda: u16 LE samples, one per 5 min.
         0x59 => decode_u16_samples(body, "ambient"),
-        // ehr_acm_intensity_event: up to 7 u16 LE intensity values.
+        // ehr_acm_intensity_event: up to 7 u16 LE intensity values (a closing event
+        // of a workout can hold fewer than 7).
         0x74 => decode_u16_samples(body, "intensity"),
+        // ehr_trace_event: counter, trace type, then (freq1, freq2, 10x POV) triples.
+        0x73 => decode_ehr_trace(body),
         // activity_information: state byte + per-bin MET levels.
         0x50 => decode_activity_info(body),
         // spo2_event: one SpO2 % per sample (1 Hz).
@@ -137,7 +140,8 @@ fn decode_body(tag: u8, body: &[u8]) -> Option<serde_json::Value> {
         0x4c => decode_sleep_summary_2(body), // parse_api_sleep_summary_2 @ 0x3c76c8
         0x4f => decode_sleep_summary_3(body), // parse_api_sleep_summary_3 @ 0x3c78bc
         0x58 => decode_sleep_summary_4(body), // parse_api_sleep_summary_4 @ 0x3c7ad8
-        0x7e | 0x7f => decode_real_steps(body), // parse_api_real_steps_features_1/2 @ 0x3c03a4/0x3c0720
+        0x7e => decode_real_steps(body),
+        0x7f => decode_real_steps_part2(body),
         0x86 => decode_aohr(body),              // parse_api_aohr_event @ 0x3cd4f0
         0x84 => decode_ambient(body),           // parse_api_ambient_event @ 0x3cefb4
         0x87 => decode_atlas_metadata(body),    // parse_api_atlas_metadata @ 0x3c3c9c
@@ -547,33 +551,63 @@ fn decode_sleep_period_info(body: &[u8]) -> Option<serde_json::Value> {
     }))
 }
 
+/// Parsed `motion_event` (tag `0x47`); see [`parse_motion_event`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MotionEvent {
+    pub orientation: u8,
+    pub motion_seconds: u8,
+    pub avg_x: i32,
+    pub avg_y: i32,
+    pub avg_z: i32,
+    /// Bit 7 of byte 4; false if byte 4 is absent.
+    pub regularity: bool,
+    pub low_intensity: Option<u8>,
+    pub high_intensity: Option<u8>,
+}
+
 /// `motion_event` (tag `0x47`): a compact per-window motion summary. From the
 /// native `parse_api_motion_events`: `b0>>5` = orientation, `b0&0x1f` =
 /// motion-seconds, then three signed `i8` average-axis values scaled ×8, and
-/// optional low/high intensity nibbles. Field names are best-effort (axis order is
-/// inferred from the struct layout).
-fn decode_motion(body: &[u8]) -> Option<serde_json::Value> {
+/// optional low/high intensity bytes (bits 0 to 5; bit 6 set is a parse error). Byte 4 bit 7
+/// is `regularity`. Field names are best-effort (axis order is inferred from the struct layout).
+pub fn parse_motion_event(body: &[u8]) -> Option<MotionEvent> {
     if body.len() < 4 {
         return None;
     }
+    let intensity = |i: usize| match body.get(i) {
+        Some(b) if b & 0x40 != 0 => Err(()),
+        Some(b) => Ok(Some(b & 0x3f)),
+        None => Ok(None),
+    };
+    let low_intensity = intensity(4).ok()?;
+    let high_intensity = if body.len() >= 5 { intensity(5).ok()? } else { None };
+    Some(MotionEvent {
+        orientation: body[0] >> 5,
+        motion_seconds: body[0] & 0x1f,
+        avg_x: (body[1] as i8 as i32) * 8,
+        avg_y: (body[2] as i8 as i32) * 8,
+        avg_z: (body[3] as i8 as i32) * 8,
+        regularity: body.get(4).is_some_and(|b| b & 0x80 != 0),
+        low_intensity,
+        high_intensity,
+    })
+}
+
+fn decode_motion(body: &[u8]) -> Option<serde_json::Value> {
+    let e = parse_motion_event(body)?;
     let mut v = serde_json::json!({
-        "orientation": body[0] >> 5,
-        "motion_seconds": body[0] & 0x1f,
-        "avg_x": (body[1] as i8 as i32) * 8,
-        "avg_y": (body[2] as i8 as i32) * 8,
-        "avg_z": (body[3] as i8 as i32) * 8,
+        "orientation": e.orientation,
+        "motion_seconds": e.motion_seconds,
+        "avg_x": e.avg_x,
+        "avg_y": e.avg_y,
+        "avg_z": e.avg_z,
+        "regularity": e.regularity as u8,
     });
-    if body.len() >= 5 {
-        if body[4] & 0x40 != 0 {
-            return None;
-        }
-        v["low_intensity"] = (body[4] & 0x3f).into();
+    if let Some(low) = e.low_intensity {
+        v["low_intensity"] = low.into();
     }
-    if body.len() >= 6 {
-        if body[5] & 0x40 != 0 {
-            return None;
-        }
-        v["high_intensity"] = (body[5] & 0x3f).into();
+    if let Some(high) = e.high_intensity {
+        v["high_intensity"] = high.into();
     }
     Some(v)
 }
@@ -638,10 +672,38 @@ fn decode_feature_session(body: &[u8]) -> Option<serde_json::Value> {
         "feature_id": body[0],
         "session_status": body[1],
     });
+    if let Some(name) = session_status_name(body[1]) {
+        v["status_name"] = serde_json::json!(name);
+    }
     if body.len() >= 4 {
         v["value"] = serde_json::json!(u16::from_le_bytes([body[2], body[3]]));
     }
+    if body.len() > 2 {
+        v["payload"] = serde_json::json!(hex::encode(&body[2..]));
+    }
     Some(v)
+}
+
+/// Name of a `feature_session` status. A manual workout writes 0 then 2,
+/// REAL_STEPS writes 1 when enabled, daytime HR pairs 1 with 3, and SpO2 and resting HR end
+/// with 8, 9 and 11. The other names are not confirmed.
+pub fn session_status_name(status: u8) -> Option<&'static str> {
+    Some(match status {
+        0 => "start_by_user",
+        1 => "start_by_system",
+        2 => "end_user_request",
+        3 => "end_normal_period",
+        4 => "end_too_much_movement",
+        5 => "end_low_battery",
+        6 => "end_firmware_update",
+        7 => "end_unexpected_error",
+        8 => "end_ring_charging",
+        9 => "end_resting_hr_detection",
+        10 => "end_no_movement",
+        11 => "end_ring_not_in_finger",
+        12 => "start_by_ring_awhr_feature",
+        _ => return None,
+    })
 }
 
 /// Identify a BLE/radio-telemetry or diagnostic event whose payload layout is
@@ -738,8 +800,8 @@ fn decode_sleep_summary_4(body: &[u8]) -> Option<serde_json::Value> {
 /// (`EventParser::parse_api_real_steps_features_1` in libringeventparser.so). A full
 /// gait window needs BOTH events combined into 27 quantized columns (feature_2's last
 /// byte supplies the 9th/carry bits of the `<<1` fields), then run through
-/// `steps_motion_decoder`. That pairing + decode lives in `tools/run_activity_model.py`
-/// (`unpack27`); here we just surface part-1's raw fields.
+/// `steps_motion_decoder`. The pairing is [`pair_real_steps`] / [`unpack_real_steps`];
+/// this per-event decoder surfaces part-1's raw fields only.
 fn decode_real_steps(body: &[u8]) -> Option<serde_json::Value> {
     if body.len() != 14 {
         return None;
@@ -762,6 +824,148 @@ fn decode_real_steps(body: &[u8]) -> Option<serde_json::Value> {
         p[13] as u16,
     ];
     Some(serde_json::json!({ "fields": fields, "_status": "part1_raw" }))
+}
+
+/// Part 2 of a gait record (tag `0x7f`): the second 14-byte half of a gait record.
+/// Fields are the raw values before the carry bits of `carry_byte` (`body[13]`) are
+/// merged; [`unpack_real_steps`] does the merge and orders all 27 columns. Every merged
+/// column stays inside its bit width, and the part-2 timestamp is the part-1 timestamp plus 1.
+fn decode_real_steps_part2(body: &[u8]) -> Option<serde_json::Value> {
+    if body.len() != 14 {
+        return None;
+    }
+    let p = body;
+    let fields = [
+        p[0] as u16,
+        p[1] as u16,
+        ((p[5] >> 7) as u16) | ((p[2] as u16) << 1),
+        (p[3] as u16) << 1,
+        (p[4] as u16) << 1,
+        (p[5] & 0x7f) as u16,
+        p[6] as u16,
+        p[7] as u16,
+        p[8] as u16,
+        p[9] as u16,
+        (p[10] as u16) << 2,
+        p[11] as u16,
+        p[12] as u16,
+    ];
+    Some(serde_json::json!({ "fields": fields, "carry_byte": p[13], "_status": "part2_raw" }))
+}
+
+/// Number of quantized columns in one gait record (`steps_motion_decoder` input).
+pub const REAL_STEPS_COLUMNS: usize = 27;
+
+/// One gait record: the 27 columns built from a `0x7e` event and the `0x7f` event
+/// stamped one decisecond later.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RealStepRecord {
+    /// Timestamp (deciseconds) of the `0x7e` event.
+    pub timestamp: u32,
+    pub columns: [u16; REAL_STEPS_COLUMNS],
+}
+
+/// Combine the 14-byte bodies of `0x7e` (`part1`) and `0x7f` (`part2`) into the 27
+/// columns `steps_motion_decoder` takes: three globals, then three blocks
+/// of eight. `part2[13]` carries the ninth bit of six `<<1` fields and the low two
+/// bits of the first global. Same arithmetic as `unpack27` in
+/// `tools/run_activity_model.py`.
+pub fn unpack_real_steps(part1: &[u8], part2: &[u8]) -> Option<[u16; REAL_STEPS_COLUMNS]> {
+    if part1.len() != 14 || part2.len() != 14 {
+        return None;
+    }
+    let (p1, p2) = (part1, part2);
+    let c = p2[13] as u16;
+    let w = |x: u8| x as u16;
+    Some([
+        (w(p2[10]) << 2) | (c & 0x3),
+        w(p2[11]),
+        w(p2[12]),
+        (w(p1[0]) << 1) | w(p1[3] >> 7),
+        (w(p1[1]) << 1) | ((c >> 7) & 1),
+        (w(p1[2]) << 1) | ((c >> 6) & 1),
+        w(p1[3] & 0x7f),
+        w(p1[4]),
+        w(p1[5]),
+        w(p1[6]),
+        w(p1[7]),
+        (w(p1[8]) << 1) | w(p1[11] >> 7),
+        (w(p1[9]) << 1) | ((c >> 5) & 1),
+        (w(p1[10]) << 1) | ((c >> 4) & 1),
+        w(p1[11] & 0x7f),
+        w(p1[12]),
+        w(p1[13]),
+        w(p2[0]),
+        w(p2[1]),
+        (w(p2[2]) << 1) | w(p2[5] >> 7),
+        (w(p2[3]) << 1) | ((c >> 3) & 1),
+        (w(p2[4]) << 1) | ((c >> 2) & 1),
+        w(p2[5] & 0x7f),
+        w(p2[6]),
+        w(p2[7]),
+        w(p2[8]),
+        w(p2[9]),
+    ])
+}
+
+/// Pair `(tag, timestamp, body)` triples of `0x7e` and `0x7f` events into gait
+/// records, in `0x7e` order. A `0x7e` without a `0x7f` at `timestamp + 1` is dropped.
+pub fn pair_real_steps<'a, I>(events: I) -> Vec<RealStepRecord>
+where
+    I: IntoIterator<Item = (u8, u32, &'a [u8])>,
+{
+    let mut first = Vec::new();
+    let mut second = std::collections::HashMap::new();
+    for (tag, ts, body) in events {
+        match tag {
+            0x7e => first.push((ts, body)),
+            0x7f => {
+                second.insert(ts, body);
+            }
+            _ => {}
+        }
+    }
+    first
+        .into_iter()
+        .filter_map(|(ts, p1)| {
+            let p2 = second.get(&ts.wrapping_add(1))?;
+            Some(RealStepRecord {
+                timestamp: ts,
+                columns: unpack_real_steps(p1, p2)?,
+            })
+        })
+        .collect()
+}
+
+/// `ehr_trace_event` (tag `0x73`), written during exercise heart rate (feature 0x03).
+/// Layout (inferred):
+/// `counter` (u8, +1 per event), `trace_type` (u8,
+/// 0 or 1), then `(freq1, freq2, pov_x10)` byte triples, as many as fit (4 in a
+/// 14-byte event, 1 in a 5-byte event). Events come in groups of four every 12 s:
+/// two of type 0 then two of type 1, so each trace holds five triples split 4 + 1,
+/// sorted by decreasing `pov_x10`. Type 0 is taken to be ACM (motion
+/// spectrum) and type 1 PPG. Frequency units are not confirmed; the values (50 to
+/// 195) fit beats or cycles per minute.
+fn decode_ehr_trace(body: &[u8]) -> Option<serde_json::Value> {
+    if body.len() < 5 || !(body.len() - 2).is_multiple_of(3) {
+        return None;
+    }
+    let peaks: Vec<serde_json::Value> = body[2..]
+        .chunks_exact(3)
+        .map(|t| serde_json::json!({ "freq1": t[0], "freq2": t[1], "pov_x10": t[2] }))
+        .collect();
+    let trace = match body[1] {
+        0 => "acm",
+        1 => "ppg",
+        _ => "unknown",
+    };
+    Some(serde_json::json!({
+        "counter": body[0],
+        "trace_type": body[1],
+        "trace": trace,
+        "peaks": peaks,
+        "_status": "inferred",
+    }))
 }
 
 /// `aohr_event` (tag `0x86`): always-on HR. Header flag, a base offset, then a
@@ -1181,12 +1385,119 @@ mod tests {
     }
 
     #[test]
+    fn decodes_feature_session_workout_and_steps() {
+        // REAL_STEPS start by system, manual workout start by user and end by user
+        // request (feature 3 carries 5 payload bytes).
+        let v = decode_feature_session(&hex::decode("0B0100").unwrap()).unwrap();
+        assert_eq!(v["feature_id"], 11);
+        assert_eq!(v["status_name"], "start_by_system");
+        assert_eq!(v["payload"], "00");
+        assert!(v.get("value").is_none());
+        let v = decode_feature_session(&hex::decode("03000300000000").unwrap()).unwrap();
+        assert_eq!(v["session_status"], 0);
+        assert_eq!(v["status_name"], "start_by_user");
+        assert_eq!(v["value"], 3);
+        let v = decode_feature_session(&hex::decode("03020300000000").unwrap()).unwrap();
+        assert_eq!(v["status_name"], "end_user_request");
+        assert_eq!(session_status_name(99), None);
+    }
+
+    #[test]
+    fn unpacks_real_steps_pair() {
+        // Record pair, 0x7e then 0x7f one tick later (block 3 has zero fields, as when
+        // no step is detected).
+        let p1 = hex::decode("644B5A9E3C142D4669507D8C2133").unwrap();
+        let p2 = hex::decode("1219963246B70800406396285A56").unwrap();
+        let cols = unpack_real_steps(&p1, &p2).unwrap();
+        assert_eq!(
+            cols,
+            [
+                602, 40, 90, 201, 150, 181, 30, 60, 20, 45, 70, 211, 160, 251, 12, 33, 51, 18,
+                25, 301, 100, 141, 55, 8, 0, 64, 99
+            ]
+        );
+        // block 1 of another record has two zero fields
+        let p1 = hex::decode("5F00002F4200A348662673950528").unwrap();
+        let p2 = hex::decode("090E82009B1103587806C30C2221").unwrap();
+        let cols = unpack_real_steps(&p1, &p2).unwrap();
+        assert_eq!(&cols[3..11], &[190, 0, 0, 47, 66, 0, 163, 72]);
+        assert_eq!(cols[0], 781);
+        assert!(unpack_real_steps(&p1[..13], &p2).is_none());
+    }
+
+    #[test]
+    fn pairs_real_steps_by_timestamp() {
+        let p1 = hex::decode("644B5A9E3C142D4669507D8C2133").unwrap();
+        let p2 = hex::decode("1219963246B70800406396285A56").unwrap();
+        let lone = hex::decode("B100001044006A3CB0D12D9C4B41").unwrap();
+        let recs = pair_real_steps([
+            (0x7e, 100u32, &p1[..]),
+            (0x7f, 101, &p2[..]),
+            (0x7e, 400, &lone[..]),
+        ]);
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].timestamp, 100);
+        assert_eq!(recs[0].columns[0], 602);
+    }
+
+    #[test]
+    fn real_steps_part2_fields() {
+        let p2 = hex::decode("1219963246B70800406396285A56").unwrap();
+        let v = decode_real_steps_part2(&p2).unwrap();
+        assert_eq!(v["carry_byte"], 0x56);
+        assert_eq!(v["fields"].as_array().unwrap().len(), 13);
+        assert_eq!(v["fields"][10], 600);
+        assert!(decode_real_steps_part2(&p2[..13]).is_none());
+    }
+
+    #[test]
+    fn decodes_ehr_trace_group() {
+        // One 12 s group: ACM 4 + 1 triples, then PPG 4 + 1 triples.
+        let v = decode_ehr_trace(&hex::decode("0000585805464604343403646E02").unwrap()).unwrap();
+        assert_eq!(v["counter"], 0);
+        assert_eq!(v["trace"], "acm");
+        assert_eq!(v["peaks"].as_array().unwrap().len(), 4);
+        assert_eq!(
+            v["peaks"][0],
+            serde_json::json!({"freq1": 88, "freq2": 88, "pov_x10": 5})
+        );
+        let v = decode_ehr_trace(&hex::decode("0100A0A502").unwrap()).unwrap();
+        assert_eq!(v["counter"], 1);
+        assert_eq!(
+            v["peaks"],
+            serde_json::json!([{"freq1": 160, "freq2": 165, "pov_x10": 2}])
+        );
+        let v = decode_ehr_trace(&hex::decode("02013C42054B5004787D03505C01").unwrap()).unwrap();
+        assert_eq!(v["trace"], "ppg");
+        assert_eq!(
+            v["peaks"][3],
+            serde_json::json!({"freq1": 80, "freq2": 92, "pov_x10": 1})
+        );
+        assert!(decode_ehr_trace(&[0, 0, 1, 2]).is_none());
+        // routed through the public entry point
+        assert!(decode_event_body(0x73, &hex::decode("0301708002").unwrap()).is_some());
+    }
+
+    #[test]
+    fn decodes_ehr_acm_intensity() {
+        // A full event (7 u16 LE values) and a closing partial one.
+        let v =
+            decode_event_body(0x74, &hex::decode("0C000F0013001A001F0028002C00").unwrap()).unwrap();
+        assert_eq!(
+            v["intensity"],
+            serde_json::json!([12, 15, 19, 26, 31, 40, 44])
+        );
+        let v = decode_event_body(0x74, &hex::decode("3C00340037003D00").unwrap()).unwrap();
+        assert_eq!(v["intensity"], serde_json::json!([60, 52, 55, 61]));
+    }
+
+    #[test]
     fn decodes_motion_period() {
         // captured 0x6b body (14 B): header 0x30 -> type 0, last byte holds 3 levels
         let body = hex::decode("30abefaa596ea89669197afffffb").unwrap();
         let v = decode_motion_period(&body).unwrap();
         assert_eq!(v["period_type"], 0);
-        // 12 full bytes x4 + final byte x3 = 51 two-bit levels
+        // 12 full bytes at 4 levels each + final byte at 3 levels = 51 two-bit levels
         assert_eq!(v["motion_levels"].as_array().unwrap().len(), 51);
     }
 

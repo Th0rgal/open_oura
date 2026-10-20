@@ -10,5 +10,5 @@ pub mod error;
 mod history;
 pub mod transport;
 
-pub use client::OuraClient;
+pub use client::{CaptureFeature, ExerciseStart, OuraClient};
 pub use error::{Error, Result};

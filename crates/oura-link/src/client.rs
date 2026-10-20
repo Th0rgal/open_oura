@@ -119,6 +119,22 @@ pub struct FeatureStatus {
     pub subscription: u8,
 }
 
+/// One capture feature with the mode the ring reports (`None` when it did not answer).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CaptureFeature {
+    pub id: u8,
+    pub name: &'static str,
+    pub mode: Option<u8>,
+}
+
+/// What [`OuraClient::exercise_start`] found and did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExerciseStart {
+    pub previous_mode: Option<u8>,
+    pub mode_after: Option<u8>,
+    pub parameter_result: u8,
+}
+
 impl FeatureStatus {
     fn parse(p: &Packet) -> Option<FeatureStatus> {
         if p.ext_tag() != Some(0x21) || p.payload.len() < 6 {
@@ -357,26 +373,27 @@ impl<T: Transport> OuraClient<T> {
         }
     }
 
-    /// Align the ring clock to host UTC.
+    /// Align the ring clock to host UTC, with timezone 0.
     pub async fn sync_time(&self) -> Result<()> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        self.request(&protocol::req_sync_time(now, 0)).await?;
-        Ok(())
+        self.sync_time_with_tz(0).await
     }
 
-    /// Align the ring clock using the official-app `12 09` counter form observed
-    /// on Ring 4/5. Prefer this for app-parity setup; `sync_time` keeps the older
-    /// `u64 unix + timezone` shape used by earlier probes.
+    /// Align the ring clock: exact unix seconds and
+    /// the host's current UTC offset in half hours (`12 09 <u64 unix> <tz>`).
+    /// Earlier versions sent `<unix/256 counter>` with a hashed low byte, which set
+    /// the clock to a random 0..255 s after the true block start.
     pub async fn sync_time_app(&self) -> Result<()> {
+        self.sync_time_with_tz(local_utc_offset_half_hours()).await
+    }
+
+    async fn sync_time_with_tz(&self, timezone_half_hours: i8) -> Result<()> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let token = (now as u8).wrapping_mul(37).wrapping_add(0xa5);
-        self.request(&protocol::req_sync_time_counter(now, token))
+        // The reply is tag 0x13 (request + 1); ending on it saves the 1.5 s quiet window.
+        // An unexpected reply still falls back to that window.
+        self.request_tag(&protocol::req_sync_time(now, timezone_half_hours), 0x13)
             .await?;
         Ok(())
     }
@@ -387,6 +404,30 @@ impl<T: Transport> OuraClient<T> {
         Ok(())
     }
 
+    /// Apply the capture configuration after
+    /// authenticating: notification flags `0xbf`, then for exercise HR (`0x03`), SpO2 (`0x04`)
+    /// and parameters `0x0b` and `0x0d`, switch the feature to automatic only if
+    /// its mode is off. Returns the feature ids that were switched on. A feature
+    /// that cannot be read or set is skipped.
+    pub async fn apply_app_capture_config(&self) -> Result<Vec<u8>> {
+        self.set_notification(0xbf).await?;
+        let mut enabled = Vec::new();
+        for feature_id in [0x03u8, 0x04, 0x0b, 0x0d] {
+            let Ok(status) = self.feature_status(feature_id).await else {
+                continue;
+            };
+            if status.mode == protocol::feature_mode::OFF
+                && self
+                    .set_feature_mode(feature_id, protocol::feature_mode::AUTOMATIC)
+                    .await
+                    .is_ok()
+            {
+                enabled.push(feature_id);
+            }
+        }
+        Ok(enabled)
+    }
+
     /// Run the app-observed stream registration/capability-read sequence. Ring 5
     /// accepts these commands; they make the session closer to the official app
     /// before event fetches or live feature work.
@@ -394,7 +435,14 @@ impl<T: Transport> OuraClient<T> {
         let hw = self.hardware_id().await.unwrap_or_default();
         let is_ring5 = hw.rsplit('_').next() == Some("05");
         if !is_ring5 {
-            tracing::debug!("skipping Ring 5 app-stream setup for hardware_id={hw:?}");
+            // Only the stream registration (`16 01 02`), which every ring accepts. It
+            // is the first command after auth and makes the ring ask for
+            // a 15 ms connection interval instead of ~30 ms, so a batch finishes faster. The mode
+            // lasts only for the BLE connection. Best effort: a refusal costs speed only.
+            let _ = self
+                .request_tag(&protocol::req_stream_subscribe(0x02), 0x17)
+                .await;
+            tracing::debug!("registered stream only for hardware_id={hw:?}");
             return Ok(());
         }
         self.request_tag(&protocol::req_stream_subscribe(0x02), 0x17)
@@ -467,9 +515,18 @@ impl<T: Transport> OuraClient<T> {
         let batch_terminal = |p: &Packet| {
             p.tag == 0x11 || (p.tag == 0x2f && matches!(p.payload.first(), Some(0x42) | Some(0x00)))
         };
+        // DataFlush moves the ring's RAM-buffered (newest) events into the readable
+        // history. One flush before the first read covers everything buffered so far, and
+        // reads of older history need none, so mid-backlog batches skip it (~45 ms each).
+        // It is repeated once the ring reports nothing left, where the newest events live.
+        let mut flush_next = true;
         // Safety bound against a misbehaving ring that never reports drained.
         for _ in 0..100_000 {
-            let mut packets = self.request_tag(&protocol::req_data_flush(), 0x29).await?;
+            let mut packets = if flush_next {
+                self.request_tag(&protocol::req_data_flush(), 0x29).await?
+            } else {
+                Vec::new()
+            };
             if use_extended {
                 let ext = self
                     .request_batch(
@@ -529,6 +586,7 @@ impl<T: Transport> OuraClient<T> {
                 );
             }
             let bytes_left = batch.bytes_left;
+            flush_next = bytes_left == 0;
             let progressed = batch.progressed(start);
             let tail = progressed && bytes_left == 0 && batch.events.len() < TAIL_BATCH_EVENTS;
             if tail {
@@ -570,7 +628,9 @@ impl<T: Transport> OuraClient<T> {
                 }
                 return Err(Error::Protocol(format!(
                     "ring reports {bytes_left} bytes of events left but the batch \
-                     contained none — stopping instead of looping (cursor {start})"
+                     contained none (rejected={}, replayed={}) — stopping instead \
+                     of looping (cursor {start})",
+                    batch.rejected_events, batch.replayed_events
                 )));
             }
             // `bytes_left == 0` alone is not proof the ring is drained: a Gen 3
@@ -654,7 +714,7 @@ impl<T: Transport> OuraClient<T> {
     /// Trigger the ring's sleep analysis. Returns the `0x29` status byte.
     pub async fn check_sleep_analysis(&self, force: bool) -> Result<u8> {
         let packets = self
-            .request(&protocol::req_check_sleep_analysis(force))
+            .request_tag(&protocol::req_check_sleep_analysis(force), 0x29)
             .await?;
         Self::find(&packets, 0x29)
             .and_then(|p| p.payload.first().copied())
@@ -703,6 +763,92 @@ impl<T: Transport> OuraClient<T> {
             .find(|p| p.ext_tag() == Some(0x27))
             .and_then(|p| p.payload.get(2).copied())
             .ok_or_else(|| Error::Protocol("no set_feature_subscription response".into()))
+    }
+
+    /// Write a feature's parameters (`SetFeatureParameters`). Returns the ring's result byte
+    /// (0 = success).
+    pub async fn set_feature_parameters(&self, feature: u8, data: &[u8]) -> Result<u8> {
+        let packets = self
+            .request(&protocol::req_set_feature_parameters(feature, data))
+            .await?;
+        packets
+            .iter()
+            .find(|p| p.ext_tag() == Some(0x2a))
+            .and_then(|p| p.payload.get(2).copied())
+            .ok_or_else(|| Error::Protocol("no set_feature_parameters response".into()))
+    }
+
+    /// Write the parameters a user-started workout needs (see
+    /// [`protocol::req_set_workout_hr_parameters`]). Returns the ring's result byte.
+    pub async fn set_workout_hr_parameters(&self, activity_id: u16, resting_hr: u8, max_hr: u8) -> Result<u8> {
+        let packets = self
+            .request(&protocol::req_set_workout_hr_parameters(activity_id, resting_hr, max_hr))
+            .await?;
+        packets
+            .iter()
+            .find(|p| p.ext_tag() == Some(0x2a))
+            .and_then(|p| p.payload.get(2).copied())
+            .ok_or_else(|| Error::Protocol("no set_workout_hr_parameters response".into()))
+    }
+
+    /// The mode of each capture feature ([`protocol::CAPTURE_FEATURES`]) as the ring reports it;
+    /// `None` for a feature the ring does not answer. Writes nothing.
+    pub async fn capture_features(&self) -> Vec<CaptureFeature> {
+        let mut out = Vec::new();
+        for (id, name) in protocol::CAPTURE_FEATURES {
+            let mode = self.feature_status(id).await.ok().map(|s| s.mode);
+            out.push(CaptureFeature { id, name, mode });
+        }
+        out
+    }
+
+    /// Set capture features to off (0) or automatic (1) and return the modes read back. Other modes
+    /// and features outside [`protocol::CAPTURE_FEATURES`] are refused before anything is sent. Real
+    /// steps is written before the others: exercise heart rate depends on it.
+    pub async fn set_capture_modes(&self, changes: &[(u8, u8)]) -> Result<Vec<CaptureFeature>> {
+        for &(id, mode) in changes {
+            if mode > 1 || !protocol::CAPTURE_FEATURES.iter().any(|f| f.0 == id) {
+                return Err(Error::Protocol(format!("refused capture change: feature {id:#04x} mode {mode}")));
+            }
+        }
+        let mut ordered = changes.to_vec();
+        ordered.sort_by_key(|&(id, _)| (id != feature::REAL_STEPS, id));
+        for (id, mode) in ordered {
+            self.set_feature_mode(id, mode).await?;
+        }
+        Ok(self.capture_features().await)
+    }
+
+    /// Arm a user-started workout: read the exercise heart rate mode, write
+    /// the workout parameters, then set the mode to `REQUESTED`. Returns the mode before the start
+    /// (to restore it with [`OuraClient::exercise_stop`]), the mode afterwards and the parameter
+    /// result byte. A refused parameter write stops before the mode is touched.
+    pub async fn exercise_start(&self, activity_id: u16, resting_hr: u8, max_hr: u8) -> Result<ExerciseStart> {
+        let previous_mode = self.feature_status(feature::EXERCISE_HR).await.ok().map(|s| s.mode);
+        let parameter_result = self.set_workout_hr_parameters(activity_id, resting_hr, max_hr).await?;
+        if parameter_result != 0 {
+            return Err(Error::Protocol(format!("the ring refused the workout parameters ({parameter_result:#04x})")));
+        }
+        self.set_feature_mode(feature::EXERCISE_HR, feature_mode::REQUESTED).await?;
+        let mode_after = self.feature_status(feature::EXERCISE_HR).await.ok().map(|s| s.mode);
+        Ok(ExerciseStart { previous_mode, mode_after, parameter_result })
+    }
+
+    /// End a user-started workout: exercise heart rate goes back to `restore_mode` (0 or 1), the mode
+    /// that was active before the workout. Writing OFF would leave automatic mode off until a later
+    /// client turns it on. Up to three attempts. Returns the mode read back.
+    pub async fn exercise_stop(&self, restore_mode: u8) -> Result<Option<u8>> {
+        if restore_mode > 1 {
+            return Err(Error::Protocol("exercise heart rate can only be restored to off or automatic".into()));
+        }
+        let mut last = None;
+        for _ in 0..3 {
+            match self.set_feature_mode(feature::EXERCISE_HR, restore_mode).await {
+                Ok(()) => return Ok(self.feature_status(feature::EXERCISE_HR).await.ok().map(|s| s.mode)),
+                Err(e) => last = Some(e),
+            }
+        }
+        Err(last.unwrap_or_else(|| Error::Protocol("end exercise failed".into())))
     }
 
     /// Query the RData collection state (read-only). Returns `(subtag, status)`.
@@ -766,9 +912,15 @@ impl<T: Transport> OuraClient<T> {
             .ok_or_else(|| Error::Protocol("no RData page response".into()))
     }
 
-    /// Enable live heart rate (daytime HR, `CONNECTED_LIVE`) and invoke `on_sample`
-    /// for each valid beat for up to `duration`. Restores `AUTOMATIC` mode on exit.
-    /// The ring must be worn for samples to appear.
+    /// Stream live heart rate, invoking `on_sample` for each valid beat for up to
+    /// `duration`. The ring must be worn for samples to appear. Restores
+    /// `AUTOMATIC` mode and clears the live subscription on exit.
+    ///
+    /// Sends the HR burst of open_ring §6.7: stream registration
+    /// (`16 01 02`, `1c 01 bf`), then daytime HR `CONNECTED_LIVE` plus subscription
+    /// sub-mode 2, re-sent every [`LIVE_HR_BURST_EVERY`] because the ring reverts
+    /// after ~20 s. The mode write alone produces no frames;
+    /// with this sequence it sends one `2f 0f 28 02 …` IBI frame per beat.
     pub async fn live_heart_rate<F>(
         &self,
         duration: Duration,
@@ -783,19 +935,25 @@ impl<T: Transport> OuraClient<T> {
         while rx.try_recv().is_ok() {}
 
         self.transport
-            .write(&protocol::req_set_feature_mode(
-                feature::DAYTIME_HR,
-                feature_mode::CONNECTED_LIVE,
-            ))
+            .write(&protocol::req_stream_subscribe(0x02))
             .await?;
+        self.transport
+            .write(&protocol::req_set_notification(0xbf))
+            .await?;
+        self.send_live_hr_burst().await?;
 
         let deadline = tokio::time::Instant::now() + duration;
+        let mut next_burst = tokio::time::Instant::now() + LIVE_HR_BURST_EVERY;
         loop {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
                 break;
             }
-            match tokio::time::timeout(remaining, rx.recv()).await {
+            if now >= next_burst {
+                self.send_live_hr_burst().await?;
+                next_burst = now + LIVE_HR_BURST_EVERY;
+            }
+            match tokio::time::timeout(deadline.min(next_burst) - now, rx.recv()).await {
                 Ok(Ok(frame)) => {
                     if debug {
                         eprintln!("raw notify: {}", hex::encode(&frame));
@@ -805,11 +963,13 @@ impl<T: Transport> OuraClient<T> {
                     }
                 }
                 Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
-                _ => break,
+                Ok(Err(_)) => break,
+                // Quiet until the next burst or the deadline.
+                Err(_) => continue,
             }
         }
 
-        // Best-effort restore to automatic mode.
+        // Best-effort restore: automatic measuring, no live subscription.
         let _ = self
             .transport
             .write(&protocol::req_set_feature_mode(
@@ -817,7 +977,31 @@ impl<T: Transport> OuraClient<T> {
                 feature_mode::AUTOMATIC,
             ))
             .await;
+        let _ = self
+            .transport
+            .write(&protocol::req_set_feature_subscription(
+                feature::DAYTIME_HR,
+                protocol::subscription_mode::OFF,
+            ))
+            .await;
         Ok(())
+    }
+
+    /// One round of the live-HR request: daytime HR to `CONNECTED_LIVE`, then the
+    /// subscription sub-mode Ring 4 needs before it streams beats.
+    async fn send_live_hr_burst(&self) -> Result<()> {
+        self.transport
+            .write(&protocol::req_set_feature_mode(
+                feature::DAYTIME_HR,
+                feature_mode::CONNECTED_LIVE,
+            ))
+            .await?;
+        self.transport
+            .write(&protocol::req_set_feature_subscription(
+                feature::DAYTIME_HR,
+                protocol::subscription_mode::LATEST,
+            ))
+            .await
     }
 
     /// Stream live accelerometer samples (the "wave to test motion" path): enable
@@ -897,6 +1081,9 @@ fn bpm_from_ibi(ibi_ms: u16) -> Option<u16> {
     }
 }
 
+/// How often to re-send the live-HR burst; Ring 4 reverts after ~20 s (open_ring §6.7).
+pub const LIVE_HR_BURST_EVERY: Duration = Duration::from_secs(15);
+
 /// Parse a daytime-HR live subscription notification (tag `0x2f`, sub-tag `0x28`).
 ///
 /// Frame layout: `[0]=0x2f [1]=len [2]=0x28(IND1) [3]=cap [4]=status [5]=state
@@ -919,6 +1106,27 @@ fn parse_live_hr_frame(frame: &[u8]) -> Option<HeartRateSample> {
     bpm_from_ibi(ibi_ms).map(|bpm| HeartRateSample { bpm, ibi_ms })
 }
 
+/// The host's current offset from UTC in signed half hours (0 where unknown).
+fn local_utc_offset_half_hours() -> i8 {
+    #[cfg(unix)]
+    {
+        // SAFETY: `localtime_r` writes only into the zeroed `tm` we pass.
+        let offset = unsafe {
+            let now = libc::time(std::ptr::null_mut());
+            let mut tm: libc::tm = std::mem::zeroed();
+            if libc::localtime_r(&now, &mut tm).is_null() {
+                return 0;
+            }
+            tm.tm_gmtoff as i64
+        };
+        (offset / 1800).clamp(i8::MIN as i64, i8::MAX as i64) as i8
+    }
+    #[cfg(not(unix))]
+    {
+        0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -931,6 +1139,20 @@ mod tests {
         let client = OuraClient::new(mock).with_quiet(Duration::from_millis(20));
         let info = client.firmware().await.unwrap();
         assert_eq!(info.firmware_version, "3.4.3");
+    }
+
+    #[tokio::test]
+    async fn sync_time_app_sends_exact_unix_seconds() {
+        let mock = MockTransport::new();
+        let client = OuraClient::new(mock).with_quiet(Duration::from_millis(20));
+        let before = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let _ = client.sync_time_app().await;
+        let after = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let writes = client.transport().writes();
+        let request = writes.first().expect("a time sync write");
+        assert_eq!(&request[..2], &[0x12, 0x09]);
+        let sent = u64::from_le_bytes(request[2..10].try_into().unwrap());
+        assert!((before..=after).contains(&sent), "{sent} not in {before}..={after}");
     }
 
     #[tokio::test]
@@ -947,6 +1169,101 @@ mod tests {
         assert_eq!(
             client.authenticate(&key).await.unwrap(),
             AuthResult::Success
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_modes_write_real_steps_first_and_refuse_others() {
+        let mock = MockTransport::new();
+        for id in ["02", "0b", "03", "04", "08", "0d"] {
+            mock.on(&format!("2f0220{id}"), &[&format!("2f0621{id}00000000")]);
+        }
+        mock.on("2f03220b01", &["2f03230b00"]);
+        mock.on("2f03220301", &["2f03230300"]);
+        let client = OuraClient::new(mock).with_quiet(Duration::from_millis(20));
+        client.set_capture_modes(&[(0x03, 1), (0x0b, 1)]).await.unwrap();
+        let writes: Vec<String> = client.transport().writes().iter().map(hex::encode).collect();
+        assert_eq!(&writes[..2], ["2f03220b01", "2f03220301"]);
+        assert!(client.set_capture_modes(&[(0x03, 2)]).await.is_err());
+        assert!(client.set_capture_modes(&[(0x12, 1)]).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn exercise_start_writes_parameters_then_requested_and_stop_restores() {
+        let mock = MockTransport::new();
+        mock.on("2f022003", &["2f06210301000000"]);
+        mock.on("2f0729030e003732be", &["2f032a0300"]);
+        mock.on("2f03220302", &["2f03230300"]);
+        mock.on("2f03220301", &["2f03230300"]);
+        let client = OuraClient::new(mock).with_quiet(Duration::from_millis(20));
+        let started = client.exercise_start(14, 55, 190).await.unwrap();
+        assert_eq!(started.previous_mode, Some(1));
+        assert_eq!(started.parameter_result, 0);
+        client.exercise_stop(1).await.unwrap();
+        let writes: Vec<String> = client.transport().writes().iter().map(hex::encode).collect();
+        let want = ["2f022003", "2f0729030e003732be", "2f03220302", "2f022003", "2f03220301"];
+        assert_eq!(writes[..5], want);
+        assert!(client.exercise_stop(2).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn app_capture_config_enables_features_that_are_off() {
+        // All four features report mode 0, and the client switches each to
+        // automatic (mode 1) after notification flags 0xbf.
+        let mock = MockTransport::new();
+        mock.on("1c01bf", &["1d0100"]);
+        for id in ["03", "04", "0b", "0d"] {
+            mock.on(&format!("2f0220{id}"), &[&format!("2f0621{id}00000000")]);
+            mock.on(&format!("2f0322{id}01"), &[&format!("2f0323{id}00")]);
+        }
+        let client = OuraClient::new(mock).with_quiet(Duration::from_millis(20));
+        let enabled = client.apply_app_capture_config().await.unwrap();
+        assert_eq!(enabled, vec![0x03, 0x04, 0x0b, 0x0d]);
+        let writes: Vec<String> = client
+            .transport()
+            .writes()
+            .iter()
+            .map(hex::encode)
+            .collect();
+        assert_eq!(
+            writes,
+            [
+                "1c01bf", "2f022003", "2f03220301", "2f022004", "2f03220401", "2f02200b",
+                "2f03220b01", "2f02200d", "2f03220d01"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn live_heart_rate_runs_the_ring4_burst() {
+        // Frames after the burst: a valid 733 ms
+        // beat (-> 81 bpm), then one the ring flags with validity 2, which is dropped.
+        let mock = MockTransport::new();
+        mock.on("2f03220203", &["2f03230200"]);
+        mock.on(
+            "2f03260202",
+            &[
+                "2f03270200",
+                "2f0f280201020000dd1200000000420c7f",
+                "2f0f280201020000b62300000000420c7f",
+            ],
+        );
+        let client = OuraClient::new(mock).with_quiet(Duration::from_millis(20));
+        let mut bpm = Vec::new();
+        client
+            .live_heart_rate(Duration::from_millis(100), false, |s| bpm.push(s.bpm))
+            .await
+            .unwrap();
+        assert_eq!(bpm, vec![81]);
+        let writes: Vec<String> = client
+            .transport()
+            .writes()
+            .iter()
+            .map(hex::encode)
+            .collect();
+        assert_eq!(
+            writes,
+            ["160102", "1c01bf", "2f03220203", "2f03260202", "2f03220201", "2f03260200"]
         );
     }
 
@@ -1083,6 +1400,52 @@ mod tests {
         let outcome = client.drain_events(0, |_| true, |_| true).await.unwrap();
         assert_eq!(outcome.events_synced, 2);
         assert_eq!(outcome.next_cursor, 3);
+    }
+
+    #[tokio::test]
+    async fn first_sync_at_cursor_zero_accepts_a_ring_with_a_long_history() {
+        // Counter at 200 days (172_800_000 ds): the first batch sits entirely beyond
+        // 180 days of cursor 0. It must be accepted and move the cursor, not stop
+        // with "batch contained none".
+        let mock = MockTransport::new();
+        mock.on("280100", &["290100"]);
+        mock.on("2f0c410000000000000000000010", &["2f020041"]);
+        // cursor 0 -> one event at t=172_800_000 ds, bytes_left=0
+        mock.on(
+            "100900000000ffffffffff",
+            &["430800b84c0a746573741106000000000000"],
+        );
+        // cursor 172_800_001 -> empty, drained
+        mock.on("100901b84c0affffffffff", &["1106000000000000"]);
+        let client = OuraClient::new(mock).with_quiet(Duration::from_millis(20));
+        let mut batches = Vec::new();
+        let outcome = client
+            .drain_events(0, |_| true, |b| {
+                batches.push(b.next_cursor);
+                true
+            })
+            .await
+            .unwrap();
+        assert_eq!(outcome.events_synced, 1);
+        assert_eq!(outcome.next_cursor, 172_800_001);
+        assert_eq!(batches.first(), Some(&172_800_001));
+    }
+
+    #[tokio::test]
+    async fn normal_cursor_still_rejects_an_implausible_jump() {
+        // Cursor 100 and a single event 200 days later: rejected, so the batch is
+        // empty while the ring reports bytes left, and the drain errors out.
+        let mock = MockTransport::new();
+        mock.on("280100", &["290100"]);
+        mock.on("2f0c410010270000000000000010", &["2f020041"]);
+        mock.on(
+            "100964000000ffffffffff",
+            &["430800b84c0a7465737411060000e8030000"],
+        );
+        let client = OuraClient::new(mock).with_quiet(Duration::from_millis(20));
+        let err = client.drain_events(100, |_| true, |_| true).await.unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("rejected=1"), "{text}");
     }
 
     #[test]

@@ -621,6 +621,15 @@ async fn cmd_sync(cli: &Cli, key: &Option<[u8; 16]>, sync_time: bool) -> Result<
             }
         }
     }
+    // Capture configuration applied after time sync (notification
+    // flags, then exercise HR, SpO2 and parameters 0x0b/0x0d to automatic if off).
+    match client.apply_app_capture_config().await {
+        Ok(enabled) if !enabled.is_empty() => {
+            tracing::info!(?enabled, "switched on capture features")
+        }
+        Ok(_) => {}
+        Err(e) => tracing::debug!("app capture config failed ({e}); continuing"),
+    }
     // Like the iOS app: ask the ring to postprocess its sleep before the drain, so a
     // finished night's bedtime_period lands in this sync instead of the next one.
     // Fire-and-forget: a refusal is not a sync failure.
@@ -704,8 +713,49 @@ async fn cmd_sync(cli: &Cli, key: &Option<[u8; 16]>, sync_time: bool) -> Result<
         outcome.events_synced, inserted, outcome.next_cursor
     );
 
+    // Pair the newest drained ring timestamp with the host clock, so a later
+    // reader has a wall-clock point on this side of a ring clock reset. A failure
+    // costs only that point and never fails the sync.
+    match record_phone_anchor(&store, &serial, outcome.events_synced, outcome.next_cursor, unix_now()) {
+        Ok(_) => {}
+        Err(e) => eprintln!("warning: phone anchor not saved ({e})"),
+    }
+
     let _ = client.transport().disconnect().await;
     Ok(())
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// The `(ring_timestamp, unix_time)` pair of a phone anchor: the newest drained ring
+/// timestamp (the cursor minus one) with the host clock. `None` when the sync drained
+/// no event, because then no new ring time was observed.
+fn phone_anchor(events_synced: u32, next_cursor: u32, now: u64) -> Option<(u32, u32)> {
+    if events_synced == 0 || next_cursor == 0 || now == 0 {
+        return None;
+    }
+    Some((next_cursor - 1, u32::try_from(now).ok()?))
+}
+
+/// Insert the phone anchor of a finished sync into `phone_anchors` (not `events`: the
+/// ring never sent it). The insert ignores a duplicate `(serial, ring_timestamp, unix_time)`,
+/// so repeating it is harmless. Returns the pair when a row was added.
+fn record_phone_anchor(
+    store: &Store,
+    serial: &str,
+    events_synced: u32,
+    next_cursor: u32,
+    now: u64,
+) -> Result<Option<(u32, u32)>> {
+    let Some((ring_ts, unix)) = phone_anchor(events_synced, next_cursor, now) else {
+        return Ok(None);
+    };
+    Ok(store.insert_phone_anchor(serial, ring_ts, unix)?.then_some((ring_ts, unix)))
 }
 
 async fn cmd_latest(cli: &Cli, key: &Option<[u8; 16]>) -> Result<()> {
@@ -1193,5 +1243,35 @@ mod tests {
         let k2 = generate_key().unwrap();
         assert_ne!(k1, [0u8; 16]);
         assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn phone_anchor_needs_newly_drained_events() {
+        assert_eq!(phone_anchor(0, 500, 1_789_056_420), None);
+        assert_eq!(phone_anchor(3, 0, 1_789_056_420), None);
+        assert_eq!(phone_anchor(3, 705_001, 0), None);
+        assert_eq!(phone_anchor(3, 705_001, 1_789_056_420), Some((705_000, 1_789_056_420)));
+        assert_eq!(phone_anchor(3, 705_001, u64::MAX), None);
+    }
+
+    #[test]
+    fn sync_records_one_anchor_in_the_clock_stream_and_repeats_are_harmless() {
+        let store = Store::open_in_memory().unwrap();
+        assert_eq!(record_phone_anchor(&store, "S1", 0, 500, 1_789_056_420).unwrap(), None);
+        assert!(store.decoded_events().unwrap().is_empty());
+
+        let added = record_phone_anchor(&store, "S1", 3, 705_001, 1_789_056_420).unwrap();
+        assert_eq!(added, Some((705_000, 1_789_056_420)));
+        // the same pair again (a resumed run) adds nothing
+        assert_eq!(record_phone_anchor(&store, "S1", 3, 705_001, 1_789_056_420).unwrap(), None);
+        // a later sync adds a second point; the first stays
+        assert!(record_phone_anchor(&store, "S1", 1, 705_050, 1_789_056_500).unwrap().is_some());
+
+        assert_eq!(store.event_totals().unwrap(), (0, 0));
+        let stream = store.decoded_events().unwrap();
+        assert_eq!(stream.len(), 2);
+        assert_eq!((stream[0].0, stream[0].1), (705_000, 0x42));
+        assert!(stream[0].2.contains("\"unix_time\":1789056420"), "{}", stream[0].2);
+        assert!(stream[0].2.contains("\"source\":\"phone\""), "{}", stream[0].2);
     }
 }

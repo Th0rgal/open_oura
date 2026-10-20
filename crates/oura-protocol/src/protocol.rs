@@ -24,6 +24,8 @@ pub mod feature {
     pub const EXERCISE_HR: u8 = 0x03;
     pub const SPO2: u8 = 0x04;
     pub const RESTING_HR: u8 = 0x08;
+    pub const REAL_STEPS: u8 = 0x0b;
+    pub const CVA_PPG_SAMPLER: u8 = 0x0d;
     pub const CHARGING_CONTROL: u8 = 0x0e;
 }
 
@@ -143,32 +145,16 @@ pub fn req_set_auth_key(key: &[u8; 16]) -> Vec<u8> {
     Packet::new(0x24, key.to_vec()).encode()
 }
 
-/// Set the ring clock to a UTC unix timestamp (`0x12`).
-pub fn req_sync_time(unix_secs: u64, timezone_half_hours: u8) -> Vec<u8> {
+/// Set the ring clock to a UTC unix timestamp (`0x12`): `12 09 <u64 LE unix s>
+/// <timezone in signed half hours>`. For example, `12 09 00f15365 00000000 02` sets
+/// 1700000000 with a timezone of 2 half hours. The ring logs
+/// the low four bytes of the timestamp as a `time_sync` event, so the seconds must
+/// be exact: they date the ring's history.
+pub fn req_sync_time(unix_secs: u64, timezone_half_hours: i8) -> Vec<u8> {
     let mut payload = Vec::with_capacity(9);
     payload.extend_from_slice(&unix_secs.to_le_bytes());
-    payload.push(timezone_half_hours);
+    payload.push(timezone_half_hours as u8);
     Packet::new(0x12, payload).encode()
-}
-
-/// App-style time sync used by Ring 4/5 app captures (`12 09 <token>
-/// <unix/256:u24 LE> 00000000 f6`). This stamps the ring's internal RTC and is
-/// the shape observed in the official-app connect sequence.
-pub fn req_sync_time_counter(unix_secs: u64, token: u8) -> Vec<u8> {
-    let counter = (unix_secs / 256) as u32;
-    vec![
-        0x12,
-        0x09,
-        token,
-        (counter & 0xff) as u8,
-        ((counter >> 8) & 0xff) as u8,
-        ((counter >> 16) & 0xff) as u8,
-        0x00,
-        0x00,
-        0x00,
-        0x00,
-        0xf6,
-    ]
 }
 
 /// Enable/disable the app's history/event stream registration (`0x16`).
@@ -270,9 +256,38 @@ pub fn req_feature_latest(feature: u8) -> Vec<u8> {
     vec![0x2f, 0x02, 0x24, feature]
 }
 
+/// The features a client may switch on or off, in the order they should be shown: daytime HR,
+/// real steps (the activity model's step-motion input), exercise HR (AWHR, which needs
+/// real steps first), SpO2, resting HR and the PPG sampler (raw PPG for the cardiovascular age
+/// model). See `docs/ring-features.md`.
+pub const CAPTURE_FEATURES: [(u8, &str); 6] = [
+    (feature::DAYTIME_HR, "Daytime heart rate"),
+    (feature::REAL_STEPS, "Step motion (real steps)"),
+    (feature::EXERCISE_HR, "Exercise heart rate"),
+    (feature::SPO2, "Blood oxygen (SpO2)"),
+    (feature::RESTING_HR, "Resting heart rate"),
+    (feature::CVA_PPG_SAMPLER, "PPG sampler (cardiovascular age)"),
+];
+
 /// Set a feature's mode (`0x2f` ext `0x22`).
 pub fn req_set_feature_mode(feature: u8, mode: u8) -> Vec<u8> {
     vec![0x2f, 0x03, 0x22, feature, mode]
+}
+
+/// Set a feature's parameters (`2f <n+2> 29 <feature> <data...>`, ext `0x29`; the reply is
+/// `2f 03 2a <feature> <result>`, result 0 = success).
+pub fn req_set_feature_parameters(feature: u8, data: &[u8]) -> Vec<u8> {
+    let mut v = vec![0x2f, (data.len() + 2) as u8, 0x29, feature];
+    v.extend_from_slice(data);
+    v
+}
+
+/// Parameters of a user-started workout on EXERCISE_HR (see `docs/ring-feature-modes.md`):
+/// activity id `u16` LE, resting HR, the constant minimum 50, maximum HR (230 minus the age
+/// is a common choice). Write these before setting the feature to `REQUESTED`.
+pub fn req_set_workout_hr_parameters(activity_id: u16, resting_hr: u8, max_hr: u8) -> Vec<u8> {
+    let a = activity_id.to_le_bytes();
+    req_set_feature_parameters(feature::EXERCISE_HR, &[a[0], a[1], resting_hr, 50, max_hr])
 }
 
 /// Feature *capability* ids for `SetFeatureSubscription` (distinct numbering from
@@ -454,9 +469,14 @@ mod tests {
 
     #[test]
     fn app_setup_requests_match_known_hex() {
+        // Exact seconds, tz byte last.
         assert_eq!(
-            hex::encode(req_sync_time_counter(0, 0)),
-            "12090000000000000000f6"
+            hex::encode(req_sync_time(1_700_000_000, 2)),
+            "120900f153650000000002"
+        );
+        assert_eq!(
+            hex::encode(req_sync_time(1_700_000_000, -6)),
+            "120900f1536500000000fa"
         );
         assert_eq!(hex::encode(req_stream_subscribe(2)), "160102");
         assert_eq!(hex::encode(req_event_subscribe(0x14, 0x1000)), "1803140010");
@@ -496,5 +516,12 @@ mod tests {
         let p = Packet::parse(&[0x25, 0x01, 0x00]).unwrap();
         assert_eq!(p.tag, 0x25);
         assert_eq!(p.payload, vec![0x00]);
+    }
+
+    #[test]
+    fn workout_parameters_layout() {
+        // walking (14), resting HR 55, maximum 190
+        assert_eq!(hex::encode(req_set_workout_hr_parameters(14, 55, 190)), "2f0729030e003732be");
+        assert_eq!(hex::encode(req_set_feature_parameters(2, &[0])), "2f03290200");
     }
 }

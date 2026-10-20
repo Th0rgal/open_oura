@@ -37,15 +37,22 @@ impl ValidatedHistoryBatch {
 // with a near-u32::MAX timestamp and force every later sync to replay from zero.
 const MAX_CURSOR_ADVANCE_DS: u32 = 180 * 24 * 60 * 60 * 10;
 
-fn plausible_timestamp(batch_start: u32, timestamp: u32) -> bool {
-    timestamp <= batch_start.saturating_add(MAX_CURSOR_ADVANCE_DS)
-}
-
 pub(crate) fn validate_batch(batch: HistoryBatch, batch_start: u32) -> ValidatedHistoryBatch {
     let bytes_left = batch.bytes_left;
     let mut max_timestamp = batch_start;
     let mut rejected_events = 0;
     let mut replayed_events = 0;
+    // At cursor 0 there is no reference point and a ring past 180 days of uptime
+    // has every event beyond `batch_start + 180 days`. The anchor is then the
+    // oldest timestamp in the batch, so one corrupt high timestamp (the first
+    // event included) cannot become the reference and is rejected like any other
+    // jump. A corrupt low timestamp makes the anchor too small, which rejects
+    // later events and stalls the sync with an error instead of poisoning the cursor.
+    let mut anchor: Option<u32> = if batch_start != 0 {
+        Some(batch_start)
+    } else {
+        batch.events.iter().map(|e| e.timestamp).min()
+    };
     let events = batch
         .events
         .into_iter()
@@ -55,13 +62,18 @@ pub(crate) fn validate_batch(batch: HistoryBatch, batch_start: u32) -> Validated
             // as progress bumped the cursor by 1 ds per pass and never drained.
             if event.timestamp < batch_start {
                 replayed_events += 1;
-                false
-            } else if plausible_timestamp(batch_start, event.timestamp) {
-                max_timestamp = max_timestamp.max(event.timestamp);
-                true
-            } else {
-                rejected_events += 1;
-                false
+                return false;
+            }
+            match anchor {
+                Some(a) if event.timestamp > a.saturating_add(MAX_CURSOR_ADVANCE_DS) => {
+                    rejected_events += 1;
+                    false
+                }
+                _ => {
+                    anchor = Some(anchor.map_or(event.timestamp, |a| a.max(event.timestamp)));
+                    max_timestamp = max_timestamp.max(event.timestamp);
+                    true
+                }
             }
         })
         .collect::<Vec<_>>();
@@ -244,5 +256,87 @@ mod tests {
         assert_eq!(validated.replayed_events, 1);
         assert_eq!(validated.next_cursor, 106);
         assert!(validated.progressed(100));
+    }
+
+    #[test]
+    fn cursor_zero_accepts_a_batch_beyond_the_advance_limit() {
+        // Counter past 180 days: every event is later than 0 + MAX_CURSOR_ADVANCE_DS.
+        let first = MAX_CURSOR_ADVANCE_DS + 5_000_000;
+        let batch = HistoryBatch {
+            events: vec![debug_event(first), debug_event(first + 10), debug_event(first + 600)],
+            bytes_left: 1000,
+        };
+
+        let validated = validate_batch(batch, 0);
+
+        assert_eq!(validated.events.len(), 3);
+        assert_eq!(validated.rejected_events, 0);
+        assert_eq!(validated.next_cursor, first + 601);
+        assert!(validated.progressed(0));
+    }
+
+    #[test]
+    fn cursor_zero_rejects_a_corrupt_first_event_without_poisoning_the_cursor() {
+        let first = MAX_CURSOR_ADVANCE_DS + 5_000_000;
+        let batch = HistoryBatch {
+            events: vec![
+                debug_event(3_970_646_416),
+                debug_event(first),
+                debug_event(first + 10),
+            ],
+            bytes_left: 1000,
+        };
+
+        let validated = validate_batch(batch, 0);
+
+        assert_eq!(validated.events.len(), 2);
+        assert_eq!(validated.rejected_events, 1);
+        assert_eq!(validated.next_cursor, first + 11);
+    }
+
+    #[test]
+    fn cursor_zero_corrupt_low_first_event_stalls_instead_of_poisoning() {
+        // Known limitation: a corrupt timestamp below the real ones becomes the
+        // anchor, so valid events beyond 180 days of it are rejected. The batch
+        // is empty and the cursor stays at 0, which `drain_events` reports as an error.
+        let first = MAX_CURSOR_ADVANCE_DS + 5_000_000;
+        let batch = HistoryBatch {
+            events: vec![debug_event(7), debug_event(first), debug_event(first + 10)],
+            bytes_left: 1000,
+        };
+
+        let validated = validate_batch(batch, 0);
+
+        assert_eq!(validated.events.len(), 1);
+        assert_eq!(validated.rejected_events, 2);
+        assert_eq!(validated.next_cursor, 8);
+    }
+
+    #[test]
+    fn nonzero_cursor_still_limits_the_jump_from_the_cursor() {
+        let start = 1_000;
+        let batch = HistoryBatch {
+            events: vec![
+                debug_event(start + 10),
+                debug_event(start + MAX_CURSOR_ADVANCE_DS),
+                debug_event(start + MAX_CURSOR_ADVANCE_DS + 1),
+            ],
+            bytes_left: 0,
+        };
+
+        let validated = validate_batch(batch, start);
+
+        // The anchor advances with accepted events, so the second event is within
+        // the limit of the cursor and the third is within the limit of the second.
+        assert_eq!(validated.events.len(), 3);
+
+        let batch = HistoryBatch {
+            events: vec![debug_event(start + MAX_CURSOR_ADVANCE_DS + 1)],
+            bytes_left: 0,
+        };
+        let validated = validate_batch(batch, start);
+        assert!(validated.events.is_empty());
+        assert_eq!(validated.rejected_events, 1);
+        assert_eq!(validated.next_cursor, start);
     }
 }

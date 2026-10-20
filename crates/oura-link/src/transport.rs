@@ -12,6 +12,21 @@ use tokio::sync::broadcast;
 
 use crate::error::Result;
 
+/// Timing lines from `transact_until`, drained by the host app into its diagnostics log.
+static DIAG: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Take (and clear) the timing lines recorded since the last call.
+pub fn take_diag() -> Vec<String> {
+    std::mem::take(&mut *DIAG.lock().unwrap())
+}
+
+fn push_diag(line: String) {
+    let mut d = DIAG.lock().unwrap();
+    if d.len() < 256 {
+        d.push(line);
+    }
+}
+
 /// A bidirectional link to a ring.
 #[async_trait]
 pub trait Transport: Send + Sync {
@@ -54,12 +69,18 @@ where
     // Drop any backlog so we only observe responses to *this* request.
     while rx.try_recv().is_ok() {}
 
+    let began = std::time::Instant::now();
     transport.write(request).await?;
+    let written_ms = began.elapsed().as_millis();
 
     let mut frames = Vec::new();
+    let mut first_ms = None;
+    let mut bytes = 0usize;
     loop {
         match tokio::time::timeout(quiet, rx.recv()).await {
             Ok(Ok(frame)) => {
+                first_ms.get_or_insert_with(|| began.elapsed().as_millis());
+                bytes += frame.len();
                 let done = is_terminal(&frame);
                 frames.push(frame);
                 if done {
@@ -71,6 +92,15 @@ where
             _ => break,
         }
     }
+    push_diag(format!(
+        "req 0x{:02x} written={}ms first={}ms total={}ms frames={} bytes={}",
+        request.first().copied().unwrap_or(0),
+        written_ms,
+        first_ms.map_or(-1, |m| m as i64),
+        began.elapsed().as_millis(),
+        frames.len(),
+        bytes
+    ));
     Ok(frames)
 }
 

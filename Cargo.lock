@@ -793,6 +793,7 @@ dependencies = [
  "btleplug",
  "futures",
  "hex",
+ "libc",
  "oura-protocol",
  "thiserror 1.0.69",
  "tokio",
