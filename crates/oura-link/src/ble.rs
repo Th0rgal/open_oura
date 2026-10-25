@@ -18,6 +18,71 @@ use oura_protocol::protocol;
 /// handshake hangs the caller forever.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Time to wait for GATT service discovery to resolve after connection.
+///
+/// On Linux/BlueZ, `connect()` completes before GATT service discovery finishes
+/// over the air (`Device1.ServicesResolved` remains false for ~0.5–2s).
+pub const SERVICES_RESOLVED_TIMEOUT: Duration = Duration::from_millis(2500);
+
+/// Polling interval for retrying service discovery while services resolve.
+pub const SERVICES_RESOLVED_POLL_INTERVAL: Duration = Duration::from_millis(150);
+
+/// Resolve the Oura service write characteristic and notification characteristics,
+/// retrying service discovery until GATT resolution finishes or `timeout` expires.
+///
+/// On Linux/BlueZ, `connect()` returns as soon as the ACL link forms, but BlueZ discovers
+/// GATT services asynchronously in the background (`ServicesResolved: false`). Calling
+/// `discover_services()` immediately often returns an empty characteristic list.
+/// This helper retries service discovery for up to `timeout` before reporting
+/// `CharacteristicNotFound`.
+pub(crate) async fn resolve_oura_characteristics<F, Fut, G, E>(
+    mut discover: F,
+    mut get_chars: G,
+    timeout: Duration,
+    poll_interval: Duration,
+) -> Result<(Characteristic, Vec<Characteristic>)>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<(), E>>,
+    G: FnMut() -> std::collections::BTreeSet<Characteristic>,
+    E: std::fmt::Display,
+{
+    let deadline = Instant::now() + timeout;
+    let mut last_error = None;
+
+    loop {
+        match discover().await {
+            Ok(()) => {}
+            Err(e) => {
+                tracing::debug!("service discovery attempt returned error: {e}");
+                last_error = Some(e.to_string());
+            }
+        }
+
+        let chars = get_chars();
+        if let Some(write_char) = chars.iter().find(|c| c.uuid == protocol::OURA_WRITE).cloned() {
+            let notify_chars = chars
+                .into_iter()
+                .filter(|c| {
+                    c.service_uuid == protocol::OURA_SERVICE
+                        && c.properties
+                            .intersects(CharPropFlags::NOTIFY | CharPropFlags::INDICATE)
+                })
+                .collect();
+            return Ok((write_char, notify_chars));
+        }
+
+        if Instant::now() >= deadline {
+            if let Some(e) = last_error {
+                tracing::warn!("service discovery deadline reached, last error: {e}");
+            }
+            return Err(Error::CharacteristicNotFound(protocol::OURA_WRITE.to_string()));
+        }
+
+        tokio::time::sleep(poll_interval).await;
+    }
+}
+
 /// A ring discovered while scanning.
 #[derive(Clone, Debug)]
 pub struct Discovered {
@@ -171,21 +236,16 @@ impl BleTransport {
             if !peripheral.is_connected().await? {
                 peripheral.connect().await?;
             }
-            peripheral.discover_services().await?;
 
-            let chars = peripheral.characteristics();
-            let write_char = chars
-                .iter()
-                .find(|c| c.uuid == protocol::OURA_WRITE)
-                .cloned()
-                .ok_or_else(|| Error::CharacteristicNotFound(protocol::OURA_WRITE.to_string()))?;
+            let (write_char, notify_chars) = resolve_oura_characteristics(
+                || peripheral.discover_services(),
+                || peripheral.characteristics(),
+                SERVICES_RESOLVED_TIMEOUT,
+                SERVICES_RESOLVED_POLL_INTERVAL,
+            )
+            .await?;
 
-            let notify_chars = chars.iter().filter(|c| {
-                c.service_uuid == protocol::OURA_SERVICE
-                    && c.properties
-                        .intersects(CharPropFlags::NOTIFY | CharPropFlags::INDICATE)
-            });
-            for c in notify_chars {
+            for c in &notify_chars {
                 peripheral.subscribe(c).await?;
             }
             Ok::<_, Error>(write_char)
@@ -236,7 +296,9 @@ impl Transport for BleTransport {
 
 #[cfg(test)]
 mod tests {
-    use super::name_matches;
+    use super::*;
+    use std::collections::BTreeSet;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn default_needle_accepts_unnamed_bonded_ring() {
@@ -256,5 +318,170 @@ mod tests {
     fn empty_needle_matches_everything() {
         assert!(name_matches("", ""));
         assert!(name_matches("anything", "  "));
+    }
+
+    fn mock_characteristic(
+        uuid: uuid::Uuid,
+        service_uuid: uuid::Uuid,
+        flags: CharPropFlags,
+    ) -> Characteristic {
+        Characteristic {
+            uuid,
+            service_uuid,
+            properties: flags,
+            descriptors: BTreeSet::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_services_not_yet_resolved_retries_and_succeeds() {
+        let attempts = Arc::new(Mutex::new(0usize));
+        let attempts_disc = attempts.clone();
+        let attempts_chars = attempts.clone();
+
+        let (write_char, notify_chars) = resolve_oura_characteristics(
+            move || {
+                let attempts = attempts_disc.clone();
+                async move {
+                    let mut lock = attempts.lock().unwrap();
+                    *lock += 1;
+                    Ok::<(), &str>(())
+                }
+            },
+            move || {
+                let lock = attempts_chars.lock().unwrap();
+                // Simulate BlueZ: return empty characteristics until attempt 3
+                if *lock >= 3 {
+                    let mut set = BTreeSet::new();
+                    set.insert(mock_characteristic(
+                        protocol::OURA_WRITE,
+                        protocol::OURA_SERVICE,
+                        CharPropFlags::WRITE,
+                    ));
+                    set.insert(mock_characteristic(
+                        uuid::Uuid::from_u128(0x1234_5678),
+                        protocol::OURA_SERVICE,
+                        CharPropFlags::NOTIFY,
+                    ));
+                    set
+                } else {
+                    BTreeSet::new()
+                }
+            },
+            Duration::from_millis(500),
+            Duration::from_millis(10),
+        )
+        .await
+        .expect("should succeed once services resolve");
+
+        assert_eq!(write_char.uuid, protocol::OURA_WRITE);
+        assert_eq!(notify_chars.len(), 1);
+        assert!(*attempts.lock().unwrap() >= 3);
+    }
+
+    #[tokio::test]
+    async fn resolve_services_times_out_with_characteristic_not_found() {
+        let attempts = Arc::new(Mutex::new(0usize));
+        let attempts_disc = attempts.clone();
+
+        let err = resolve_oura_characteristics(
+            move || {
+                let attempts = attempts_disc.clone();
+                async move {
+                    let mut lock = attempts.lock().unwrap();
+                    *lock += 1;
+                    Ok::<(), &str>(())
+                }
+            },
+            BTreeSet::new,
+            Duration::from_millis(40),
+            Duration::from_millis(10),
+        )
+        .await
+        .expect_err("should fail when services never resolve");
+
+        match err {
+            Error::CharacteristicNotFound(uuid_str) => {
+                assert_eq!(uuid_str, protocol::OURA_WRITE.to_string());
+            }
+            other => panic!("expected CharacteristicNotFound, got {other:?}"),
+        }
+
+        assert!(*attempts.lock().unwrap() > 1);
+    }
+
+    #[tokio::test]
+    async fn resolve_services_immediate_success() {
+        let attempts = Arc::new(Mutex::new(0usize));
+        let attempts_disc = attempts.clone();
+
+        let (write_char, _) = resolve_oura_characteristics(
+            move || {
+                let attempts = attempts_disc.clone();
+                async move {
+                    let mut lock = attempts.lock().unwrap();
+                    *lock += 1;
+                    Ok::<(), &str>(())
+                }
+            },
+            || {
+                let mut set = BTreeSet::new();
+                set.insert(mock_characteristic(
+                    protocol::OURA_WRITE,
+                    protocol::OURA_SERVICE,
+                    CharPropFlags::WRITE,
+                ));
+                set
+            },
+            Duration::from_millis(100),
+            Duration::from_millis(10),
+        )
+        .await
+        .expect("immediate resolution should succeed");
+
+        assert_eq!(write_char.uuid, protocol::OURA_WRITE);
+        assert_eq!(*attempts.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn resolve_services_recovers_from_transient_discovery_error() {
+        let attempts = Arc::new(Mutex::new(0usize));
+        let attempts_disc = attempts.clone();
+        let attempts_chars = attempts.clone();
+
+        let (write_char, _) = resolve_oura_characteristics(
+            move || {
+                let attempts = attempts_disc.clone();
+                async move {
+                    let mut lock = attempts.lock().unwrap();
+                    *lock += 1;
+                    if *lock == 1 {
+                        Err("transient BlueZ D-Bus error")
+                    } else {
+                        Ok(())
+                    }
+                }
+            },
+            move || {
+                let lock = attempts_chars.lock().unwrap();
+                if *lock >= 2 {
+                    let mut set = BTreeSet::new();
+                    set.insert(mock_characteristic(
+                        protocol::OURA_WRITE,
+                        protocol::OURA_SERVICE,
+                        CharPropFlags::WRITE,
+                    ));
+                    set
+                } else {
+                    BTreeSet::new()
+                }
+            },
+            Duration::from_millis(200),
+            Duration::from_millis(10),
+        )
+        .await
+        .expect("should recover from transient error");
+
+        assert_eq!(write_char.uuid, protocol::OURA_WRITE);
     }
 }

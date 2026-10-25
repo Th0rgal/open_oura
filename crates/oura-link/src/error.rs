@@ -27,3 +27,25 @@ impl From<btleplug::Error> for Error {
         Error::Ble(e.to_string())
     }
 }
+
+impl Error {
+    /// Whether this error represents a connection or service discovery condition
+    /// that is potentially retryable.
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, Error::ConnectTimeout | Error::CharacteristicNotFound(_))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retryable_errors() {
+        assert!(Error::ConnectTimeout.is_retryable());
+        assert!(Error::CharacteristicNotFound("dummy".into()).is_retryable());
+        assert!(!Error::DeviceNotFound.is_retryable());
+        assert!(!Error::Auth("bad key".into()).is_retryable());
+    }
+}
+
