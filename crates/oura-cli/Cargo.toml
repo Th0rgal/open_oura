@@ -14,7 +14,7 @@ path = "src/main.rs"
 oura-protocol = { path = "../oura-protocol" }
 oura-link = { path = "../oura-link" }
 oura-store = { path = "../oura-store" }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 hex = "0.4"
