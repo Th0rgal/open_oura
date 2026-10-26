@@ -12,12 +12,12 @@ def aligned_stages(timestamps_ms, stages, start_ms, end_ms):
     # SleepNet stamps each epoch with its END time: the first output is start+30 s and
     # the last lands on (or just past) the bedtime end. Epoch k covers (t-30 s, t], so
     # a window that is not a whole number of epochs keeps its final partial epoch.
+    # The stamps jitter by a millisecond (30001/29999 ms gaps), so snap each one to the
+    # nearest epoch end: flooring shifted the rest of the night by a cell and left a hole.
     result = [0] * max(1, -(-(end_ms - start_ms) // 30000))
     for timestamp, code in zip(timestamps_ms, stages):
-        if timestamp <= start_ms:
-            continue
-        index = int((timestamp - start_ms - 1) // 30000)
-        if index < len(result):
+        index = int((timestamp - start_ms + 15000) // 30000) - 1
+        if 0 <= index < len(result):
             result[index] = code
     return result
 

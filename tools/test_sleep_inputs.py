@@ -13,6 +13,11 @@ class SleepInputTests(unittest.TestCase):
         self.assertEqual(aligned_stages([30000, 60000, 90000, 120000], [1, 2, 3, 4], 0, 120000), [1, 2, 3, 4])
         self.assertEqual(aligned_stages([30000, 60000, 90000, 120000], [1, 2, 3, 4], 0, 100000), [1, 2, 3, 4])
 
+    def test_millisecond_jitter_does_not_shift_epochs(self):
+        # real SleepNet gaps of 30001 then 29999 ms: no hole, no dropped last epoch
+        self.assertEqual(aligned_stages([30000, 60001, 90001, 120000], [1, 2, 3, 4], 0, 120000), [1, 2, 3, 4])
+        self.assertEqual(aligned_stages([29999, 59998, 90000, 120000], [1, 2, 3, 4], 0, 120000), [1, 2, 3, 4])
+
     def test_bad_outputs_fail_instead_of_inventing_stages(self):
         for ts, codes in [([0], [1, 2]), ([30000, 0], [1, 2]), ([0], [8])]:
             with self.assertRaises(ValueError):
