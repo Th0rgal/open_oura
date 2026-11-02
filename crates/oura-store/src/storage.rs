@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS device (
     firmware      TEXT,
     api_version   TEXT,
     mac           TEXT,
-    updated_unix  INTEGER NOT NULL
+    updated_unix  INTEGER NOT NULL,
+    product_code  BLOB
 );
 
 CREATE TABLE IF NOT EXISTS sync_state (
@@ -140,6 +141,14 @@ impl Store {
         }
         conn.execute_batch("PRAGMA synchronous=FULL;")?;
         conn.execute_batch(SCHEMA)?;
+        let has_product_code: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('device') WHERE name = 'product_code'",
+            [],
+            |r| r.get(0),
+        )?;
+        if !has_product_code {
+            conn.execute_batch("ALTER TABLE device ADD COLUMN product_code BLOB;")?;
+        }
         let store = Self { conn };
         store.ensure_decoder_version()?;
         Ok(store)
@@ -244,6 +253,14 @@ impl Store {
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
+        let has_product_code: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('device') WHERE name = 'product_code'",
+            [],
+            |r| r.get(0),
+        )?;
+        if !has_product_code {
+            conn.execute_batch("ALTER TABLE device ADD COLUMN product_code BLOB;")?;
+        }
         let store = Self { conn };
         store.ensure_decoder_version()?;
         Ok(store)
@@ -275,6 +292,28 @@ impl Store {
             ],
         )?;
         Ok(())
+    }
+
+    /// Store the ring's product code (design, size and color bytes).
+    pub fn set_product_code(&self, serial: &str, code: &[u8]) -> Result<()> {
+        self.conn.execute(
+            "UPDATE device SET product_code = ?2 WHERE serial = ?1",
+            params![serial, code],
+        )?;
+        Ok(())
+    }
+
+    /// The stored product code, if the ring reported one.
+    pub fn product_code(&self, serial: &str) -> Result<Option<Vec<u8>>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT product_code FROM device WHERE serial = ?1",
+                [serial],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten())
     }
 
     /// Device identity + last-sync for display: the most-recently-updated device

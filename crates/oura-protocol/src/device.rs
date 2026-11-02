@@ -83,6 +83,144 @@ pub fn parse_product_ascii(packet: &Packet) -> Option<String> {
     }
 }
 
+/// A product code response (tag `0x19`): a status byte then the code bytes.
+pub fn parse_product_code(packet: &Packet) -> Option<Vec<u8>> {
+    match packet.payload.split_first() {
+        Some((0, code)) if packet.tag == 0x19 && !code.is_empty() => Some(code.to_vec()),
+        _ => None,
+    }
+}
+
+/// Ring model, color and size decoded from the hardware id and product code.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RingIdentity {
+    pub model: &'static str,
+    pub color: Option<&'static str>,
+    pub size: Option<u8>,
+}
+
+#[derive(Clone, Copy)]
+enum Hardware {
+    Gen3,
+    Gen4,
+    Ring5,
+    Proto,
+    Older,
+}
+
+/// Decode a 9-byte product code: design at 0, size at 4, color at 8.
+pub fn ring_identity(hardware_id: &str, product_code: &[u8]) -> Option<RingIdentity> {
+    const PREFIXES: &[(&str, Hardware)] = &[
+        ("GPS_", Hardware::Older),
+        ("BLB_", Hardware::Gen3),
+        ("KTH_", Hardware::Gen4),
+        ("ORE_", Hardware::Gen4),
+        ("JAD_", Hardware::Gen4),
+        ("COR_", Hardware::Ring5),
+        ("BEM_", Hardware::Proto),
+        ("BEN_", Hardware::Proto),
+        ("AST_", Hardware::Proto),
+        ("FLR_", Hardware::Proto),
+        ("AMR_", Hardware::Proto),
+        ("PRC_", Hardware::Older),
+        ("NMC_", Hardware::Older),
+        ("SMB_", Hardware::Older),
+    ];
+    let hardware = PREFIXES
+        .iter()
+        .find(|(prefix, _)| hardware_id.starts_with(prefix))?
+        .1;
+    if product_code.len() < 9 {
+        return None;
+    }
+    let (design_code, color_code) = (product_code[0], product_code[8]);
+    let generic_model = "Oura Ring";
+    let model = match hardware {
+        Hardware::Gen3 => match design_code {
+            1 => "Heritage",
+            2 => "Balance",
+            3 => "Balance Diamond",
+            5 => "Gucci x Oura Ring",
+            6 => "Horizon",
+            8 => "Oura Ring 4",
+            9 => "Oura Ring 4 Ceramic",
+            10 => "Oura Ring 5",
+            _ => generic_model,
+        },
+        Hardware::Gen4 => match design_code {
+            1 => "Oura Ring 4",
+            2 => "Oura Ring 4 Ceramic",
+            _ => generic_model,
+        },
+        Hardware::Ring5 => match design_code {
+            1 => "Oura Ring 5",
+            _ => generic_model,
+        },
+        Hardware::Proto => generic_model,
+        Hardware::Older if color_code == 5 => "Balance Diamond",
+        Hardware::Older => match design_code {
+            1 => "Balance",
+            2 => "Heritage",
+            _ => generic_model,
+        },
+    };
+    let color = match hardware {
+        Hardware::Gen3 => match color_code {
+            1 => Some("Arctic White"),
+            2 | 9 => Some("Black"),
+            3 => Some("Stealth"),
+            4 => Some("Rose Gold"),
+            5 => Some("Silver"),
+            6 => Some("Brushed Titanium"),
+            7 => Some("Gold"),
+            12 => Some("Brushed Silver"),
+            13 => Some("Midnight"),
+            14 => Some("Petal"),
+            15 => Some("Tide"),
+            16 => Some("Cloud"),
+            17 => Some("Light Gold"),
+            18 => Some("Deep Rose"),
+            _ => None,
+        },
+        Hardware::Gen4 => match color_code {
+            1 => Some("Silver"),
+            2 => Some("Gold"),
+            3 => Some("Rose Gold"),
+            4 => Some("Black"),
+            5 => Some("Stealth"),
+            6 => Some("Brushed Silver"),
+            7 => Some("Midnight"),
+            8 => Some("Petal"),
+            9 => Some("Tide"),
+            10 => Some("Cloud"),
+            _ => None,
+        },
+        Hardware::Ring5 => match color_code {
+            1 => Some("Silver"),
+            2 => Some("Gold"),
+            3 => Some("Deep Rose"),
+            4 => Some("Black"),
+            5 => Some("Stealth"),
+            6 => Some("Brushed Silver"),
+            _ => None,
+        },
+        Hardware::Proto => None,
+        Hardware::Older => match color_code {
+            1 => Some("Black"),
+            2 => Some("Stealth"),
+            3 | 5 => Some("Silver"),
+            4 => Some("Rose Gold"),
+            6 => Some("Gold"),
+            _ => None,
+        },
+    };
+    Some(RingIdentity {
+        model,
+        color,
+        size: (product_code[4] > 0).then_some(product_code[4]),
+    })
+}
+
 /// A single `(feature, value)` pair from a capabilities page.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Capability {
@@ -131,5 +269,28 @@ mod tests {
         let p = Packet::parse(&hex::decode("191100585858585858585858585858").unwrap()).unwrap();
         // status 0x00 then ASCII "XXXXXXXXXXXX" (real serial scrubbed; see local/device-identifiers.md)
         assert_eq!(parse_product_ascii(&p).as_deref(), Some("XXXXXXXXXXXX"));
+    }
+
+    #[test]
+    fn decodes_ring_identity() {
+        let product_code = |design, size, color| [design, 0, 0, 0, size, 0, 0, 0, color];
+        assert_eq!(
+            ring_identity("BLB_03", &product_code(6, 9, 3)),
+            Some(RingIdentity {
+                model: "Horizon",
+                color: Some("Stealth"),
+                size: Some(9)
+            })
+        );
+        assert_eq!(
+            ring_identity("JAD_01", &product_code(2, 8, 9)).map(|r| (r.model, r.color)),
+            Some(("Oura Ring 4 Ceramic", Some("Tide")))
+        );
+        assert_eq!(
+            ring_identity("GPS_02", &product_code(1, 7, 5)).map(|r| r.model),
+            Some("Balance Diamond")
+        );
+        assert_eq!(ring_identity("XYZ_1", &product_code(1, 9, 1)), None);
+        assert_eq!(ring_identity("BLB_03", &[6, 0]), None);
     }
 }
