@@ -83,6 +83,54 @@ pub fn parse_product_ascii(packet: &Packet) -> Option<String> {
     }
 }
 
+/// An unsolicited notification (tag `0x1f`), enabled with `req_set_notification`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum RingPush {
+    /// `state`: 0 older firmware, 1 low, 2 critical, 4 hibernate, 5 reset.
+    LowBattery {
+        percent: u8,
+        state: u8,
+        hours_left: f64,
+    },
+    /// `companion` is set when another device handles the alert.
+    ChargingComplete {
+        companion: bool,
+    },
+    SyncRequested,
+    Other(u16),
+}
+
+impl RingPush {
+    /// Payload: event id low byte, two status bytes, id high byte when longer than
+    /// 3, then the event's data.
+    pub fn parse(packet: &Packet) -> Option<RingPush> {
+        let payload = &packet.payload;
+        if packet.tag != 0x1f {
+            return None;
+        }
+        let (id, event_data): (u16, &[u8]) = match payload.len() {
+            1 | 3 => (payload[0].into(), &[]),
+            4..=18 => (
+                u16::from(payload[0]) | (u16::from(payload[3]) << 8),
+                &payload[4..],
+            ),
+            _ => return None,
+        };
+        Some(match id {
+            1 if event_data.len() >= 3 => RingPush::LowBattery {
+                percent: event_data[0],
+                state: event_data[1],
+                hours_left: f64::from(event_data[2]) / 2.0,
+            },
+            2 => RingPush::ChargingComplete {
+                companion: event_data.first() == Some(&1),
+            },
+            8 => RingPush::SyncRequested,
+            _ => RingPush::Other(id),
+        })
+    }
+}
+
 /// A single `(feature, value)` pair from a capabilities page.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Capability {
@@ -131,5 +179,25 @@ mod tests {
         let p = Packet::parse(&hex::decode("191100585858585858585858585858").unwrap()).unwrap();
         // status 0x00 then ASCII "XXXXXXXXXXXX" (real serial scrubbed; see local/device-identifiers.md)
         assert_eq!(parse_product_ascii(&p).as_deref(), Some("XXXXXXXXXXXX"));
+    }
+
+    #[test]
+    fn parses_ring_pushes() {
+        let parse_push = |frame: &[u8]| RingPush::parse(&Packet::parse(frame).unwrap());
+        assert_eq!(
+            parse_push(&[0x1f, 7, 1, 0, 0, 0, 18, 1, 9]),
+            Some(RingPush::LowBattery {
+                percent: 18,
+                state: 1,
+                hours_left: 4.5
+            })
+        );
+        assert_eq!(
+            parse_push(&[0x1f, 5, 2, 0, 0, 0, 1]),
+            Some(RingPush::ChargingComplete { companion: true })
+        );
+        assert_eq!(parse_push(&[0x1f, 1, 8]), Some(RingPush::SyncRequested));
+        assert_eq!(parse_push(&[0x1f, 1, 32]), Some(RingPush::Other(32)));
+        assert_eq!(parse_push(&[0x2f, 1, 8]), None);
     }
 }
