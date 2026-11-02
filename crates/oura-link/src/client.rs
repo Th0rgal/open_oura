@@ -254,6 +254,14 @@ impl<T: Transport> OuraClient<T> {
             .ok_or_else(|| Error::Protocol("no hardware response".into()))
     }
 
+    /// Read the product code (design, size and color bytes).
+    pub async fn product_code(&self) -> Result<Vec<u8>> {
+        let packets = self.request_tag(&protocol::product::CODE, 0x19).await?;
+        Self::find(&packets, 0x19)
+            .and_then(device::parse_product_code)
+            .ok_or_else(|| Error::Protocol("no product code response".into()))
+    }
+
     /// Read both capability pages.
     pub async fn capabilities(&self) -> Result<Vec<Capability>> {
         let mut caps = Vec::new();
